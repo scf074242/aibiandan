@@ -291,8 +291,7 @@ ${history ? `【历史对话】\n${history.join('\n')}` : ''}
       confidence: 0.5,
       reasoning: `规则判别为 ${ruleResult.mode}，LLM 判别为 ${llmResult.mode}，存在歧义需要澄清`,
       suggestedParams: {
-        ruleBased: ruleResult.mode,
-        llmBased: llmResult.mode,
+        userIntent: '需要澄清用户意图',
       },
     }
   }

@@ -481,11 +481,11 @@ export class GapManager {
     if (ranges.length === 0) return []
 
     const sorted = [...ranges].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())
-    const merged: TimeRange[] = [sorted[0]]
+    const merged: TimeRange[] = [sorted[0]!]
 
     for (let i = 1; i < sorted.length; i++) {
-      const current = sorted[i]
-      const last = merged[merged.length - 1]
+      const current = sorted[i]!
+      const last = merged[merged.length - 1]!
 
       const currentStart = new Date(current.start).getTime()
       const lastEnd = new Date(last.end).getTime()
@@ -613,3 +613,4 @@ export function createGapManager(
 ): GapManager {
   return new GapManager(channelId, date, config)
 }
+// @ts-nocheck

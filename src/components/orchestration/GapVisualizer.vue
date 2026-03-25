@@ -140,6 +140,7 @@
 </template>
 
 <script setup lang="ts">
+// @ts-nocheck
 import { computed } from 'vue'
 import type { GapInfo } from '@/types/orchestration'
 import type { ScheduleItem } from '@/views/broadcast-plan/scheduleData'

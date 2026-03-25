@@ -541,3 +541,5 @@ export function getPromptBuilder(): PromptBuilder {
 export function resetPromptBuilder(): void {
   globalPromptBuilder = null
 }
+
+export const promptBuilder = getPromptBuilder()

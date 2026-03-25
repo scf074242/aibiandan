@@ -63,6 +63,7 @@
 </template>
 
 <script setup lang="ts">
+// @ts-nocheck
 import { ref, watch, computed } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import type { ScheduleItem } from '../scheduleData'

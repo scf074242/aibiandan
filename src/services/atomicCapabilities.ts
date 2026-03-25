@@ -325,7 +325,7 @@ export class AtomicCapabilities {
       const duration = item.duration
       const newStartMs = new Date(newStartTime).getTime()
       const newEndMs = newStartMs + duration * 1000
-      const newEndTime = new Date(newEndMs).toISOString()
+      const newEndTime = this.formatLocalDateTime(newEndMs)
 
       // 更新条目
       const updatedItem: ScheduleItemSnapshot = {
@@ -553,6 +553,7 @@ export class AtomicCapabilities {
     for (const item of items) {
       this.items.set(item.id, { ...item })
     }
+    this.normalizeSequences()
   }
 
   /**
@@ -560,6 +561,30 @@ export class AtomicCapabilities {
    */
   exportItems(): ScheduleItemSnapshot[] {
     return this.getAllItems()
+  }
+
+  private normalizeSequences(): void {
+    const sorted = Array.from(this.items.values()).sort(
+      (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime(),
+    )
+
+    sorted.forEach((item, index) => {
+      this.items.set(item.id, {
+        ...item,
+        sequence: index + 1,
+      })
+    })
+  }
+
+  private formatLocalDateTime(timestampMs: number): string {
+    const date = new Date(timestampMs)
+    const year = date.getFullYear()
+    const month = `${date.getMonth() + 1}`.padStart(2, '0')
+    const day = `${date.getDate()}`.padStart(2, '0')
+    const hours = `${date.getHours()}`.padStart(2, '0')
+    const minutes = `${date.getMinutes()}`.padStart(2, '0')
+    const seconds = `${date.getSeconds()}`.padStart(2, '0')
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
   }
 }
 

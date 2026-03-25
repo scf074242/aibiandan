@@ -201,7 +201,7 @@ export class Materializer {
     // 计算结束时间（基于节目时长）
     const startTimeMs = new Date(startTime).getTime()
     const endTimeMs = startTimeMs + candidate.duration * 1000
-    let endTime = new Date(endTimeMs).toISOString()
+    let endTime = this.formatLocalDateTime(endTimeMs)
 
     // 如果指定了强制结束时间
     if (options?.forceEndTime) {
@@ -377,7 +377,7 @@ export class Materializer {
   calculateEndTime(startTime: string, durationSeconds: number): string {
     const startTimeMs = new Date(startTime).getTime()
     const endTimeMs = startTimeMs + durationSeconds * 1000
-    return new Date(endTimeMs).toISOString()
+    return this.formatLocalDateTime(endTimeMs)
   }
 
   /**
@@ -443,6 +443,17 @@ export class Materializer {
     }
 
     return adjusted
+  }
+
+  private formatLocalDateTime(timestampMs: number): string {
+    const date = new Date(timestampMs)
+    const year = date.getFullYear()
+    const month = `${date.getMonth() + 1}`.padStart(2, '0')
+    const day = `${date.getDate()}`.padStart(2, '0')
+    const hours = `${date.getHours()}`.padStart(2, '0')
+    const minutes = `${date.getMinutes()}`.padStart(2, '0')
+    const seconds = `${date.getSeconds()}`.padStart(2, '0')
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
   }
 }
 

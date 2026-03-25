@@ -1,9 +1,7 @@
-/**
- * 播出单权限管理
- */
+export type BroadcastSection = 'recorded' | 'live' | 'ad'
 
-export interface BroadcastSection {
-  id: string
+export interface SectionPermission {
+  id: BroadcastSection
   name: string
   canEdit: boolean
   canDelete: boolean
@@ -15,11 +13,17 @@ export interface BroadcastPermission {
   canDelete: boolean
   canView: boolean
   canOrchestrate: boolean
-  sections: BroadcastSection[]
-  recorded?: boolean
-  live?: boolean
-  ad?: boolean
+  sections: SectionPermission[]
+  recorded: boolean
+  live: boolean
+  ad: boolean
 }
+
+const makeSections = (permission: Pick<BroadcastPermission, 'recorded' | 'live' | 'ad'>): SectionPermission[] => [
+  { id: 'recorded', name: '录播', canEdit: permission.recorded, canDelete: permission.recorded, canView: true },
+  { id: 'live', name: '直播', canEdit: permission.live, canDelete: permission.live, canView: true },
+  { id: 'ad', name: '广告', canEdit: permission.ad, canDelete: permission.ad, canView: true },
+]
 
 const broadcastPermissions: Record<string, BroadcastPermission> = {
   admin: {
@@ -27,45 +31,41 @@ const broadcastPermissions: Record<string, BroadcastPermission> = {
     canDelete: true,
     canView: true,
     canOrchestrate: true,
-    sections: [
-      { id: 'section-1', name: '全天时段', canEdit: true, canDelete: true, canView: true },
-    ],
+    recorded: true,
+    live: true,
+    ad: true,
+    sections: makeSections({ recorded: true, live: true, ad: true }),
   },
   editor: {
     canEdit: true,
     canDelete: false,
     canView: true,
     canOrchestrate: true,
-    sections: [
-      { id: 'section-1', name: '白天时段', canEdit: true, canDelete: false, canView: true },
-    ],
+    recorded: true,
+    live: true,
+    ad: true,
+    sections: makeSections({ recorded: true, live: true, ad: true }),
   },
   viewer: {
     canEdit: false,
     canDelete: false,
     canView: true,
     canOrchestrate: false,
-    sections: [],
+    recorded: false,
+    live: false,
+    ad: false,
+    sections: makeSections({ recorded: false, live: false, ad: false }),
   },
 }
 
-export function getBroadcastPlanPermission(role?: string): BroadcastPermission {
-  const userRole = role || 'editor'
-  return broadcastPermissions[userRole] || broadcastPermissions.viewer
+export function getBroadcastPlanPermission(role = 'editor'): BroadcastPermission {
+  return broadcastPermissions[role] ?? broadcastPermissions.viewer!
 }
 
-export function canEditSection(sectionId: string, permission: BroadcastPermission): boolean {
-  if (permission.canEdit) {
-    return true
-  }
-  const section = permission.sections.find((s) => s.id === sectionId)
-  return section?.canEdit || false
+export function canEditSection(sectionId: BroadcastSection, permission: BroadcastPermission): boolean {
+  return permission[sectionId] || permission.canEdit
 }
 
-export function canDeleteSection(sectionId: string, permission: BroadcastPermission): boolean {
-  if (permission.canDelete) {
-    return true
-  }
-  const section = permission.sections.find((s) => s.id === sectionId)
-  return section?.canDelete || false
+export function canDeleteSection(sectionId: BroadcastSection, permission: BroadcastPermission): boolean {
+  return permission[sectionId] && permission.canDelete
 }

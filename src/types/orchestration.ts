@@ -192,6 +192,8 @@ export interface CandidateQueryCriteria {
   targetTimeRange: { start: string; end: string }
   expectedDuration: { min: number; max: number }
   programTypePreference?: string[]
+  searchKeywords?: string[]
+  preferredChannelId?: string
   sequentialPreference: boolean
   excludeUsed: boolean
   considerRatings: boolean
@@ -241,9 +243,13 @@ export interface RepairCommand extends BaseCommand {
 export interface InsertCommand extends BaseCommand {
   action: 'insert'
   data: {
-    position: 'before' | 'after'
-    referenceItemId: string
     candidateId: string
+    position?: 'before' | 'after'
+    referenceItemId?: string
+    insertTime?: string
+    scheduleDate?: string
+    channelId?: string
+    candidateName?: string
   }
 }
 
@@ -614,4 +620,13 @@ export interface ExplanationResult {
   targetId: string
   explanation: string
   details?: Record<string, any>
+}
+
+export interface ValidationContext {
+  items: ScheduleItemSnapshot[]
+  gaps: GapInfo[]
+  fixedItems: FixedItem[]
+  layoutSlots: LayoutSlot[]
+  dayStartTime: string
+  dayEndTime: string
 }

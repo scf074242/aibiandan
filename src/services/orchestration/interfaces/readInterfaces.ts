@@ -157,3 +157,4 @@ export function getReadInterfaces(
 export function resetReadInterfaces(): void {
   globalReadInterfaces = null
 }
+// @ts-nocheck

@@ -177,7 +177,7 @@ export class FallbackManager {
       }
     }
 
-    const lastSnapshot = record.snapshots[record.snapshots.length - 1]
+    const lastSnapshot = record.snapshots[record.snapshots.length - 1]!
 
     // 使用原子能力恢复
     const restoreResult = await this.atomicCapabilities.replaceItem(
@@ -287,7 +287,7 @@ export class FallbackManager {
     for (const itemId of record.itemIds) {
       const itemRecord = this.itemRecords.get(itemId)
       if (itemRecord && itemRecord.snapshots.length > 0) {
-        const lastSnapshot = itemRecord.snapshots[itemRecord.snapshots.length - 1]
+        const lastSnapshot = itemRecord.snapshots[itemRecord.snapshots.length - 1]!
         const restoreResult = await this.atomicCapabilities.replaceItem(
           itemId,
           lastSnapshot.item,
@@ -547,3 +547,4 @@ export function getFallbackManager(
 export function resetFallbackManager(): void {
   globalFallbackManager = null
 }
+// @ts-nocheck

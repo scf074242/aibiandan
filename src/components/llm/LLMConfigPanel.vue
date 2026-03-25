@@ -1,89 +1,46 @@
 <template>
   <div class="llm-config-panel">
-    <el-form
-      ref="formRef"
-      :model="config"
-      :rules="rules"
-      label-position="top"
-      class="config-form"
-    >
+    <el-form ref="formRef" :model="config" :rules="rules" label-position="top" class="config-form">
       <el-form-item label="API Key" prop="apiKey">
-        <el-input
-          v-model="config.apiKey"
-          type="password"
-          show-password
-          placeholder="请输入 Kimi API Key"
-        />
+        <el-input v-model="config.apiKey" type="password" show-password placeholder="请输入 SiliconFlow API Key" />
       </el-form-item>
 
       <el-form-item label="Base URL" prop="baseURL">
-        <el-input
-          v-model="config.baseURL"
-          placeholder="https://api.moonshot.cn/v1"
-        />
+        <el-input v-model="config.baseURL" placeholder="https://api.siliconflow.cn/v1" />
       </el-form-item>
 
       <el-form-item label="模型" prop="model">
         <el-select v-model="config.model" style="width: 100%">
-          <el-option label="Kimi K2.5" value="kimi-k2.5" />
-          <el-option label="Kimi K2.5 32K" value="kimi-k2.5-32k" />
+          <el-option label="DeepSeek V3.2 Exp" value="deepseek-ai/DeepSeek-V3.2-Exp" />
+          <el-option label="DeepSeek V3" value="deepseek-ai/DeepSeek-V3" />
+          <el-option label="DeepSeek R1" value="deepseek-ai/DeepSeek-R1" />
         </el-select>
       </el-form-item>
 
       <el-form-item label="Temperature" prop="temperature">
         <div class="slider-with-value">
-          <el-slider
-            v-model="config.temperature"
-            :min="0"
-            :max="2"
-            :step="0.1"
-            show-stops
-          />
+          <el-slider v-model="config.temperature" :min="0" :max="2" :step="0.1" show-stops />
           <span class="slider-value">{{ config.temperature }}</span>
         </div>
       </el-form-item>
 
       <el-form-item label="Max Tokens" prop="maxTokens">
-        <el-input-number
-          v-model="config.maxTokens"
-          :min="1"
-          :max="32768"
-          :step="1024"
-          style="width: 100%"
-        />
+        <el-input-number v-model="config.maxTokens" :min="1" :max="32768" :step="1024" style="width: 100%" />
       </el-form-item>
 
       <el-form-item label="Timeout (ms)" prop="timeout">
-        <el-input-number
-          v-model="config.timeout"
-          :min="5000"
-          :max="300000"
-          :step="5000"
-          style="width: 100%"
-        />
+        <el-input-number v-model="config.timeout" :min="5000" :max="300000" :step="5000" style="width: 100%" />
       </el-form-item>
     </el-form>
 
     <div class="config-actions">
-      <el-button
-        type="primary"
-        :loading="testing"
-        @click="testConnection"
-      >
-        测试连接
-      </el-button>
-      <el-button @click="saveConfig">保存配置</el-button>
-      <el-button @click="resetConfig">重置</el-button>
+      <el-button type="primary" :loading="testing" @click="testConnection">测试连接</el-button>
+      <el-button @click="saveConfigHandler">保存配置</el-button>
+      <el-button @click="resetConfigHandler">重置</el-button>
     </div>
 
-    <!-- 测试结果 -->
     <div v-if="testResult" class="test-result">
-      <el-alert
-        :title="testResult.message"
-        :type="testResult.success ? 'success' : 'error'"
-        :closable="false"
-        show-icon
-      />
+      <el-alert :title="testResult.message" :type="testResult.success ? 'success' : 'error'" :closable="false" show-icon />
     </div>
   </div>
 </template>
@@ -93,44 +50,32 @@ import { reactive, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import type { LLMConfig } from '@/types/llm'
-import { loadLLMConfig, saveLLMConfig, getDefaultConfig } from '@/services/llm/llmConfig'
+import { getDefaultConfig, loadLLMConfig, saveLLMConfig } from '@/services/llm/llmConfig'
 import { getLLMClient, resetLLMClient } from '@/services/llm/llmClient'
 
 const formRef = ref<FormInstance>()
 const testing = ref(false)
 const testResult = ref<{ success: boolean; message: string } | null>(null)
 
-// 配置表单
 const config = reactive<LLMConfig>({
-  baseURL: '',
+  baseURL: 'https://api.siliconflow.cn/v1',
   apiKey: '',
-  model: 'kimi-k2.5',
+  model: 'deepseek-ai/DeepSeek-V3.2-Exp',
   temperature: 0.3,
   maxTokens: 8192,
   timeout: 60000,
 })
 
-// 验证规则
 const rules: FormRules = {
-  apiKey: [
-    { required: true, message: '请输入 API Key', trigger: 'blur' },
-  ],
-  baseURL: [
-    { required: true, message: '请输入 Base URL', trigger: 'blur' },
-    { type: 'url', message: '请输入有效的 URL', trigger: 'blur' },
-  ],
-  model: [
-    { required: true, message: '请选择模型', trigger: 'change' },
-  ],
+  apiKey: [{ required: true, message: '请输入 API Key', trigger: 'blur' }],
+  baseURL: [{ required: true, message: '请输入 Base URL', trigger: 'blur' }],
+  model: [{ required: true, message: '请选择模型', trigger: 'change' }],
 }
 
-// 初始化
 onMounted(() => {
-  const savedConfig = loadLLMConfig()
-  Object.assign(config, savedConfig)
+  Object.assign(config, loadLLMConfig())
 })
 
-// 测试连接
 const testConnection = async () => {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
@@ -139,15 +84,13 @@ const testConnection = async () => {
   testResult.value = null
 
   try {
-    // 重置客户端以使用新配置
     resetLLMClient()
     const client = getLLMClient()
     client.updateConfig({ ...config })
-
     const success = await client.testConnection()
     testResult.value = {
       success,
-      message: success ? '连接成功！' : '连接失败，请检查配置',
+      message: success ? '连接成功，当前配置可用。' : '连接失败，请检查 API Key、Base URL 或模型名称。',
     }
   } catch (error) {
     testResult.value = {
@@ -159,22 +102,19 @@ const testConnection = async () => {
   }
 }
 
-// 保存配置
-const saveConfig = async () => {
+const saveConfigHandler = async () => {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
 
   saveLLMConfig({ ...config })
   resetLLMClient()
-  ElMessage.success('配置已保存')
+  ElMessage.success('LLM 配置已保存')
 }
 
-// 重置配置
-const resetConfig = () => {
-  const defaultConfig = getDefaultConfig()
-  Object.assign(config, defaultConfig)
+const resetConfigHandler = () => {
+  Object.assign(config, getDefaultConfig())
   testResult.value = null
-  ElMessage.info('已重置为默认配置')
+  ElMessage.info('已恢复默认配置')
 }
 </script>
 

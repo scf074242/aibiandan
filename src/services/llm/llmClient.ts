@@ -95,7 +95,7 @@ export class LLMClient {
             : undefined,
         }
       } catch (error) {
-        lastError = error as Error
+        lastError = this.normalizeError(error)
         console.warn(`LLM request failed (attempt ${attempt + 1}/${maxRetries}):`, error)
 
         // 指数退避
@@ -169,7 +169,7 @@ export class LLMClient {
       )
       return true
     } catch (error) {
-      console.error('LLM connection test failed:', error)
+      console.error('LLM connection test failed:', this.normalizeError(error))
       return false
     }
   }
@@ -205,6 +205,40 @@ export class LLMClient {
    */
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  /**
+   * 将底层 SDK / HTTP 错误转换为更适合界面展示的提示
+   */
+  private normalizeError(error: unknown): Error {
+    if (error instanceof Error) {
+      const maybeStatus = (error as Error & { status?: number; code?: string }).status
+      const maybeCode = (error as Error & { status?: number; code?: string }).code
+
+      if (maybeStatus === 401) {
+        return new Error('LLM 认证失败，请检查 API Key 是否正确。')
+      }
+
+      if (maybeStatus === 429) {
+        return new Error('LLM 请求过于频繁或额度不足，请稍后重试。')
+      }
+
+      if (maybeStatus === 400) {
+        return new Error(`LLM 请求参数无效：${error.message}`)
+      }
+
+      if (maybeStatus && maybeStatus >= 500) {
+        return new Error('LLM 服务暂时不可用，请稍后重试。')
+      }
+
+      if (maybeCode === 'ETIMEDOUT' || maybeCode === 'ECONNRESET') {
+        return new Error('LLM 网络请求超时，请检查网络或稍后重试。')
+      }
+
+      return error
+    }
+
+    return new Error('LLM 请求失败，请检查配置和网络连接。')
   }
 }
 

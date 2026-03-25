@@ -5,9 +5,9 @@ import type { LLMConfig } from '@/types/llm'
 
 // 默认配置
 const DEFAULT_CONFIG: LLMConfig = {
-  baseURL: 'https://api.moonshot.cn/v1',
+  baseURL: 'https://api.siliconflow.cn/v1',
   apiKey: '',
-  model: 'kimi-k2.5',
+  model: 'deepseek-ai/DeepSeek-V3.2-Exp',
   temperature: 0.3,
   maxTokens: 8192,
   timeout: 60000,

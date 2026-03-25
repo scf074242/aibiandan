@@ -27,8 +27,10 @@ import type {
   ProgramCandidate,
   GapInfo,
 } from '@/types/orchestration'
-import type { AtomicCapabilities, AtomicOperationResult } from './atomicCapabilities'
-import { getMaterializer, type MaterializeInput } from './materializer'
+import { getAtomicCapabilities, type AtomicCapabilities } from './atomicCapabilities'
+import { getMaterializer } from './materializer'
+import { getCandidateService } from './candidateService'
+import type { MaterializeInput } from '@/types/orchestration'
 
 /** 执行结果 */
 export interface ExecutionResult<T = any> {
@@ -195,6 +197,31 @@ export class CommandExecutor {
           }
           break
         }
+        case 'insert': {
+          const insertCmd = command as InsertCommand
+          if (!insertCmd.data.insertTime || !insertCmd.data.scheduleDate) {
+            warnings.push('插入命令缺少目标时间或日期')
+            break
+          }
+
+          const candidate = getCandidateService().getCandidateById(insertCmd.data.candidateId)
+          if (!candidate) {
+            warnings.push(`未找到候选节目 ${insertCmd.data.candidateId}`)
+            break
+          }
+
+          const normalizedTime = insertCmd.data.insertTime.length === 5
+            ? `${insertCmd.data.insertTime}:00`
+            : insertCmd.data.insertTime
+          const startTime = `${insertCmd.data.scheduleDate}T${normalizedTime}`
+          const endTime = this.calculateEndTime(startTime, candidate.duration)
+          affectedTimeRanges.push({ start: startTime, end: endTime })
+
+          if (!this.atomicCapabilities.isTimeRangeAvailable(startTime, endTime)) {
+            risks.push('目标时间段已被现有节目占用，当前演示版本仅支持插入到空闲时间段。')
+          }
+          break
+        }
       }
 
       return {
@@ -300,7 +327,7 @@ export class CommandExecutor {
       channelContext: {
         channelId: 'default',
         channelName: '默认频道',
-        date: new Date().toISOString().split('T')[0],
+        date: new Date().toISOString().split('T')[0] || '2026-03-25',
         timeZone: 'Asia/Shanghai',
         broadcastRules: {
           defaultStartTime: '06:00:00',
@@ -634,6 +661,10 @@ export class CommandExecutor {
   setValidationCallback(callback: (scope: 'item' | 'full') => Promise<ValidationReport>): void {
     this.onValidation = callback
   }
+
+  getScheduleItems(): ScheduleItemSnapshot[] {
+    return this.atomicCapabilities.getAllItems()
+  }
 }
 
 // 导出工厂函数
@@ -645,10 +676,11 @@ export function getCommandExecutor(
   onValidation?: (scope: 'item' | 'full') => Promise<ValidationReport>,
 ): CommandExecutor {
   if (!globalCommandExecutor) {
-    if (!atomicCapabilities) {
-      throw new Error('Atomic capabilities is required for first initialization')
-    }
-    globalCommandExecutor = new CommandExecutor(atomicCapabilities, config, onValidation)
+    globalCommandExecutor = new CommandExecutor(
+      atomicCapabilities ?? getAtomicCapabilities(),
+      config,
+      onValidation,
+    )
   }
   return globalCommandExecutor
 }

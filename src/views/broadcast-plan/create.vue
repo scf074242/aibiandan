@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="create-schedule-page">
     <!-- 顶部信息栏 -->
     <div class="page-header">
@@ -61,11 +61,11 @@
           </el-form-item>
           <el-form-item>
             <el-tag
-              :type="getStatusType(scheduleForm.status)"
+              :type="getStatusType(scheduleForm.status || '')"
               effect="light"
               size="large"
             >
-              {{ getStatusText(scheduleForm.status) }}
+              {{ getStatusText(scheduleForm.status || '') }}
             </el-tag>
             <el-tag
               v-if="scheduleForm.isLocked"
@@ -336,10 +336,10 @@
                   <div class="item-cell status-cell">
                     <el-tag
                       v-if="shouldShowMaterialFields(item)"
-                      :type="getMaterialStatusType(item.materialStatus)"
+                      :type="getMaterialStatusType(item.materialStatus || '')"
                       size="small"
                     >
-                      {{ getMaterialStatusText(item.materialStatus) }}
+                      {{ getMaterialStatusText(item.materialStatus || '') }}
                     </el-tag>
                     <span v-else class="small-text">-</span>
                   </div>
@@ -390,28 +390,17 @@
           </el-button>
         </div>
         <div class="ai-sidebar-content">
-          <div class="ai-chat-placeholder">
-            <el-empty description="AI 助手功能开发中">
-              <template #image>
-                <el-icon :size="48" color="#409EFF"><ChatDotRound /></el-icon>
-              </template>
-              <p>输入需求，AI 将自动分析并编排节目单</p>
-              <el-input
-                v-model="aiUserInput"
-                type="textarea"
-                :rows="3"
-                placeholder="例如：帮我填充所有空窗时段"
-                style="margin-top: 16px;"
-              />
-              <el-button 
-                type="primary" 
-                style="margin-top: 12px;"
-                @click="handleAIUserInput"
-              >
-                发送
-              </el-button>
-            </el-empty>
-          </div>
+          <ChatPanel
+            :current-schedule="chatScheduleItems"
+            :channel-id="currentChannelId"
+            :channel-name="currentChannelName"
+            :date="scheduleDate"
+            :gap-count="timeDiscontinuityCount"
+            :orchestration-logs="orchestratorRuntime.recentLogs.value"
+            @command-executed="handleChatCommandExecuted"
+            @schedule-updated="handleChatScheduleUpdated"
+            @orchestrate-requested="handleChatOrchestrateRequested"
+          />
         </div>
       </div>
     </div>
@@ -429,10 +418,11 @@
       </div>
       <div class="progress-panel-content">
         <OrchestrationProgress
-          :progress="orchestrator.progress.value || {}"
-          :can-cancel="orchestrator.canCancel.value"
-          @cancel="orchestrator.cancel()"
-          @reset="orchestrator.reset()"
+          v-if="orchestratorRuntime.progress.value"
+          :progress="orchestratorRuntime.progress.value"
+          :can-cancel="orchestratorRuntime.canCancel.value"
+          @cancel="orchestratorRuntime.cancel()"
+          @reset="orchestratorRuntime.reset()"
         />
       </div>
     </div>
@@ -497,8 +487,11 @@ import { layoutReferenceData, type LayoutReferenceItem } from './layoutReference
 
 // AI 编排相关导入
 import { useOrchestrator } from '@/composables/useOrchestrator'
+import { getAtomicCapabilities } from '@/services/atomicCapabilities'
+import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
+import { getManualCommandAdapter } from '@/services/manualCommandAdapter'
+import ChatPanel from '@/components/dialogue/ChatPanel.vue'
 import OrchestrationProgress from '@/components/orchestration/OrchestrationProgress.vue'
-import type { ScheduleItem as LLMScheduleItem } from '@/types/llm'
 
 const route = useRoute()
 const router = useRouter()
@@ -514,6 +507,10 @@ const pageTitle = computed(() => {
 const isHeaderFieldsDisabled = computed(() => {
   return isViewMode.value || Boolean(route.params.id) || Boolean(scheduleForm.value.isLocked)
 })
+
+const scheduleDate = computed<string>(() => scheduleForm.value.date || new Date().toISOString().split('T')[0] || '')
+const currentChannelId = computed<string>(() => scheduleForm.value.channelId || 'news')
+const currentChannelName = computed<string>(() => scheduleForm.value.channelName || '新闻综合')
 
 // 频道选项
 const channelOptions = ref([
@@ -577,7 +574,7 @@ const canEditSection = (item: Pick<ScheduleItem, 'sourceType' | 'businessType'>)
   return Boolean(permission.value[section])
 }
 
-const currentStudioOptions = computed(() => getStudiosByChannelId(scheduleForm.value.channelId))
+const currentStudioOptions = computed(() => getStudiosByChannelId(currentChannelId.value))
 
 const shouldShowMaterialFields = (item: Pick<ScheduleItem, 'sourceType' | 'businessType'>) => {
   return item.sourceType === 'record' && (item.businessType === 'program' || item.businessType === 'ad')
@@ -594,7 +591,7 @@ const fillLiveStudios = () => {
   if (studios.length === 0) return
   scheduleItems.value.forEach((item, index) => {
     if (item.sourceType === 'live' && !item.studio) {
-      item.studio = studios[index % studios.length]
+      item.studio = studios[index % studios.length]?.name
     }
   })
 }
@@ -655,66 +652,148 @@ const editingItem = ref<ScheduleItem | null>(null)
 const saving = ref(false)
 
 // AI 编排相关状态
-const aiSidebarVisible = ref(false)
+const aiSidebarVisible = ref(true)
 const progressPanelVisible = ref(false)
 const aiUserInput = ref('')
 
-// 处理 AI 用户输入
-const handleAIUserInput = () => {
-  if (!aiUserInput.value.trim()) {
-    ElMessage.warning('请输入需求')
-    return
-  }
-  ElMessage.info('AI 分析中...')
-  // TODO: 调用 LLM 进行任务判别和编排
-  aiUserInput.value = ''
+const atomicCapabilities = getAtomicCapabilities()
+const scheduleCommandBus = getScheduleCommandBus()
+const manualCommandAdapter = getManualCommandAdapter()
+
+const syncPageItemsToAtomic = () => {
+  const date = scheduleForm.value.date || new Date().toISOString().split('T')[0]
+  atomicCapabilities.loadItems(
+    scheduleItems.value.map((item, index) => ({
+      id: item.id,
+      programCode: item.programCode || item.code18 || item.id,
+      programName: item.programName || item.episodeName || '未命名节目',
+      startTime: item.startTime.includes('T')
+        ? item.startTime
+        : `${date}T${item.startTime.length === 5 ? `${item.startTime}:00` : item.startTime}`,
+      endTime: item.endTime.includes('T')
+        ? item.endTime
+        : `${date}T${item.endTime.length === 5 ? `${item.endTime}:00` : item.endTime}`,
+      duration: Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime)),
+      programType: item.businessType === 'ad' ? 'ad' : item.sourceType === 'live' ? 'live' : 'program',
+      sequence: index + 1,
+    })),
+  )
 }
 
-// 使用编排组合式函数
-const orchestrator = useOrchestrator({
-  channelId: computed(() => scheduleForm.value.channelId || 'news').value,
-  channelName: computed(() => scheduleForm.value.channelName || '新闻综合').value,
-  date: computed(() => scheduleForm.value.date || new Date().toISOString().split('T')[0]).value,
-  startTime: '06:00:00',
-  endTime: '23:59:59',
-  onComplete: (session: any) => {
-    ElMessage.success('编排完成')
-    // 将编排结果转换为本地 ScheduleItem
-    if (session.result?.items) {
-      const newItems = session.result.items.map((item: any, index: number) => ({
-        ...item,
-        sortOrder: index,
-        sourceType: 'recorded' as const,
-        businessType: item.programType as 'recorded' | 'live' | 'ad',
-      }))
-      scheduleItems.value = [...scheduleItems.value, ...newItems]
-    }
-    progressPanelVisible.value = false
+const syncAtomicItemsToPage = () => {
+  const atomicItems = atomicCapabilities.getAllItems()
+  scheduleItems.value = atomicItems.map((item, index) => ({
+    id: item.id,
+    scheduleId: scheduleForm.value.id || '',
+    startTime: item.startTime.split('T')[1]?.slice(0, 8) || item.startTime,
+    endTime: item.endTime.split('T')[1]?.slice(0, 8) || item.endTime,
+    episodeName: item.programName,
+    programName: item.programName,
+    businessType: item.programType === 'ad' ? 'ad' : 'program',
+    sourceType: item.programType === 'live' ? 'live' : 'record',
+    sortOrder: index + 1,
+    duration: Math.max(1, Math.round(item.duration / 60)),
+    programCode: item.programCode,
+    code18: item.programCode,
+    materialStatus: 'ready',
+    materialName: `${item.programCode}-MAT`,
+    playLength: `${Math.max(1, Math.round(item.duration / 60))}分钟`,
+    relativeStart: item.startTime.split('T')[1]?.slice(0, 5) || '',
+    remark: '',
+  }))
+}
+
+const chatScheduleItems = computed(() =>
+  scheduleItems.value.map((item) => ({
+    id: item.id,
+    programCode: item.programCode || item.code18 || item.id,
+    programName: item.programName || item.episodeName || '未命名节目',
+    startTime: item.startTime,
+    endTime: item.endTime,
+    duration: Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime)),
+    programType: item.businessType === 'ad' ? 'ad' : item.sourceType === 'live' ? 'live' : 'program',
+  })),
+)
+
+const handleChatCommandExecuted = (result: { success: boolean; message: string }) => {
+  if (result.success) {
+    syncAtomicItemsToPage()
+  }
+}
+
+const handleChatScheduleUpdated = () => {
+  syncAtomicItemsToPage()
+}
+
+const handleChatOrchestrateRequested = async (payload: { userInput: string }) => {
+  aiUserInput.value = payload.userInput
+  await handleAICommand()
+}
+
+const orchestratorRuntime = useOrchestrator({
+  onComplete: () => {
+    syncAtomicItemsToPage()
+    ElMessage.success('AI 编排完成')
   },
   onError: (error: Error) => {
-    ElMessage.error('编排失败: ' + error.message)
+    ElMessage.error(`AI 编排失败: ${error.message}`)
   },
-  onProgress: (progress: any) => {
-    console.log('编排进度:', progress)
+  onProgress: () => {
+    syncAtomicItemsToPage()
   },
   onLog: (log: any) => {
     console.log('编排日志:', log.message || log)
   }
 })
 
-// 开始 AI 编排
-const startOrchestration = async () => {
+const startOrchestrationRuntime = async () => {
   try {
     progressPanelVisible.value = true
-    // 调用编排器的 start 方法（如果存在）
-    if (typeof (orchestrator as any).start === 'function') {
-      await (orchestrator as any).start()
-    } else {
-      ElMessage.warning('编排功能正在开发中')
-    }
+    await orchestratorRuntime.startFullGeneration(
+      currentChannelId.value,
+      scheduleDate.value,
+      '06:00:00',
+      '23:59:59',
+    )
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '编排失败')
+    ElMessage.error(error instanceof Error ? error.message : 'AI 编排失败')
   }
+}
+
+const handleAICommand = async () => {
+  const userInput = aiUserInput.value.trim()
+  if (!userInput) {
+    ElMessage.warning('请输入需求')
+    return
+  }
+
+  const date = scheduleDate.value
+  const task = await orchestratorRuntime.classifyTask(
+    {
+      channelId: currentChannelId.value,
+      channelName: currentChannelName.value,
+      date,
+      isEmpty: scheduleItems.value.length === 0,
+      itemCount: scheduleItems.value.length,
+      gapCount: timeDiscontinuityCount.value,
+      hasSelectedTimeRange: false,
+    },
+    userInput,
+  )
+
+  aiUserInput.value = ''
+  progressPanelVisible.value = true
+
+  if (task.mode === 'partial_generate' && scheduleItems.value.length > 0) {
+    syncPageItemsToAtomic()
+    await orchestratorRuntime.startPartialGeneration(
+      currentChannelId.value,
+      date,
+    )
+    return
+  }
+
+  await startOrchestrationRuntime()
 }
 
 // 显示/隐藏 AI 侧边栏
@@ -736,10 +815,10 @@ const sortedItems = computed(() => {
 })
 
 // 版面参考项（转换为ScheduleItem格式）
-const referenceItems = computed(() => {
-  const channelId = scheduleForm.value.channelId || 'news'
+const referenceItems = computed<ScheduleItem[]>(() => {
+  const channelId = currentChannelId.value
   const references = layoutReferenceData[channelId] || []
-  return references.map((ref, index) => ({
+  return references.map((ref, index): ScheduleItem => ({
     id: `ref-${index}`,
     scheduleId: '',
     startTime: `${ref.startTime}:00`,
@@ -752,14 +831,14 @@ const referenceItems = computed(() => {
     sourceType: ref.sourceType,
     remark: ref.remark || '',
     sortOrder: index,
-    duration: getTimeDiff(ref.startTime, ref.endTime),
+    duration: getTimeDiff(ref.startTime || '', ref.endTime || ''),
     isReference: true,
     code18: ref.code18 || ''
   }))
 })
 
 // 显示的项目（实际编排或版面参考）
-const displayItems = computed(() => {
+const displayItems = computed<ScheduleItem[]>(() => {
   if (showLayoutReference.value) {
     return referenceItems.value
   }
@@ -844,13 +923,13 @@ const openAddItemForGap = (gap: TimeDiscontinuity) => {
 // 最大排序号
 const maxSortOrder = computed(() => {
   if (scheduleItems.value.length === 0) return 0
-  return Math.max(...scheduleItems.value.map(item => item.sortOrder))
+  return Math.max(...scheduleItems.value.map(item => item.sortOrder || 0))
 })
 
 // 总时长文本
 const totalDurationText = computed(() => {
   const items = showLayoutReference.value ? referenceItems.value : scheduleItems.value
-  const total = items.reduce((sum, item) => sum + item.duration, 0)
+  const total = items.reduce((sum, item) => sum + (item.duration || 0), 0)
   const hours = Math.floor(total / 60)
   const minutes = total % 60
   if (hours > 0 && minutes > 0) {
@@ -966,40 +1045,76 @@ const handleDeleteItem = (item: ScheduleItem, index: number) => {
       cancelButtonText: '取消',
       type: 'warning'
     }
-  ).then(() => {
-    const i = scheduleItems.value.findIndex(v => v.id === item.id)
-    if (i > -1) {
-      scheduleItems.value.splice(i, 1)
+  ).then(async () => {
+    const result = await scheduleCommandBus.execute(
+      manualCommandAdapter.buildDeleteCommand(item),
+      {
+        scheduleDate: scheduleDate.value,
+        channelId: currentChannelId.value,
+      },
+    )
+
+    if (!result.success) {
+      ElMessage.error(result.error || result.message)
+      return
     }
-    ElMessage.success('节目已删除')
+
+    syncAtomicItemsToPage()
+    ElMessage.success(result.message)
   })
 }
 
-const handleMoveUp = (item: ScheduleItem, index: number) => {
+const handleMoveUp = async (item: ScheduleItem, index: number) => {
   const currentIndex = sortedItems.value.findIndex(v => v.id === item.id)
   if (currentIndex <= 0) return
   const prev = sortedItems.value[currentIndex - 1]
   const cur = sortedItems.value[currentIndex]
+  if (!prev || !cur) return
   const a = scheduleItems.value.find(v => v.id === cur.id)
   const b = scheduleItems.value.find(v => v.id === prev.id)
   if (!a || !b) return
-  const tmp = a.sortOrder
-  a.sortOrder = b.sortOrder
-  b.sortOrder = tmp
+
+  const result = await scheduleCommandBus.executeBatch(
+    manualCommandAdapter.buildSortSwapCommands(a.id, b.sortOrder || 0, b.id, a.sortOrder || 0),
+    {
+      scheduleDate: scheduleDate.value,
+      channelId: currentChannelId.value,
+    },
+  )
+
+  if (!result.success) {
+    ElMessage.error(result.error || result.message)
+    return
+  }
+
+  syncAtomicItemsToPage()
   ElMessage.success('已上移')
 }
 
-const handleMoveDown = (item: ScheduleItem, index: number) => {
+const handleMoveDown = async (item: ScheduleItem, index: number) => {
   const currentIndex = sortedItems.value.findIndex(v => v.id === item.id)
   if (currentIndex < 0 || currentIndex >= sortedItems.value.length - 1) return
   const next = sortedItems.value[currentIndex + 1]
   const cur = sortedItems.value[currentIndex]
+  if (!next || !cur) return
   const a = scheduleItems.value.find(v => v.id === cur.id)
   const b = scheduleItems.value.find(v => v.id === next.id)
   if (!a || !b) return
-  const tmp = a.sortOrder
-  a.sortOrder = b.sortOrder
-  b.sortOrder = tmp
+
+  const result = await scheduleCommandBus.executeBatch(
+    manualCommandAdapter.buildSortSwapCommands(a.id, b.sortOrder || 0, b.id, a.sortOrder || 0),
+    {
+      scheduleDate: scheduleDate.value,
+      channelId: currentChannelId.value,
+    },
+  )
+
+  if (!result.success) {
+    ElMessage.error(result.error || result.message)
+    return
+  }
+
+  syncAtomicItemsToPage()
   ElMessage.success('已下移')
 }
 
@@ -1007,22 +1122,71 @@ const handleMoveDown = (item: ScheduleItem, index: number) => {
  * 处理保存编单项
  * @param item - 编单项
  */
-const handleSaveItem = (item: ScheduleItem) => {
-  const index = scheduleItems.value.findIndex(i => i.id === item.id)
-  if (index > -1) {
-    // 更新
-    scheduleItems.value[index] = { ...item, scheduleId: scheduleForm.value.id || '' }
-  } else {
-    // 新增
-    scheduleItems.value.push({
-      ...item,
-      sortOrder: gapDialogDefaults.value?.sortOrder ?? item.sortOrder,
-      startTime: item.startTime || gapDialogDefaults.value?.startTime || item.startTime,
-      endTime: item.endTime || gapDialogDefaults.value?.endTime || item.endTime,
-      scheduleId: scheduleForm.value.id || ''
-    })
+const handleSaveItem = async (item: Partial<ScheduleItem>) => {
+  if (!item.id || !item.startTime || !item.endTime) {
+    ElMessage.error('节目数据不完整，无法保存')
+    return
   }
+
+  const normalizedItem: ScheduleItem = {
+    ...item,
+    id: item.id,
+    startTime: item.startTime,
+    endTime: item.endTime,
+  }
+  const commandContext: { scheduleDate: string; channelId: string } = {
+    scheduleDate: scheduleDate.value,
+    channelId: currentChannelId.value,
+  }
+  const currentIndex = scheduleItems.value.findIndex(i => i.id === normalizedItem.id)
+
+  if (currentIndex > -1) {
+    const currentItem = scheduleItems.value[currentIndex]
+    if (!currentItem) return
+    const commands = manualCommandAdapter.buildUpdateCommands(currentItem, normalizedItem, commandContext)
+    if (commands.length === 0) {
+      scheduleItems.value[currentIndex] = { ...normalizedItem, scheduleId: scheduleForm.value.id || '' }
+      gapDialogDefaults.value = null
+      return
+    }
+
+    const result = await scheduleCommandBus.executeBatch(commands, commandContext)
+    if (!result.success) {
+      ElMessage.error(result.error || result.message)
+      return
+    }
+
+    syncAtomicItemsToPage()
+    gapDialogDefaults.value = null
+    ElMessage.success(result.message)
+    return
+  }
+
+  const newItem = {
+    ...normalizedItem,
+    sortOrder: gapDialogDefaults.value?.sortOrder ?? normalizedItem.sortOrder,
+    startTime: normalizedItem.startTime || gapDialogDefaults.value?.startTime || normalizedItem.startTime,
+    endTime: normalizedItem.endTime || gapDialogDefaults.value?.endTime || normalizedItem.endTime,
+    scheduleId: scheduleForm.value.id || ''
+  }
+  const insertCommand = manualCommandAdapter.buildInsertCommand(newItem, commandContext)
+
+  if (!insertCommand) {
+    scheduleItems.value.push(newItem)
+    gapDialogDefaults.value = null
+    ElMessage.warning('当前新增节目还没有匹配到标准候选，先按本地草稿保存。')
+    return
+  }
+
+  const result = await scheduleCommandBus.execute(insertCommand, commandContext)
+  if (!result.success) {
+    ElMessage.error(result.error || result.message)
+    return
+  }
+
+  syncAtomicItemsToPage()
   gapDialogDefaults.value = null
+  ElMessage.success(result.message)
 }
 
 /**
@@ -1241,7 +1405,7 @@ onMounted(async () => {
       scheduleForm.value.status = 'draft'
       scheduleForm.value.isLocked = false
       scheduleItems.value = route.query.import === '1'
-        ? generateImportedScheduleItems(id, scheduleForm.value.date as string)
+        ? generateImportedScheduleItems()
         : []
       fillLiveStudios()
     }
@@ -1255,6 +1419,7 @@ onMounted(async () => {
   }
 
   window.addEventListener('resize', handleResize, { passive: true })
+  syncPageItemsToAtomic()
   updateScrollMetrics()
 })
 
@@ -1272,6 +1437,16 @@ watch(
   () => {
     updateScrollMetrics()
   }
+)
+
+watch(
+  () => scheduleItems.value,
+  () => {
+    if (!orchestratorRuntime.isRunning.value) {
+      syncPageItemsToAtomic()
+    }
+  },
+  { deep: true },
 )
 
 onBeforeUnmount(() => {
