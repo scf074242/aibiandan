@@ -1,0 +1,166 @@
+// Xnews 现代化设计系统变量
+// 采用橙色主题风格：深橙 + 亮橙组合
+
+:root {
+  // ============================================
+  // 主色调 - 橙色主题系（深橙 + 亮橙）
+  // ============================================
+  --xnews-color-primary: #F97316;
+  --xnews-color-primary-light: #FB923C;
+  --xnews-color-primary-dark: #EA580C;
+  --xnews-color-primary-gradient: linear-gradient(135deg, #F97316 0%, #FB923C 100%);
+  
+  // 功能色
+  --xnews-color-success: #10B981;
+  --xnews-color-success-light: #34D399;
+  --xnews-color-success-dark: #059669;
+  --xnews-color-warning: #F59E0B;
+  --xnews-color-warning-light: #FBBF24;
+  --xnews-color-warning-dark: #D97706;
+  --xnews-color-danger: #EF4444;
+  --xnews-color-danger-light: #F87171;
+  --xnews-color-danger-dark: #DC2626;
+  --xnews-color-info: #3B82F6;
+  --xnews-color-info-light: #60A5FA;
+  --xnews-color-info-dark: #2563EB;
+  
+  // ============================================
+  // 中性色 - 精致灰阶
+  // ============================================
+  --xnews-gray-50: #FFF7ED;
+  --xnews-gray-100: #FFEDD5;
+  --xnews-gray-200: #FED7AA;
+  --xnews-gray-300: #FDBA74;
+  --xnews-gray-400: #FB923C;
+  --xnews-gray-500: #F97316;
+  --xnews-gray-600: #EA580C;
+  --xnews-gray-700: #C2410C;
+  --xnews-gray-800: #9A3412;
+  --xnews-gray-900: #7C2D12;
+  
+  // 文字颜色
+  --xnews-text-primary: #1F2937;
+  --xnews-text-regular: #4B5563;
+  --xnews-text-secondary: #6B7280;
+  --xnews-text-tertiary: #9CA3AF;
+  --xnews-text-placeholder: #9CA3AF;
+  --xnews-text-disabled: #D1D5DB;
+  
+  // ============================================
+  // 背景色
+  // ============================================
+  --xnews-bg-color: #FFF7ED;
+  --xnews-bg-white: #FFFFFF;
+  --xnews-bg-elevated: #FFFFFF;
+  --xnews-bg-overlay: rgba(255, 255, 255, 0.95);
+  --xnews-bg-sidebar: linear-gradient(180deg, #FFF7ED 0%, #FFEDD5 100%);
+  
+  // ============================================
+  // 字体系统 - 现代无衬线
+  // ============================================
+  --xnews-font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --xnews-font-family-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  
+  // 字体大小
+  --xnews-font-size-2xs: 10px;
+  --xnews-font-size-xs: 12px;
+  --xnews-font-size-sm: 13px;
+  --xnews-font-size-base: 14px;
+  --xnews-font-size-md: 15px;
+  --xnews-font-size-lg: 16px;
+  --xnews-font-size-xl: 18px;
+  --xnews-font-size-2xl: 20px;
+  --xnews-font-size-3xl: 24px;
+  --xnews-font-size-4xl: 30px;
+  
+  // 字重
+  --xnews-font-weight-normal: 400;
+  --xnews-font-weight-medium: 500;
+  --xnews-font-weight-semibold: 600;
+  --xnews-font-weight-bold: 700;
+  
+  // 行高
+  --xnews-line-height-tight: 1.25;
+  --xnews-line-height-normal: 1.5;
+  --xnews-line-height-relaxed: 1.75;
+  
+  // ============================================
+  // 间距系统 - 8px 基准
+  // ============================================
+  --xnews-spacing-0: 0;
+  --xnews-spacing-1: 4px;
+  --xnews-spacing-2: 8px;
+  --xnews-spacing-3: 12px;
+  --xnews-spacing-4: 16px;
+  --xnews-spacing-5: 20px;
+  --xnews-spacing-6: 24px;
+  --xnews-spacing-8: 32px;
+  --xnews-spacing-10: 40px;
+  --xnews-spacing-12: 48px;
+  --xnews-spacing-16: 64px;
+  
+  // ============================================
+  // 圆角系统
+  // ============================================
+  --xnews-radius-none: 0;
+  --xnews-radius-sm: 4px;
+  --xnews-radius-md: 6px;
+  --xnews-radius-lg: 8px;
+  --xnews-radius-xl: 12px;
+  --xnews-radius-2xl: 16px;
+  --xnews-radius-3xl: 24px;
+  --xnews-radius-full: 9999px;
+  
+  // ============================================
+  // 阴影系统 - 柔和层级
+  // ============================================
+  --xnews-shadow-xs: 0 1px 2px 0 rgba(249, 115, 22, 0.05);
+  --xnews-shadow-sm: 0 1px 3px 0 rgba(249, 115, 22, 0.08), 0 1px 2px -1px rgba(249, 115, 22, 0.05);
+  --xnews-shadow-md: 0 4px 6px -1px rgba(249, 115, 22, 0.08), 0 2px 4px -2px rgba(249, 115, 22, 0.05);
+  --xnews-shadow-lg: 0 10px 15px -3px rgba(249, 115, 22, 0.08), 0 4px 6px -4px rgba(249, 115, 22, 0.05);
+  --xnews-shadow-xl: 0 20px 25px -5px rgba(249, 115, 22, 0.08), 0 8px 10px -6px rgba(249, 115, 22, 0.05);
+  --xnews-shadow-2xl: 0 25px 50px -12px rgba(249, 115, 22, 0.15);
+  --xnews-shadow-inner: inset 0 2px 4px 0 rgba(249, 115, 22, 0.03);
+  
+  // 彩色阴影
+  --xnews-shadow-primary: 0 4px 14px 0 rgba(249, 115, 22, 0.35);
+  --xnews-shadow-success: 0 4px 14px 0 rgba(16, 185, 129, 0.35);
+  --xnews-shadow-warning: 0 4px 14px 0 rgba(245, 158, 11, 0.35);
+  --xnews-shadow-danger: 0 4px 14px 0 rgba(239, 68, 68, 0.35);
+  
+  // ============================================
+  // 边框
+  // ============================================
+  --xnews-border-color: #FED7AA;
+  --xnews-border-color-light: #FFEDD5;
+  --xnews-border-color-dark: #FDBA74;
+  --xnews-border-width: 1px;
+  --xnews-border-style: solid;
+  
+  // ============================================
+  // 过渡动画
+  // ============================================
+  --xnews-transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --xnews-transition-normal: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  --xnews-transition-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+  --xnews-transition-bounce: 500ms cubic-bezier(0.68, -0.55, 0.265, 1.55);
+  
+  // ============================================
+  // Z-index 层级
+  // ============================================
+  --xnews-z-dropdown: 1000;
+  --xnews-z-sticky: 1020;
+  --xnews-z-fixed: 1030;
+  --xnews-z-modal-backdrop: 1040;
+  --xnews-z-modal: 1050;
+  --xnews-z-popover: 1060;
+  --xnews-z-tooltip: 1070;
+  
+  // ============================================
+  // 布局尺寸
+  // ============================================
+  --xnews-sidebar-width: 260px;
+  --xnews-sidebar-collapsed-width: 72px;
+  --xnews-header-height: 72px;
+  --xnews-content-max-width: 1440px;
+}
