@@ -1,30 +1,52 @@
 <template>
   <div class="orchestration-progress">
-    <div class="progress-header">
-      <div>
-        <div class="progress-title">
-          <span class="phase-badge">{{ currentPhaseText }}</span>
-          <span class="progress-percentage">{{ progressPercentage }}%</span>
+    <div class="progress-hero">
+      <div class="progress-header">
+        <div class="progress-overview">
+          <div class="progress-title">
+            <span class="phase-badge">{{ currentPhaseText }}</span>
+            <span class="progress-percentage">{{ progressPercentage }}%</span>
+          </div>
+          <p class="progress-subtitle">{{ currentActionText }}</p>
         </div>
-        <el-progress :percentage="progressPercentage" :status="progressStatus" :stroke-width="14" />
+        <div class="progress-actions">
+          <el-button v-if="canCancel && !isTerminal" type="danger" size="small" @click="$emit('cancel')">
+            取消
+          </el-button>
+          <el-button v-else size="small" @click="$emit('reset')">重置</el-button>
+        </div>
       </div>
-      <div class="progress-actions">
-        <el-button v-if="canCancel && !isTerminal" type="danger" size="small" @click="$emit('cancel')">取消</el-button>
-        <el-button v-else size="small" @click="$emit('reset')">重置</el-button>
-      </div>
+
+      <el-progress :percentage="progressPercentage" :status="progressStatus" :stroke-width="14" />
     </div>
 
     <div class="progress-stats">
-      <el-tag size="small" type="info">总空窗 {{ progress.gapProgress.total }}</el-tag>
-      <el-tag size="small" type="warning">待处理 {{ progress.gapProgress.pending }}</el-tag>
-      <el-tag size="small" type="primary">处理中 {{ progress.gapProgress.processing }}</el-tag>
-      <el-tag size="small" type="success">已完成 {{ progress.gapProgress.completed }}</el-tag>
-      <el-tag v-if="progress.gapProgress.failed" size="small" type="danger">失败 {{ progress.gapProgress.failed }}</el-tag>
+      <div class="stat-pill">
+        <span class="stat-label">总空窗</span>
+        <strong>{{ progress.gapProgress.total }}</strong>
+      </div>
+      <div class="stat-pill">
+        <span class="stat-label">待处理</span>
+        <strong>{{ progress.gapProgress.pending }}</strong>
+      </div>
+      <div class="stat-pill">
+        <span class="stat-label">处理中</span>
+        <strong>{{ progress.gapProgress.processing }}</strong>
+      </div>
+      <div class="stat-pill is-success">
+        <span class="stat-label">已完成</span>
+        <strong>{{ progress.gapProgress.completed }}</strong>
+      </div>
+      <div v-if="progress.gapProgress.failed" class="stat-pill is-danger">
+        <span class="stat-label">失败</span>
+        <strong>{{ progress.gapProgress.failed }}</strong>
+      </div>
     </div>
 
     <div v-if="progress.currentGap" class="current-gap">
-      <div>当前空窗：{{ progress.currentGap.startTime }} - {{ progress.currentGap.endTime }}</div>
-      <div>{{ progress.currentAction }}</div>
+      <div class="current-gap-label">当前处理空窗</div>
+      <div class="current-gap-range">{{ progress.currentGap.startTime }} - {{ progress.currentGap.endTime }}</div>
+      <div class="current-gap-action">{{ progress.currentAction }}</div>
     </div>
 
     <div class="logs-section">
@@ -34,7 +56,7 @@
           <span class="log-time">{{ formatLogTime(log.timestamp) }}</span>
           <span class="log-message">{{ log.message }}</span>
         </div>
-        <div v-if="progress.recentLogs.length === 0" class="logs-empty">暂无日志</div>
+        <div v-if="progress.recentLogs.length === 0" class="logs-empty">暂时没有日志</div>
       </div>
     </div>
   </div>
@@ -76,6 +98,14 @@ const currentPhaseText = computed(() => {
   return mapping[props.progress.status] ?? props.progress.currentPhase
 })
 
+const currentActionText = computed(() => {
+  if (props.progress.currentAction) return props.progress.currentAction
+  if (props.progress.status === 'completed') return '本轮编排已经完成。'
+  if (props.progress.status === 'cancelled') return '本轮编排已中止，当前结果已保留。'
+  if (props.progress.status === 'failed') return '编排过程中出现异常，请查看日志。'
+  return '正在准备编排动作。'
+})
+
 const progressStatus = computed(() => {
   if (props.progress.status === 'completed') return 'success'
   if (props.progress.status === 'failed' || props.progress.status === 'cancelled') return 'exception'
@@ -94,6 +124,14 @@ const formatLogTime = (time: string) =>
   flex-direction: column;
   gap: 16px;
   height: 100%;
+  color: #1f2937;
+}
+
+.progress-hero {
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 247, 237, 0.92));
+  border: 1px solid rgba(251, 146, 60, 0.12);
 }
 
 .progress-header {
@@ -101,62 +139,179 @@ const formatLogTime = (time: string) =>
   justify-content: space-between;
   align-items: flex-start;
   gap: 16px;
+  margin-bottom: 14px;
+}
+
+.progress-overview {
+  min-width: 0;
 }
 
 .progress-title {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .phase-badge {
   display: inline-flex;
-  padding: 4px 12px;
-  border-radius: 12px;
-  background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
+  align-items: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(249, 115, 22, 0.12);
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .progress-percentage {
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 24px;
+  line-height: 1;
+  font-weight: 700;
+  color: #111827;
+}
+
+.progress-subtitle {
+  margin: 0;
+  color: #57534e;
+  line-height: 1.6;
 }
 
 .progress-stats {
   display: flex;
   flex-wrap: wrap;
+  gap: 10px;
+}
+
+.stat-pill {
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(251, 146, 60, 0.12);
+}
+
+.stat-pill strong {
+  font-size: 16px;
+  color: #111827;
+}
+
+.stat-label {
+  color: #78716c;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stat-pill.is-success {
+  background: rgba(236, 253, 243, 0.96);
+  border-color: rgba(34, 197, 94, 0.16);
+}
+
+.stat-pill.is-danger {
+  background: rgba(254, 242, 242, 0.96);
+  border-color: rgba(239, 68, 68, 0.16);
 }
 
 .current-gap,
 .logs-section {
-  padding: 12px;
-  border-radius: 8px;
-  background: var(--el-fill-color-light);
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(251, 146, 60, 0.1);
+}
+
+.current-gap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
+}
+
+.current-gap-label {
+  color: #78716c;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.current-gap-range {
+  font-size: 18px;
+  font-weight: 700;
+  color: #9a3412;
+}
+
+.current-gap-action {
+  color: #57534e;
+}
+
+.section-title {
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #7c2d12;
 }
 
 .logs-container {
-  max-height: 180px;
+  max-height: 200px;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .log-item {
-  display: flex;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 10px;
   font-size: 12px;
   line-height: 1.6;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 250, 245, 0.92);
+}
+
+.log-time {
+  color: #78716c;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-message {
+  color: #334155;
+  word-break: break-word;
 }
 
 .log-item.level-error {
-  color: var(--el-color-danger);
+  background: rgba(254, 242, 242, 0.96);
+}
+
+.log-item.level-error .log-message {
+  color: #b91c1c;
 }
 
 .log-item.level-warn {
-  color: var(--el-color-warning);
+  background: rgba(255, 251, 235, 0.96);
+}
+
+.log-item.level-warn .log-message {
+  color: #b45309;
 }
 
 .logs-empty {
-  color: var(--el-text-color-placeholder);
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .progress-header {
+    flex-direction: column;
+  }
+
+  .log-item {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
 }
 </style>

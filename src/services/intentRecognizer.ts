@@ -1,7 +1,12 @@
 import type { LLMClient } from './llm/llmClient'
 import type { DialogueContext } from './dialogueContext'
 
-export type MicroEditIntentType = 'insert' | 'unsupported' | 'clarify'
+export type MicroEditIntentType =
+  | 'insert'
+  | 'move'
+  | 'replace'
+  | 'unsupported'
+  | 'clarify'
 
 export interface MicroEditIntent {
   type: MicroEditIntentType
@@ -24,7 +29,7 @@ export class IntentRecognizer {
           {
             role: 'system',
             content:
-              '你是广电视节目串联单的微调意图识别器。只识别 insert、unsupported、clarify 三类意图，并只返回 JSON。',
+              '你是广播节目串联单的微调意图识别器。只识别 insert、move、replace、unsupported、clarify 五类意图，并且只返回 JSON。',
           },
           {
             role: 'user',
@@ -33,7 +38,7 @@ export class IntentRecognizer {
               `频道: ${context.scheduleState.channelName}\n` +
               `日期: ${context.scheduleState.date}\n` +
               `当前节目单摘要:\n${context.scheduleSummary}\n` +
-              '输出格式: {"type":"insert","confidence":0.95,"reasoning":"..."}',
+              '输出格式: {"type":"replace","confidence":0.95,"reasoning":"..."}',
           },
         ],
         { temperature: 0.1, maxTokens: 200 },
@@ -49,7 +54,25 @@ export class IntentRecognizer {
   private ruleBasedRecognize(userInput: string): MicroEditIntent {
     const normalized = userInput.replace(/\s+/g, '')
     const hasInsertVerb = /(插入|加一条|添加节目|安排节目)/.test(normalized)
-    const hasProgramCue = /(节目|看东方|电视剧|新闻|栏目)/.test(normalized)
+    const hasMoveVerb = /(移动|后移|前移|顺延|延后|提前)/.test(normalized)
+    const hasReplaceVerb = /(换成|替换成|改成|替换为|改为)/.test(normalized)
+    const hasProgramCue = /(节目|看东方|电视剧|新闻|栏目|中国考古)/.test(normalized)
+
+    if (hasReplaceVerb && hasProgramCue) {
+      return {
+        type: 'replace',
+        confidence: 0.96,
+        reasoning: '用户表达了将某个已编排节目替换成另一档节目的微调需求。',
+      }
+    }
+
+    if (hasMoveVerb && hasProgramCue) {
+      return {
+        type: 'move',
+        confidence: 0.95,
+        reasoning: '用户表达了对某个时间点节目进行前移或后移的微调需求。',
+      }
+    }
 
     if (hasInsertVerb && hasProgramCue) {
       return {
@@ -62,7 +85,7 @@ export class IntentRecognizer {
     return {
       type: 'unsupported',
       confidence: 0.45,
-      reasoning: '当前输入不属于首批已支持的插入节目命令。',
+      reasoning: '当前输入不属于首批已支持的插入、移动或替换命令。',
     }
   }
 
@@ -72,7 +95,9 @@ export class IntentRecognizer {
       if (!match) return null
       const parsed = JSON.parse(match[0]) as MicroEditIntent
       if (!parsed.type || !parsed.reasoning) return null
-      if (!['insert', 'unsupported', 'clarify'].includes(parsed.type)) return null
+      if (!['insert', 'move', 'replace', 'unsupported', 'clarify'].includes(parsed.type)) {
+        return null
+      }
       return parsed
     } catch {
       return null

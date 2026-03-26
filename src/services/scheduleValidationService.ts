@@ -1,20 +1,18 @@
 import type { ValidationReport } from '@/types/orchestration'
-import { demoFixedItems, demoLayouts } from '@/mock/demoData'
+import { getDemoFixedItems } from '@/mock/demoData'
 import { getAtomicCapabilities } from './atomicCapabilities'
 import { validateSchedule } from './validators/validationEngine'
 
 export class ScheduleValidationService {
   validateCurrentSchedule(scheduleDate: string, channelId: string): ValidationReport {
-    const layoutKey = `${channelId}_${scheduleDate}`
-    const layout = demoLayouts[layoutKey]
-    const fixedItems = demoFixedItems[layoutKey] || []
+    const fixedItems = getDemoFixedItems(channelId, scheduleDate)
     const items = getAtomicCapabilities().getAllItems()
 
     return validateSchedule({
       items,
       gaps: [],
       fixedItems,
-      layoutSlots: layout?.slots || [],
+      layoutSlots: [],
       dayStartTime: `${scheduleDate}T06:00:00`,
       dayEndTime: `${scheduleDate}T23:59:59`,
     })

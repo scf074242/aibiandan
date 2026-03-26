@@ -19,7 +19,7 @@ export class ReplaceCommandExecutor {
     if (!currentItem) {
       return {
         success: false,
-        message: `条目不存在: ${itemId}`,
+        message: `条目不存在 ${itemId}`,
       }
     }
 
@@ -27,7 +27,7 @@ export class ReplaceCommandExecutor {
     if (!candidate) {
       return {
         success: false,
-        message: `未找到替换候选节目: ${newCandidateId}`,
+        message: `未找到替换候选节目 ${newCandidateId}`,
       }
     }
 
@@ -58,7 +58,18 @@ export class ReplaceCommandExecutor {
 
   private calculateEndTime(startTime: string, durationSeconds: number): string {
     const start = new Date(startTime).getTime()
-    return new Date(start + durationSeconds * 1000).toISOString()
+    return this.formatLocalDateTime(start + durationSeconds * 1000)
+  }
+
+  private formatLocalDateTime(timestampMs: number): string {
+    const date = new Date(timestampMs)
+    const year = date.getFullYear()
+    const month = `${date.getMonth() + 1}`.padStart(2, '0')
+    const day = `${date.getDate()}`.padStart(2, '0')
+    const hours = `${date.getHours()}`.padStart(2, '0')
+    const minutes = `${date.getMinutes()}`.padStart(2, '0')
+    const seconds = `${date.getSeconds()}`.padStart(2, '0')
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
   }
 }
 

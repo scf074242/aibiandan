@@ -1,5 +1,4 @@
 import type {
-  CandidateQueryCriteria,
   FillItemCommand,
   GapInfo,
   OrchestrationCommand,
@@ -14,6 +13,7 @@ import type {
   ScheduleItemSnapshot,
   TaskClassification,
   ValidationReport,
+  LayoutReference,
 } from '@/types/orchestration'
 import type { ChatMessage } from '@/types/llm'
 import { getAtomicCapabilities } from './atomicCapabilities'
@@ -21,9 +21,10 @@ import { getCandidateService } from './candidateService'
 import { createGapManager, GapManager } from './gapManager'
 import { getMaterializer } from './materializer'
 import { getDataService } from './orchestration/dataService'
-import { getOrchestrationStrategyService, type GapPlanningThought } from './orchestrationStrategyService'
+import { getOrchestrationStrategyService } from './orchestrationStrategyService'
 import { getQueryIntentService } from './queryIntentService'
 import { getCandidateSelectionService } from './candidateSelectionService'
+import { tryBuildAdFillItems } from './adFillService'
 import { LLMClient } from './llm/llmClient'
 import { TaskClassifier } from './llm/taskClassifier'
 import { getValidationEngine } from './validators/validationEngine'
@@ -40,6 +41,14 @@ type EventPayloadMap = {
   'log': { entry: PlanningLogEntry }
   'error': { error: Error }
   'complete': { session: PlanningSession }
+}
+
+interface PreparedGapPlan {
+  gap: GapInfo
+  queryCommand: QueryCandidatesCommand
+  candidates: ProgramCandidate[]
+  fillCommand: FillItemCommand
+  selectedCandidate: ProgramCandidate
 }
 
 class EventEmitter {
@@ -65,12 +74,14 @@ export interface OrchestratorConfig {
   maxRepairRounds: number
   enableAutoRepair: boolean
   maxGapItems: number
+  planningConcurrency: number
 }
 
 const DEFAULT_CONFIG: OrchestratorConfig = {
   maxRepairRounds: 1,
   enableAutoRepair: true,
   maxGapItems: 10,
+  planningConcurrency: 3,
 }
 
 export class Orchestrator extends EventEmitter {
@@ -161,28 +172,36 @@ export class Orchestrator extends EventEmitter {
     try {
       this.createSession(channelId, date, strategy)
       this.atomicCapabilities.clearAll()
+
       const generationContext = await this.dataService.getGenerationContext(channelId, date)
       const layoutSlots = generationContext?.layoutReference?.slots ?? []
+
       if (layoutSlots.length > 0) {
         this.gapManager!.initializeFromLayout(layoutSlots)
-        this.log('info', 'planning', `频道 ${channelId} 已基于版面初始化待编排空窗`, {
+        this.log('info', 'planning', `频道 ${channelId} 已基于版面参考初始化待编排时段`, {
           channelId,
           date,
           layoutSlotCount: layoutSlots.length,
         })
       } else {
-        this.gapManager!.createFullDayGap(this.combineDateTime(date, dayStartTime), this.combineDateTime(date, dayEndTime))
-        this.log('warn', 'planning', `频道 ${channelId} 未找到版面参考，已退回全天大空窗模式`, {
+        this.gapManager!.createFullDayGap(
+          this.combineDateTime(date, dayStartTime),
+          this.combineDateTime(date, dayEndTime),
+        )
+        this.log('warn', 'planning', `频道 ${channelId} 未命中版面参考，已退回全天空窗模式`, {
           channelId,
           date,
           dayStartTime,
           dayEndTime,
         })
       }
+
       this.session!.gaps.pending = this.gapManager!.queryRemainingGaps()
 
       await this.phase1Planning()
+      if (this.isCancelled) return
       await this.phase2Filling()
+      if (this.isCancelled) return
       await this.phase3Repair()
 
       if (!this.isCancelled) {
@@ -201,11 +220,13 @@ export class Orchestrator extends EventEmitter {
     if (this.isRunning) throw new Error('Orchestrator is already running')
     this.isRunning = true
     this.isCancelled = false
+    this.repairRound = 0
 
     try {
       this.createSession(channelId, date, { target: 'partial_fill' })
       const context = await this.dataService.getGenerationContext(channelId, date)
       if (!context) throw new Error('Unable to load generation context')
+
       const items = this.atomicCapabilities.getAllItems()
       this.gapManager!.calculateGapsFromItems(
         items,
@@ -213,12 +234,18 @@ export class Orchestrator extends EventEmitter {
         this.combineDateTime(date, context.channel.broadcastRules.defaultStartTime),
         this.combineDateTime(date, context.channel.broadcastRules.defaultEndTime),
       )
+
       const gaps = this.gapManager!.queryRemainingGaps()
       this.session!.gaps.pending = targetGapIds?.length ? gaps.filter((gap) => targetGapIds.includes(gap.id)) : gaps
+
       await this.phase2Filling()
+      if (this.isCancelled) return
       await this.phase3Repair()
-      this.updateStatus('completed')
-      this.emit('complete', { session: this.session! })
+
+      if (!this.isCancelled) {
+        this.updateStatus('completed')
+        this.emit('complete', { session: this.session! })
+      }
     } catch (error) {
       this.handleError(error as Error)
       throw error
@@ -235,6 +262,7 @@ export class Orchestrator extends EventEmitter {
   cancel(): void {
     this.isCancelled = true
     if (this.session) {
+      this.log('warn', 'session', '用户已请求中止当前编排任务')
       this.updateStatus('cancelled')
     }
   }
@@ -242,6 +270,7 @@ export class Orchestrator extends EventEmitter {
   getProgress(): OrchestrationProgress | null {
     if (!this.session || !this.gapManager) return null
     const stats = this.gapManager.getStats()
+
     return {
       sessionId: this.session.id,
       status: this.session.status,
@@ -255,6 +284,7 @@ export class Orchestrator extends EventEmitter {
       },
       currentGap: this.currentGap ?? undefined,
       currentAction: this.currentGap ? `处理空窗 ${this.currentGap.id}` : undefined,
+      liveGaps: this.gapManager.getActiveGaps(),
       stats: this.session.execution,
       recentLogs: this.session.logs.slice(-20),
       startedAt: this.session.createdAt,
@@ -274,102 +304,82 @@ export class Orchestrator extends EventEmitter {
   private async phase1Planning(): Promise<void> {
     this.updateStatus('planning')
     const prompt = this.buildPlanningPrompt(this.session!.gaps.pending.length)
+
     try {
       const response = await this.llmClient.chat(prompt, { temperature: 0.2, maxTokens: 800 })
       const plan = this.parseJSONCommand<PlanCommand>(response.content)
       if (plan?.action === 'plan') {
         this.session!.strategy = { ...this.session!.strategy, ...plan.data.strategy }
-        this.log('info', 'planning', '已生成全局编排策略', {
-          strategy: this.session!.strategy,
-          initialGapCount: this.session!.gaps.pending.length,
-        })
       }
+      this.log('info', 'planning', '已生成全局编排策略', {
+        strategy: this.session!.strategy,
+        initialGapCount: this.session!.gaps.pending.length,
+      })
     } catch {
-      this.log('warn', 'planning', 'LLM planning unavailable, using default strategy')
+      this.log('warn', 'planning', 'LLM 策略规划不可用，已退回默认编排策略', {
+        strategy: this.session!.strategy,
+      })
     }
   }
 
   private async phase2Filling(): Promise<void> {
     this.updateStatus('filling')
     let processed = 0
+    const generationContext = await this.dataService.getGenerationContext(this.session!.channelId, this.session!.date)
+
     while (!this.isCancelled && this.gapManager && processed < this.config.maxGapItems) {
-      const gap = this.gapManager.getNextGap()
-      if (!gap) break
-      this.currentGap = gap
-      this.emit('gap-start', { gap })
+      const batch = this.collectPlanningBatch(this.config.maxGapItems - processed)
+      if (batch.length === 0) break
 
-      try {
-        this.gapManager.startProcessing(gap.id)
-        const queryCommand = await this.generateQueryCandidatesCommand(gap)
-        this.log('info', 'filling', `空窗 ${gap.id} 已生成候选查询命令`, {
+      this.log('info', 'planning', `已启动 ${batch.length} 个空窗的并行规划任务`, {
+        concurrency: this.config.planningConcurrency,
+        batchGapIds: batch.map((gap) => gap.id),
+        gapRanges: batch.map((gap) => ({
           gapId: gap.id,
-          criteria: queryCommand.data.criteria,
-          reasoning: queryCommand.reasoning,
-        })
-        const candidates = await this.candidateService.queryCandidates(gap, queryCommand.data.criteria)
-        if (candidates.candidates.length === 0) throw new Error('No candidates found')
-        this.log('info', 'filling', `空窗 ${gap.id} 已完成候选检索`, {
-          gapId: gap.id,
-          candidateCount: candidates.candidates.length,
-          topCandidates: candidates.candidates.slice(0, 3).map((item) => ({
-            id: item.id,
-            programName: item.programName,
-            duration: item.duration,
-            programType: item.programType,
-          })),
-        })
+          startTime: gap.startTime,
+          endTime: gap.endTime,
+        })),
+      })
 
-        const fillCommand = await this.generateFillItemCommand(gap, candidates.candidates)
-        const selectedCandidate =
-          candidates.candidates.find((item) => item.id === fillCommand.data.selectedCandidateId) ??
-          candidates.candidates[0]
-        if (!selectedCandidate) throw new Error('No selected candidate')
-        this.log('info', 'filling', `空窗 ${gap.id} 已完成候选选择`, {
-          gapId: gap.id,
-          selectedCandidateId: selectedCandidate.id,
-          selectedCandidateName: selectedCandidate.programName,
-          selectionReason: fillCommand.data.selectionReason,
-        })
-        const context = await this.dataService.getGenerationContext(this.session!.channelId, this.session!.date)
-        if (!context) throw new Error('Missing generation context')
+      const preparedPlans = await this.prepareBatchPlans(batch)
 
-        const materialized = this.materializer.materialize({
-          gap,
-          selectedCandidate,
-          channelContext: context.channel,
-        })
-        if (!materialized.success || !materialized.item) throw new Error(materialized.error || 'Materialize failed')
+      for (const plan of preparedPlans) {
+        if (this.isCancelled) break
+        this.currentGap = plan.gap
 
-        const appendResult = await this.atomicCapabilities.appendItems([materialized.item], { skipValidation: true })
-        if (!appendResult.success) throw new Error(appendResult.error || 'Append failed')
-        this.log('info', 'filling', `空窗 ${gap.id} 已插入节目`, {
-          gapId: gap.id,
-          itemId: materialized.item.id,
-          programName: materialized.item.programName,
-          startTime: materialized.item.startTime,
-          endTime: materialized.item.endTime,
-        })
+        try {
+          const item = await this.executePreparedPlan(plan)
+          this.gapManager.onGapFilled(plan.gap.id, item)
+          this.session!.gaps.completed.push(plan.gap.id)
+          this.session!.execution.totalCommands += 1
+          this.session!.execution.successfulCommands += 1
+          this.emit('gap-complete', { gap: plan.gap, item })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error'
+          this.gapManager.markFailed(plan.gap.id, message)
+          this.session!.gaps.failed.push(plan.gap.id)
+          this.session!.execution.totalCommands += 1
+          this.session!.execution.failedCommands += 1
+          this.log('error', 'execution', `空窗 ${plan.gap.id} 处理失败`, {
+            gapId: plan.gap.id,
+            startTime: plan.gap.startTime,
+            endTime: plan.gap.endTime,
+            error: message,
+          })
+          this.emit('gap-failed', { gap: plan.gap, error: message })
+        }
 
-        this.gapManager.onGapFilled(gap.id, materialized.item)
-        this.session!.gaps.completed.push(gap.id)
-        this.session!.execution.totalCommands += 1
-        this.session!.execution.successfulCommands += 1
-        this.emit('gap-complete', { gap, item: materialized.item })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error'
-        this.gapManager.markFailed(gap.id, message)
-        this.session!.gaps.failed.push(gap.id)
-        this.session!.execution.totalCommands += 1
-        this.session!.execution.failedCommands += 1
-        this.log('error', 'filling', `空窗 ${gap.id} 处理失败`, {
-          gapId: gap.id,
-          error: message,
-        })
-        this.emit('gap-failed', { gap, error: message })
+        processed += 1
+        this.session!.gaps.pending = this.gapManager.queryRemainingGaps()
       }
+    }
 
-      processed += 1
-      this.session!.gaps.pending = this.gapManager.queryRemainingGaps()
+    if (!this.isCancelled && this.gapManager) {
+      const filledCount = await this.fillRemainingGapsWithAds(generationContext?.layoutReference)
+      processed += filledCount
+      if (filledCount > 0) {
+        this.session!.gaps.pending = this.gapManager.queryRemainingGaps()
+      }
     }
 
     this.currentGap = null
@@ -377,9 +387,11 @@ export class Orchestrator extends EventEmitter {
 
   private async phase3Repair(): Promise<void> {
     if (!this.config.enableAutoRepair) return
+
     this.updateStatus('repairing')
     this.repairRound = 1
     this.session!.execution.repairRounds = this.repairRound
+
     const report = await this.validateSchedule()
     this.log(report.isValid ? 'info' : 'warn', 'validation', '本轮编排校验已完成', {
       reportId: report.id,
@@ -395,11 +407,12 @@ export class Orchestrator extends EventEmitter {
   private async validateSchedule(): Promise<ValidationReport> {
     const context = await this.dataService.getGenerationContext(this.session!.channelId, this.session!.date)
     if (!context) throw new Error('Missing validation context')
+
     return this.validationEngine.validate({
       items: this.atomicCapabilities.getAllItems(),
       gaps: this.gapManager?.queryRemainingGaps() ?? [],
       fixedItems: context.constraints.fixedItems,
-      layoutSlots: context.layoutReference?.slots ?? [],
+      layoutSlots: [],
       dayStartTime: this.combineDateTime(this.session!.date, context.channel.broadcastRules.defaultStartTime),
       dayEndTime: this.combineDateTime(this.session!.date, context.channel.broadcastRules.defaultEndTime),
     })
@@ -431,9 +444,11 @@ export class Orchestrator extends EventEmitter {
     }
 
     const thought = await this.strategyService.planGap(gap, this.session!.strategy, generationContext)
-    this.log('info', 'planning', `?? ${gap.id} ???????`, {
+    this.log('info', 'planning', `空窗 ${gap.id} 已生成版面参考编排想法`, {
       gapId: gap.id,
       summary: thought.summary,
+      targetSlotLabel: thought.targetSlotLabel,
+      preferredProgramGroup: thought.preferredProgramGroup,
       targetProgramTypes: thought.targetProgramTypes,
       searchKeywords: thought.searchKeywords,
       durationPreference: thought.durationPreference,
@@ -447,13 +462,13 @@ export class Orchestrator extends EventEmitter {
       this.session!.strategy,
     )
 
-    this.log('info', 'planning', `?? ${gap.id} ???????`, {
+    this.log('info', 'planning', `空窗 ${gap.id} 已生成版面导向检索参数`, {
       gapId: gap.id,
       criteria,
       reasoning: thought.summary,
     })
 
-    const strategyDrivenCommand: QueryCandidatesCommand = {
+    return {
       action: 'query_candidates',
       reasoning: thought.summary,
       data: {
@@ -461,7 +476,6 @@ export class Orchestrator extends EventEmitter {
         criteria,
       },
     }
-    return strategyDrivenCommand
   }
 
   private async generateFillItemCommand(gap: GapInfo, candidates: ProgramCandidate[]): Promise<FillItemCommand> {
@@ -469,12 +483,13 @@ export class Orchestrator extends EventEmitter {
     if (!defaultCandidate) {
       throw new Error('No candidates available for fill command')
     }
+
     const defaultCommand: FillItemCommand = {
       action: 'fill_item',
       data: {
         gapId: gap.id,
         selectedCandidateId: defaultCandidate.id,
-        selectionReason: '默认选择评分较高且时长最接近的候选',
+        selectionReason: '默认选择评分较高且时长最接近的候选节目。',
         suggestedNextAction: 'continue',
       },
     }
@@ -507,59 +522,202 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
+  private collectPlanningBatch(remainingBudget: number): GapInfo[] {
+    const batchSize = Math.max(1, Math.min(this.config.planningConcurrency, remainingBudget))
+    const batch: GapInfo[] = []
+
+    while (batch.length < batchSize) {
+      const gap = this.gapManager?.getNextGap()
+      if (!gap) break
+      this.gapManager?.startProcessing(gap.id)
+      batch.push(gap)
+      this.emit('gap-start', { gap })
+    }
+
+    return batch
+  }
+
+  private async prepareBatchPlans(gaps: GapInfo[]): Promise<PreparedGapPlan[]> {
+    const results = await Promise.all(
+      gaps.map(async (gap) => {
+        try {
+          const plan = await this.prepareGapPlan(gap)
+          return { ok: true as const, plan }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error'
+          this.gapManager?.markFailed(gap.id, message)
+          this.session!.gaps.failed.push(gap.id)
+          this.session!.execution.totalCommands += 1
+          this.session!.execution.failedCommands += 1
+          this.log('error', 'planning', `空窗 ${gap.id} 并行规划失败`, {
+            gapId: gap.id,
+            error: message,
+          })
+          this.emit('gap-failed', { gap, error: message })
+          return { ok: false as const }
+        }
+      }),
+    )
+
+    return results
+      .filter((entry): entry is { ok: true; plan: PreparedGapPlan } => entry.ok)
+      .map((entry) => entry.plan)
+      .sort((left, right) => new Date(left.gap.startTime).getTime() - new Date(right.gap.startTime).getTime())
+  }
+
+  private async prepareGapPlan(gap: GapInfo): Promise<PreparedGapPlan> {
+    const queryCommand = await this.generateQueryCandidatesCommand(gap)
+    this.log('info', 'query', `空窗 ${gap.id} 已生成候选查询命令`, {
+      gapId: gap.id,
+      startTime: gap.startTime,
+      endTime: gap.endTime,
+      criteria: queryCommand.data.criteria,
+      reasoning: queryCommand.reasoning,
+    })
+
+    const candidatesResult = await this.candidateService.queryCandidates(gap, queryCommand.data.criteria)
+    if (candidatesResult.candidates.length === 0) {
+      throw new Error('No candidates found')
+    }
+
+    this.log('info', 'query', `空窗 ${gap.id} 已完成候选检索`, {
+      gapId: gap.id,
+      startTime: gap.startTime,
+      endTime: gap.endTime,
+      candidateCount: candidatesResult.candidates.length,
+      topCandidates: candidatesResult.candidates.slice(0, 3).map((item) => ({
+        id: item.id,
+        programName: item.programName,
+        duration: item.duration,
+        programType: item.programType,
+      })),
+    })
+
+    const fillCommand = await this.generateFillItemCommand(gap, candidatesResult.candidates)
+    const selectedCandidate =
+      candidatesResult.candidates.find((item) => item.id === fillCommand.data.selectedCandidateId) ??
+      candidatesResult.candidates[0]
+
+    if (!selectedCandidate) {
+      throw new Error('No selected candidate')
+    }
+
+    this.log('info', 'selection', `空窗 ${gap.id} 已完成候选选择`, {
+      gapId: gap.id,
+      startTime: gap.startTime,
+      endTime: gap.endTime,
+      selectedCandidateId: selectedCandidate.id,
+      selectedCandidateName: selectedCandidate.programName,
+      selectionReason: fillCommand.data.selectionReason,
+    })
+
+    return {
+      gap,
+      queryCommand,
+      candidates: candidatesResult.candidates,
+      fillCommand,
+      selectedCandidate,
+    }
+  }
+
+  private async executePreparedPlan(plan: PreparedGapPlan): Promise<ScheduleItemSnapshot> {
+    const context = await this.dataService.getGenerationContext(this.session!.channelId, this.session!.date)
+    if (!context) {
+      throw new Error('Missing generation context')
+    }
+
+    const materialized = this.materializer.materialize({
+      gap: plan.gap,
+      selectedCandidate: plan.selectedCandidate,
+      channelContext: context.channel,
+    })
+
+    if (!materialized.success || !materialized.item) {
+      throw new Error(materialized.error || 'Materialize failed')
+    }
+
+    const appendResult = await this.atomicCapabilities.appendItems([materialized.item], { skipValidation: true })
+    if (!appendResult.success) {
+      throw new Error(appendResult.error || 'Append failed')
+    }
+
+    this.log('info', 'execution', `空窗 ${plan.gap.id} 已插入节目`, {
+      gapId: plan.gap.id,
+      itemId: materialized.item.id,
+      programName: materialized.item.programName,
+      startTime: materialized.item.startTime,
+      endTime: materialized.item.endTime,
+      selectionReason: plan.fillCommand.data.selectionReason,
+      selectedCandidateId: plan.selectedCandidate.id,
+      selectedCandidateName: plan.selectedCandidate.programName,
+    })
+
+    return materialized.item
+  }
+
+  private async fillRemainingGapsWithAds(layoutReference?: LayoutReference): Promise<number> {
+    if (!this.gapManager) return 0
+
+    const remainingGaps = this.gapManager.queryRemainingGaps()
+    let filledCount = 0
+
+    for (const gap of remainingGaps) {
+      if (this.isCancelled) break
+      if (!this.hasAdjacentProgramBeforeGap(gap)) continue
+
+      const result = tryBuildAdFillItems(gap, layoutReference, this.atomicCapabilities.getAllItems().length + 1)
+      if (!result.success || result.items.length === 0) continue
+
+      const appendResult = await this.atomicCapabilities.appendItems(result.items, { skipValidation: true })
+      if (!appendResult.success) {
+        this.log('warn', 'execution', `空窗 ${gap.id} 广告补齐写入失败`, {
+          gapId: gap.id,
+          error: appendResult.error || 'Append failed',
+        })
+        continue
+      }
+
+      const lastItem = result.items[result.items.length - 1]!
+      this.gapManager.onGapFilled(gap.id, lastItem)
+      this.session!.gaps.completed.push(gap.id)
+      this.session!.execution.totalCommands += result.items.length
+      this.session!.execution.successfulCommands += result.items.length
+      filledCount += 1
+
+      this.log('info', 'execution', `空窗 ${gap.id} 已按规则插入广告`, {
+        gapId: gap.id,
+        startTime: gap.startTime,
+        endTime: gap.endTime,
+        insertedItems: result.items.map((item) => ({
+          itemId: item.id,
+          programName: item.programName,
+          startTime: item.startTime,
+          endTime: item.endTime,
+          duration: item.duration,
+          programType: item.programType,
+        })),
+      })
+
+      result.items.forEach((item) => this.emit('gap-complete', { gap, item }))
+    }
+
+    return filledCount
+  }
+
+  private hasAdjacentProgramBeforeGap(gap: GapInfo): boolean {
+    const items = this.atomicCapabilities.getAllItems()
+    return items.some((item) => item.endTime === gap.startTime && item.programType !== 'ad')
+  }
+
   private buildPlanningPrompt(gapCount: number): ChatMessage[] {
     return [
       {
         role: 'system',
-        content: '你是一个广播节目单编排助手。请输出 JSON PlanCommand，只给策略，不给完整节目单。',
+        content: '你是电视节目单编排助手。请只输出 JSON PlanCommand，用于描述全局编排策略，而不是直接输出节目单。',
       },
       {
         role: 'user',
-        content: `频道: ${this.session!.channelId}\n日期: ${this.session!.date}\n空窗数: ${gapCount}`,
-      },
-    ]
-  }
-
-  private buildGapPrompt(
-    gap: GapInfo,
-    mode: 'query' | 'fill',
-    candidates: ProgramCandidate[] = [],
-    planningThought?: GapPlanningThought,
-  ): ChatMessage[] {
-    if (mode === 'query') {
-      const thoughtSummary = planningThought
-        ? [
-            `编排想法: ${planningThought.summary}`,
-            `类型偏好: ${(planningThought.targetProgramTypes ?? []).join(', ') || '无'}`,
-            `搜索关键词: ${(planningThought.searchKeywords ?? []).join(', ') || '无'}`,
-            `时长范围: ${planningThought.durationPreference.min}-${planningThought.durationPreference.max} 秒`,
-            `允许 filler: ${planningThought.allowFiller ? '是' : '否'}`,
-          ].join('\n')
-        : '编排想法: 无'
-
-      return [
-        {
-          role: 'system',
-          content:
-            '输出 QueryCandidatesCommand JSON。先理解空窗的编排想法，再生成候选检索条件。请尽量在 criteria 中包含 expectedDuration、programTypePreference、searchKeywords、preferredChannelId。',
-        },
-        {
-          role: 'user',
-          content: `空窗 ${gap.id}: ${gap.startTime} - ${gap.endTime}, 时长 ${gap.duration} 秒\n${thoughtSummary}`,
-        },
-      ]
-    }
-
-    return [
-      {
-        role: 'system',
-        content: '输出 FillItemCommand JSON，只选择一个最适合当前空窗的候选节目。',
-      },
-      {
-        role: 'user',
-        content: `空窗 ${gap.id}: ${gap.startTime} - ${gap.endTime}\n候选:\n${candidates
-          .map((item) => `${item.id} | ${item.programName} | ${item.duration}s | ${item.programType} | ${item.rating ?? 0}`)
-          .join('\n')}`,
+        content: `频道: ${this.session!.channelId}\n日期: ${this.session!.date}\n待处理空窗数: ${gapCount}`,
       },
     ]
   }
@@ -585,7 +743,7 @@ export class Orchestrator extends EventEmitter {
   private log(level: PlanningLogEntry['level'], phase: string, message: string, details?: Record<string, unknown>): void {
     if (!this.session) return
     const entry: PlanningLogEntry = {
-      id: `log_${Date.now()}`,
+      id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       timestamp: new Date().toISOString(),
       level,
       phase,

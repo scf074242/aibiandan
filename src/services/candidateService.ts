@@ -17,6 +17,11 @@ export interface ProgramSearchParams {
   channelId: string
   channelName?: string
   programName: string
+  slotLabel?: string
+  preferredProgramGroup?: string
+  searchKeywords?: string[]
+  columnId?: string
+  programTypes?: string[]
   limit?: number
 }
 
@@ -50,13 +55,13 @@ export class CandidateService {
     }
 
     const filtered = this.programs
+      .filter((program) => this.matchesPreferredChannel(program, criteria.preferredChannelId))
       .filter((program) => program.duration >= criteria.expectedDuration.min)
       .filter((program) => program.duration <= criteria.expectedDuration.max)
       .filter((program) =>
         !criteria.programTypePreference?.length || criteria.programTypePreference.includes(program.programType),
       )
       .filter((program) => this.matchesKeywords(program, criteria.searchKeywords))
-      .filter((program) => this.matchesPreferredChannel(program, criteria.preferredChannelId))
       .sort((left, right) => this.scoreCandidate(right, gap, criteria) - this.scoreCandidate(left, gap, criteria))
       .slice(0, this.config.defaultLimit)
 
@@ -79,19 +84,24 @@ export class CandidateService {
     const limit = Math.min(params.limit ?? this.config.defaultLimit, this.config.maxLimit)
 
     const scored = this.programs
+      .filter((program) => this.matchesColumn(program, params.columnId))
+      .filter((program) =>
+        !params.programTypes?.length || params.programTypes.includes(program.programType),
+      )
+      .filter((program) =>
+        !params.preferredProgramGroup || program.seriesGroup === params.preferredProgramGroup || program.programName.includes(params.preferredProgramGroup),
+      )
       .filter((program) => {
+        if (!keyword) return true
         const haystack = `${program.programName} ${program.programCode}`.toLowerCase()
         return haystack.includes(keyword)
       })
       .filter((program) => {
-        const channelIds = Array.isArray(program.metadata?.channelIds)
-          ? (program.metadata?.channelIds as string[])
-          : []
-        return channelIds.length === 0 || channelIds.includes(params.channelId)
+        return this.matchesPreferredChannel(program, params.channelId)
       })
       .map((program) => ({
         program,
-        score: this.scoreProgramSearch(program, keyword, params.channelId),
+        score: this.scoreProgramSearch(program, keyword, params),
       }))
       .sort((left, right) => right.score - left.score)
       .slice(0, limit)
@@ -105,25 +115,49 @@ export class CandidateService {
     const fillerPenalty = candidate.source === 'filler' ? -10 : 0
     const keywordScore = this.getKeywordScore(candidate, criteria.searchKeywords)
     const channelScore = this.getPreferredChannelScore(candidate, criteria.preferredChannelId)
+    const slotScore = this.getPreferredSlotScore(candidate, criteria.slotLabel ?? criteria.preferredSlot, gap)
+    const programGroupScore = this.getPreferredProgramGroupScore(candidate, criteria.preferredProgramGroup)
+    const editorialBiasScore = this.getEditorialBiasScore(candidate, criteria.editorialBias)
     const editorialPreferenceScore = this.getEditorialPreferenceScore(
       candidate,
       criteria.preferredChannelId,
       criteria.programTypePreference,
     )
-    return durationScore + ratingScore + fillerPenalty + keywordScore + channelScore + editorialPreferenceScore
+    return durationScore + ratingScore + fillerPenalty + keywordScore + channelScore + slotScore + programGroupScore + editorialBiasScore + editorialPreferenceScore
   }
 
-  private scoreProgramSearch(candidate: ProgramCandidate, keyword: string, channelId: string): number {
+  private scoreProgramSearch(
+    candidate: ProgramCandidate,
+    keyword: string,
+    params: ProgramSearchParams,
+  ): number {
     const normalizedName = candidate.programName.toLowerCase()
+    if (!keyword) {
+      return (
+        (candidate.editorialWeight ?? 0) +
+        (candidate.rating ?? 0) +
+        this.getPreferredProgramGroupScore(candidate, params.preferredProgramGroup) +
+        this.getPreferredSlotScore(candidate, params.slotLabel)
+      )
+    }
     const exactMatch = normalizedName === keyword ? 100 : 0
     const prefixMatch = normalizedName.startsWith(keyword) ? 30 : 0
     const containsMatch = normalizedName.includes(keyword) ? 10 : 0
     const channelBoost = Array.isArray(candidate.metadata?.channelIds) &&
-      (candidate.metadata?.channelIds as string[]).includes(channelId)
+      (candidate.metadata?.channelIds as string[]).includes(params.channelId)
       ? 20
       : 0
 
-    return exactMatch + prefixMatch + containsMatch + channelBoost + (candidate.rating ?? 0)
+    return (
+      exactMatch +
+      prefixMatch +
+      containsMatch +
+      channelBoost +
+      this.getPreferredProgramGroupScore(candidate, params.preferredProgramGroup) +
+      this.getPreferredSlotScore(candidate, params.slotLabel) +
+      this.getKeywordScore(candidate, params.searchKeywords) +
+      (candidate.rating ?? 0)
+    )
   }
 
   private matchesKeywords(candidate: ProgramCandidate, searchKeywords?: string[]): boolean {
@@ -136,8 +170,13 @@ export class CandidateService {
     if (!preferredChannelId) return true
     const channelIds = Array.isArray(candidate.metadata?.channelIds)
       ? (candidate.metadata?.channelIds as string[])
-      : []
+      : [candidate.channelId]
     return channelIds.length === 0 || channelIds.includes(preferredChannelId)
+  }
+
+  private matchesColumn(candidate: ProgramCandidate, columnId?: string): boolean {
+    if (!columnId) return true
+    return candidate.columnId === columnId
   }
 
   private getKeywordScore(candidate: ProgramCandidate, searchKeywords?: string[]): number {
@@ -157,8 +196,37 @@ export class CandidateService {
     if (!preferredChannelId) return 0
     const channelIds = Array.isArray(candidate.metadata?.channelIds)
       ? (candidate.metadata?.channelIds as string[])
-      : []
+      : [candidate.channelId]
     return channelIds.includes(preferredChannelId) ? 25 : 0
+  }
+
+  private getPreferredSlotScore(candidate: ProgramCandidate, preferredSlot?: string, gap?: GapInfo): number {
+    const slot = candidate.preferredSlot ?? (typeof candidate.metadata?.preferredSlot === 'string' ? candidate.metadata.preferredSlot : undefined)
+    if (preferredSlot && slot === preferredSlot) return 18
+    if (preferredSlot && candidate.programName.includes(preferredSlot)) return 12
+    if (slot && gap) {
+      const gapStart = gap.startTime.slice(11, 16)
+      if (slot.includes(gapStart.slice(0, 2))) return 8
+    }
+    return 0
+  }
+
+  private getEditorialBiasScore(candidate: ProgramCandidate, editorialBias?: string[]): number {
+    if (!editorialBias?.length) return 0
+    const haystack = `${candidate.programName} ${(candidate.tags ?? []).join(' ')} ${candidate.columnName}`.toLowerCase()
+    return editorialBias.reduce((score, bias) => (
+      haystack.includes(bias.toLowerCase()) ? score + 6 : score
+    ), 0)
+  }
+
+  private getPreferredProgramGroupScore(
+    candidate: ProgramCandidate,
+    preferredProgramGroup?: string,
+  ): number {
+    if (!preferredProgramGroup) return 0
+    if (candidate.seriesGroup === preferredProgramGroup) return 28
+    if (candidate.programName.includes(preferredProgramGroup)) return 18
+    return 0
   }
 
   private getEditorialPreferenceScore(
@@ -166,16 +234,17 @@ export class CandidateService {
     preferredChannelId?: string,
     preferredTypes?: string[],
   ): number {
-    if (preferredChannelId !== 'news') {
+    if (preferredChannelId !== 'dragon') {
       return preferredTypes?.includes(candidate.programType) ? 12 : 0
     }
 
-    const strongPreferredTypes = new Set(['news', 'news_magazine', 'livelihood', 'commentary', 'news_commentary', 'law'])
-    const weakPreferredTypes = new Set(['documentary', 'health', 'education'])
+    const strongPreferredTypes = new Set(['news', 'news_magazine', 'commentary', 'documentary', 'health', 'lifestyle'])
+    const weakPreferredTypes = new Set(['travel', 'kids', 'entertainment'])
 
     if (strongPreferredTypes.has(candidate.programType)) return 28
     if (weakPreferredTypes.has(candidate.programType)) return 10
-    if (candidate.programType === 'drama' || candidate.programType === 'entertainment' || candidate.programType === 'variety') return -18
+    if (candidate.programType === 'drama') return -6
+    if (candidate.programType === 'entertainment' || candidate.programType === 'variety') return -12
     if (candidate.programType === 'filler' || candidate.programType === 'ad') return -24
     return preferredTypes?.includes(candidate.programType) ? 12 : 0
   }

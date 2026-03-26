@@ -1,8 +1,8 @@
 import {
   demoChannels,
-  demoFixedItems,
-  demoHistorySchedules,
-  demoLayouts,
+  getDemoFixedItems,
+  getDemoHistorySchedules,
+  getDemoLayout,
   demoPrograms,
 } from '@/mock/demoData'
 import type {
@@ -48,10 +48,6 @@ export class DataService {
       })
     }
 
-    Object.values(demoLayouts).forEach((layout) => {
-      this.layouts.set(layout.id.replace('layout_', ''), layout)
-    })
-
     demoPrograms.forEach((program) => {
       this.programs.set(program.programCode, program)
       this.programs.set(program.id, program)
@@ -67,7 +63,7 @@ export class DataService {
   }
 
   async getLayoutReference(channelId: string, date: string): Promise<LayoutReference | null> {
-    return demoLayouts[`${channelId}_${date}`] ?? null
+    return getDemoLayout(channelId, date)
   }
 
   async getLayoutSlots(channelId: string, date: string) {
@@ -75,7 +71,7 @@ export class DataService {
   }
 
   async getHistorySchedules(channelId: string, date: string): Promise<ScheduleSummary[]> {
-    return demoHistorySchedules[`${channelId}_${date}`] ?? []
+    return getDemoHistorySchedules(channelId, date)
   }
 
   async getRecentScheduleReference(channelId: string, date: string, _days = 7): Promise<{ dates: string[]; schedules: ScheduleSummary[] }> {
@@ -91,6 +87,11 @@ export class DataService {
   }
 
   async queryProgramLibrary(query: {
+    channelId?: string
+    slotLabel?: string
+    preferredProgramGroup?: string
+    columnId?: string
+    columnName?: string
     programTypes?: string[]
     minDuration?: number
     maxDuration?: number
@@ -98,6 +99,26 @@ export class DataService {
     limit?: number
   }): Promise<ProgramCandidate[]> {
     let list = Array.from(new Map(demoPrograms.map((item) => [item.programCode, item])).values())
+
+    if (query.channelId) {
+      list = list.filter((item) => item.channelId === query.channelId)
+    }
+    if (query.slotLabel) {
+      list = list.filter((item) => {
+        const slot = item.preferredSlot ?? (typeof item.metadata?.preferredSlot === 'string' ? item.metadata.preferredSlot : '')
+        const label = item.columnName
+        return slot.includes(query.slotLabel!) || label.includes(query.slotLabel!)
+      })
+    }
+    if (query.preferredProgramGroup) {
+      list = list.filter((item) => item.seriesGroup === query.preferredProgramGroup)
+    }
+    if (query.columnId) {
+      list = list.filter((item) => item.columnId === query.columnId)
+    }
+    if (query.columnName) {
+      list = list.filter((item) => item.columnName.includes(query.columnName!))
+    }
 
     if (query.programTypes?.length) {
       list = list.filter((item) => query.programTypes!.includes(item.programType))
@@ -116,7 +137,7 @@ export class DataService {
   }
 
   async getFixedItems(channelId: string, date: string): Promise<FixedItem[]> {
-    return demoFixedItems[`${channelId}_${date}`] ?? []
+    return getDemoFixedItems(channelId, date)
   }
 
   async getGenerationContext(channelId: string, date: string): Promise<GenerationContext | null> {

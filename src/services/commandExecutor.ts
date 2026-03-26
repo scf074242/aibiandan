@@ -327,7 +327,7 @@ export class CommandExecutor {
       channelContext: {
         channelId: 'default',
         channelName: '默认频道',
-        date: new Date().toISOString().split('T')[0] || '2026-03-25',
+        date: '2026-03-25',
         timeZone: 'Asia/Shanghai',
         broadcastRules: {
           defaultStartTime: '06:00:00',

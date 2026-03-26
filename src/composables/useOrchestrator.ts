@@ -28,6 +28,7 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
   const session = shallowRef<PlanningSession | null>(null)
   const currentGap = shallowRef<GapInfo | null>(null)
   const logs = ref<PlanningLogEntry[]>([])
+  const MAX_LOG_ENTRIES = 200
 
   let orchestrator: Orchestrator | null = null
 
@@ -40,6 +41,11 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
     orchestrator = getOrchestrator(llmClient, taskClassifier)
 
     orchestrator.on('status-change', ({ status, previousStatus }) => {
+      session.value = orchestrator!.getSession()
+      if (['completed', 'failed', 'cancelled'].includes(status)) {
+        isRunning.value = false
+        currentGap.value = null
+      }
       options.onStatusChange?.(status, previousStatus)
       options.onProgress?.(orchestrator!.getProgress()!)
     })
@@ -51,17 +57,22 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
     })
 
     orchestrator.on('gap-complete', ({ gap, item }) => {
+      currentGap.value = null
       options.onGapComplete?.(gap, item)
       if (orchestrator?.getProgress()) options.onProgress?.(orchestrator.getProgress()!)
     })
 
     orchestrator.on('gap-failed', ({ gap, error }) => {
+      currentGap.value = null
       options.onGapFailed?.(gap, error)
       if (orchestrator?.getProgress()) options.onProgress?.(orchestrator.getProgress()!)
     })
 
     orchestrator.on('log', ({ entry }) => {
       logs.value.push(entry)
+      if (logs.value.length > MAX_LOG_ENTRIES) {
+        logs.value.splice(0, logs.value.length - MAX_LOG_ENTRIES)
+      }
       options.onLog?.(entry)
     })
 
@@ -116,6 +127,7 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
   ) => {
     if (!orchestrator) initialize()
     isRunning.value = true
+    currentGap.value = null
     logs.value = []
     await orchestrator!.startFullGeneration(channelId, date, dayStartTime, dayEndTime)
     session.value = orchestrator!.getSession()
@@ -124,6 +136,7 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
   const startPartialGeneration = async (channelId: string, date: string, targetGapIds?: string[]) => {
     if (!orchestrator) initialize()
     isRunning.value = true
+    currentGap.value = null
     logs.value = []
     await orchestrator!.startPartialGeneration(channelId, date, targetGapIds)
     session.value = orchestrator!.getSession()

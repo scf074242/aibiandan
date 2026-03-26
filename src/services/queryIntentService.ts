@@ -1,4 +1,9 @@
-import type { CandidateQueryCriteria, GapInfo, GenerationContext, PlanningStrategy } from '@/types/orchestration'
+import type {
+  CandidateQueryCriteria,
+  GapInfo,
+  GenerationContext,
+  PlanningStrategy,
+} from '@/types/orchestration'
 import type { LLMClient } from './llm/llmClient'
 import type { GapPlanningThought } from './orchestrationStrategyService'
 import { buildQueryIntentPrompt } from './orchestrationPromptBuilder'
@@ -14,6 +19,12 @@ export class QueryIntentService {
     userIntent?: string,
   ): Promise<CandidateQueryCriteria> {
     const fallback = this.buildFallbackCriteria(gap, thought, context, strategy)
+    const layoutMatch = this.findLayoutMatch(gap, context)
+    const shouldLockToLayout = Boolean(layoutMatch && !layoutMatch.isWeakConstraint)
+
+    if (shouldLockToLayout) {
+      return fallback
+    }
 
     try {
       const response = await this.llmClient.chat(
@@ -44,14 +55,30 @@ export class QueryIntentService {
     return {
       targetTimeRange: { start: gap.startTime, end: gap.endTime },
       expectedDuration: thought.durationPreference,
-      programTypePreference: thought.targetProgramTypes.length > 0 ? thought.targetProgramTypes : gap.constraints.allowedTypes,
+      programTypePreference:
+        thought.targetProgramTypes.length > 0
+          ? thought.targetProgramTypes
+          : gap.constraints.allowedTypes,
       searchKeywords: thought.searchKeywords,
       preferredChannelId: context.channel.channelId,
+      slotLabel: thought.targetSlotLabel,
+      preferredProgramGroup: thought.preferredProgramGroup,
+      preferredSlot: thought.targetSlotLabel,
+      editorialBias: thought.searchKeywords,
       sequentialPreference: thought.sequentialPreference,
       excludeUsed: true,
       considerRatings: true,
       allowShortFiller: strategy.allowFiller && thought.allowFiller,
     }
+  }
+
+  private findLayoutMatch(gap: GapInfo, context: GenerationContext) {
+    return (context.layoutReference?.slots ?? []).find((slot) => {
+      const gapStart = new Date(gap.startTime).getTime()
+      const slotStart = new Date(slot.startTime).getTime()
+      const slotEnd = new Date(slot.endTime).getTime()
+      return gapStart >= slotStart && gapStart < slotEnd
+    })
   }
 
   private parseCriteria(content: string): Partial<CandidateQueryCriteria> | null {

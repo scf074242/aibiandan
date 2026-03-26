@@ -9,6 +9,7 @@ export interface ScheduleItem {
   scheduleId?: string
   startTime: string
   endTime: string
+  programType?: string
   episodeName?: string
   indexingSheetCode?: string
   materialStatus?: MaterialStatus | string
@@ -106,13 +107,14 @@ export const programTypeOptions = [
   { value: 'health', label: '健康' },
   { value: 'weather', label: '天气' },
   { value: 'drama', label: '电视剧' },
+  { value: 'entertainment', label: '娱乐' },
   { value: 'variety', label: '综艺' },
   { value: 'movie', label: '电影' },
   { value: 'documentary', label: '纪录片' },
   { value: 'sports', label: '体育' },
   { value: 'education', label: '教育' },
   { value: 'kids', label: '少儿' },
-  { value: 'travel', label: '文旅' },
+  { value: 'travel', label: '旅游' },
   { value: 'lifestyle', label: '生活' },
   { value: 'promo', label: '宣传片' },
   { value: 'filler', label: '填充' },

@@ -6,27 +6,73 @@ body,
   width: 100%;
   min-width: 0;
   min-height: 100%;
-  margin: 0;
-}
-
-body {
-  font-weight: normal;
 }
 
 #app {
   min-height: 100vh;
 }
 
-a,
-.green {
-  text-decoration: none;
-  color: hsla(160, 100%, 37%, 1);
-  transition: 0.4s;
-  padding: 3px;
+body {
+  overflow: hidden;
 }
 
-@media (hover: hover) {
-  a:hover {
-    background-color: hsla(160, 100%, 37%, 0.2);
-  }
+.el-button {
+  border-radius: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.el-button--primary {
+  --el-button-bg-color: #ea580c;
+  --el-button-border-color: #ea580c;
+  --el-button-hover-bg-color: #c2410c;
+  --el-button-hover-border-color: #c2410c;
+  --el-button-active-bg-color: #9a3412;
+  --el-button-active-border-color: #9a3412;
+}
+
+.el-button:not(.el-button--primary):not(.is-link) {
+  border-color: rgba(194, 101, 22, 0.12);
+  background: rgba(255, 255, 255, 0.76);
+  color: #374151;
+}
+
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner,
+.el-date-editor.el-input__wrapper {
+  border-radius: 14px;
+  box-shadow: 0 0 0 1px rgba(194, 101, 22, 0.12);
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-textarea__inner:focus,
+.el-date-editor.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px rgba(234, 88, 12, 0.35);
+}
+
+.el-tag {
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.el-table,
+.el-dialog,
+.el-card {
+  --el-border-color-lighter: rgba(194, 101, 22, 0.12);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(194, 101, 22, 0.28);
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 247, 237, 0.7);
 }

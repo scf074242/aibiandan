@@ -35,7 +35,7 @@ export class InsertCommandExecutor {
     if (!atomicCapabilities.isTimeRangeAvailable(startTime, endTime)) {
       return {
         success: false,
-        message: `目标时间 ${insertTime} 已有节目占用，当前演示版本仅支持插入到空闲时间段`,
+        message: `目标时间 ${insertTime} 已有节目占用，当前仅支持插入到空闲时间段`,
       }
     }
 
@@ -103,14 +103,27 @@ export class InsertCommandExecutor {
   }
 
   private normalizeDateTime(scheduleDate: string, timeText: string): string {
-    if (timeText.includes('T')) return timeText
+    if (timeText.includes('T')) {
+      return timeText.includes('+08:00') ? timeText : `${timeText}+08:00`
+    }
     const normalizedTime = timeText.length === 5 ? `${timeText}:00` : timeText
-    return `${scheduleDate}T${normalizedTime}`
+    return `${scheduleDate}T${normalizedTime}+08:00`
   }
 
   private calculateEndTime(startTime: string, durationSeconds: number): string {
     const start = new Date(startTime).getTime()
-    return new Date(start + durationSeconds * 1000).toISOString()
+    return this.formatLocalDateTime(start + durationSeconds * 1000)
+  }
+
+  private formatLocalDateTime(timestampMs: number): string {
+    const date = new Date(timestampMs)
+    const year = date.getFullYear()
+    const month = `${date.getMonth() + 1}`.padStart(2, '0')
+    const day = `${date.getDate()}`.padStart(2, '0')
+    const hours = `${date.getHours()}`.padStart(2, '0')
+    const minutes = `${date.getMinutes()}`.padStart(2, '0')
+    const seconds = `${date.getSeconds()}`.padStart(2, '0')
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
   }
 }
 

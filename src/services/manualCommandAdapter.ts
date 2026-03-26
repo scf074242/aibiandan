@@ -24,15 +24,25 @@ export class ManualCommandAdapter {
     }
   }
 
-  buildInsertCommand(item: Pick<ScheduleItem, 'startTime' | 'programCode' | 'code18' | 'programName'>, context: ManualCommandContext): InsertCommand | null {
+  buildInsertCommand(
+    item: Pick<ScheduleItem, 'startTime' | 'programCode' | 'code18' | 'programName'>,
+    context: ManualCommandContext,
+  ): InsertCommand | null {
     const candidateId = item.programCode || item.code18
     if (!candidateId) {
       return null
     }
+    return this.buildInsertCommandForCandidate(candidateId, item, context)
+  }
 
+  buildInsertCommandForCandidate(
+    candidateId: string,
+    item: Pick<ScheduleItem, 'startTime' | 'programName'>,
+    context: ManualCommandContext,
+  ): InsertCommand {
     return {
       action: 'insert',
-      reasoning: '人工新增节目，转换为统一插入命令。',
+      reasoning: '人工新增节目，已解析到候选节目，转换为统一插入命令。',
       data: {
         candidateId,
         candidateName: item.programName || '',
@@ -57,16 +67,18 @@ export class ManualCommandAdapter {
       commands.push(this.buildMoveCommand(updatedItem.id, updatedItem.startTime, context.scheduleDate))
     }
 
+    const derivedDuration = this.deriveDuration(updatedItem.startTime, updatedItem.endTime)
+    const originalDuration = originalItem.duration ?? this.deriveDuration(originalItem.startTime, originalItem.endTime)
+    if (derivedDuration !== originalDuration) {
+      commands.push(this.buildUpdateFieldCommand(updatedItem.id, 'duration', derivedDuration))
+    }
+
     if (originalItem.programName !== updatedItem.programName && originalCandidateId === updatedCandidateId) {
-      commands.push(this.buildUpdateFieldCommand(updatedItem.id, 'programName', updatedItem.programName))
+      commands.push(this.buildUpdateFieldCommand(updatedItem.id, 'programName', updatedItem.programName || ''))
     }
 
-    if (originalItem.endTime !== updatedItem.endTime) {
-      commands.push(this.buildUpdateFieldCommand(updatedItem.id, 'endTime', this.toDateTime(context.scheduleDate, updatedItem.endTime)))
-    }
-
-    if (originalItem.duration !== updatedItem.duration) {
-      commands.push(this.buildUpdateFieldCommand(updatedItem.id, 'duration', updatedItem.duration))
+    if (originalItem.remark !== updatedItem.remark) {
+      commands.push(this.buildUpdateFieldCommand(updatedItem.id, 'remark', updatedItem.remark || ''))
     }
 
     return commands
@@ -116,7 +128,19 @@ export class ManualCommandAdapter {
   private toDateTime(scheduleDate: string, timeText: string): string {
     if (timeText.includes('T')) return timeText
     const normalized = timeText.length === 5 ? `${timeText}:00` : timeText
-    return `${scheduleDate}T${normalized}`
+    return `${scheduleDate}T${normalized}+08:00`
+  }
+
+  private deriveDuration(startTime: string, endTime: string): number {
+    const start = this.toSeconds(startTime)
+    const end = this.toSeconds(endTime)
+    return Math.max(60, end - start)
+  }
+
+  private toSeconds(timeText: string): number {
+    const clock = timeText.includes('T') ? timeText.split('T')[1]?.slice(0, 8) || timeText : timeText
+    const [hours = 0, minutes = 0, seconds = 0] = clock.split(':').map(Number)
+    return hours * 3600 + minutes * 60 + seconds
   }
 }
 

@@ -186,6 +186,8 @@ export class AtomicCapabilities {
         this.createSnapshot(item.id, 'append')
       }
 
+      this.normalizeSequences()
+
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {
         await this.triggerValidation('full')
@@ -228,6 +230,7 @@ export class AtomicCapabilities {
 
       // 替换条目
       this.items.set(itemId, { ...newItem })
+      this.normalizeSequences()
 
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {
@@ -273,6 +276,7 @@ export class AtomicCapabilities {
 
       // 删除条目
       this.items.delete(itemId)
+      this.normalizeSequences()
 
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {
@@ -334,6 +338,7 @@ export class AtomicCapabilities {
         endTime: newEndTime,
       }
       this.items.set(itemId, updatedItem)
+      this.normalizeSequences()
 
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {
@@ -394,10 +399,11 @@ export class AtomicCapabilities {
         const duration = field === 'duration' ? value : item.duration
         const startMs = new Date(startTime).getTime()
         const endMs = startMs + duration * 1000
-        updatedItem.endTime = new Date(endMs).toISOString()
+        updatedItem.endTime = this.formatLocalDateTime(endMs)
       }
 
       this.items.set(itemId, updatedItem)
+      this.normalizeSequences()
 
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {

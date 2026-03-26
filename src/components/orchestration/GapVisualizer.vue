@@ -170,7 +170,7 @@ const props = withDefaults(defineProps<Props>(), {
   scheduleItems: () => [],
   startHour: 6,
   endHour: 24,
-  currentDate: () => new Date().toISOString().split('T')[0]
+  currentDate: () => '2026-03-25'
 })
 
 const emit = defineEmits<{

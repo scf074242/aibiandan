@@ -97,6 +97,12 @@ export interface GapProcessingState {
   completedAt?: string
 }
 
+/** 编排进度中的空窗详情 */
+export interface ProgressGapInfo extends GapInfo {
+  status: GapProcessingStatus
+  error?: string
+}
+
 // ==================== 编排会话相关 ====================
 
 /** 编排策略 */
@@ -194,6 +200,12 @@ export interface CandidateQueryCriteria {
   programTypePreference?: string[]
   searchKeywords?: string[]
   preferredChannelId?: string
+  slotLabel?: string
+  preferredProgramGroup?: string
+  columnId?: string
+  columnName?: string
+  preferredSlot?: string
+  editorialBias?: string[]
   sequentialPreference: boolean
   excludeUsed: boolean
   considerRatings: boolean
@@ -319,8 +331,18 @@ export interface ProgramCandidate {
   id: string
   programCode: string
   programName: string
+  channelId: string
+  channelName?: string
+  columnId: string
+  columnCode: string
+  columnName: string
   duration: number
   programType: string
+  yearCode: string
+  issueNo: string
+  seriesGroup?: string
+  editorialWeight?: number
+  preferredSlot?: string
   rating?: number
   description?: string
   tags?: string[]
@@ -507,6 +529,7 @@ export interface OrchestrationProgress {
   // 当前处理
   currentGap?: GapInfo
   currentAction?: string
+  liveGaps: ProgressGapInfo[]
   
   // 统计
   stats: ExecutionStats
@@ -540,6 +563,17 @@ export interface GenerationContext {
   constraints: ScheduleConstraints
 }
 
+export interface ColumnDefinition {
+  columnId: string
+  columnCode: string
+  columnName: string
+  channelId: string
+  defaultProgramType: string
+  editorialBias: string[]
+  preferredSlots: string[]
+  isFixedBand: boolean
+}
+
 /** 版面参考 */
 export interface LayoutReference {
   id: string
@@ -553,6 +587,16 @@ export interface LayoutSlot {
   startTime: string
   endTime: string
   programType: string
+   slotLabel?: string
+   preferredProgramTypes?: string[]
+   preferredKeywords?: string[]
+  columnId?: string
+  columnName?: string
+  preferredProgramGroup?: string
+  priority?: number
+  isWeakConstraint?: boolean
+  editorialBias?: string[]
+  isFixedBand?: boolean
   fixedProgram?: string
 }
 

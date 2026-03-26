@@ -9,6 +9,7 @@ import type {
   GapConstraints,
   GapMetadata,
   GapProcessingState,
+  ProgressGapInfo,
   ScheduleItemSnapshot,
   FixedItem,
   TimeRange,
@@ -432,6 +433,24 @@ export class GapManager {
    */
   getTotalGapDuration(): number {
     return Array.from(this.gaps.values()).reduce((sum, gap) => sum + gap.duration, 0)
+  }
+
+  getActiveGaps(): ProgressGapInfo[] {
+    return Array.from(this.gaps.values())
+      .map((gap) => {
+        const state = this.processingStates.get(gap.id)
+        return {
+          ...gap,
+          status: state?.status ?? 'pending',
+          error: state?.error,
+        }
+      })
+      .sort((a, b) => {
+        if (a.metadata.priority !== b.metadata.priority) {
+          return a.metadata.priority - b.metadata.priority
+        }
+        return new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+      })
   }
 
   // ==================== 辅助方法 ====================

@@ -3,8 +3,54 @@
     <!-- 顶部信息栏 -->
     <div class="page-header">
       <div class="header-left">
-        <el-button link :icon="ArrowLeft" @click="handleBack">返回</el-button>
-        <h1 class="page-title">{{ pageTitle }}</h1>
+        <div class="header-breadcrumb">
+          <el-button link :icon="ArrowLeft" class="back-button" @click="handleBack">返回</el-button>
+          <span class="header-kicker">播出编排工作台</span>
+        </div>
+        <div class="header-title-group">
+          <p class="header-eyebrow">{{ currentChannelName }} / {{ scheduleDate }}</p>
+          <h1 class="page-title">{{ pageTitle }}</h1>
+          <p class="header-summary">把编单、素材状态和 AI 编排动作收束到同一个清晰的工作面板里。</p>
+        </div>
+        <div class="header-status-row">
+          <el-tag
+            :type="getStatusType(scheduleForm.status || '')"
+            effect="light"
+            round
+            size="large"
+          >
+            {{ getStatusText(scheduleForm.status || '') }}
+          </el-tag>
+          <el-tag
+            v-if="scheduleForm.isLocked"
+            type="danger"
+            effect="light"
+            round
+            size="large"
+          >
+            <el-icon><Lock /></el-icon>
+            已锁定
+          </el-tag>
+          <el-tag effect="plain" round size="large">
+            {{ isViewMode ? '查看模式' : '编辑模式' }}
+          </el-tag>
+        </div>
+        <div class="header-metrics">
+          <div class="metric-card">
+            <span class="metric-label">节目总数</span>
+            <strong class="metric-value">{{ displayItems.length }}</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">总时长</span>
+            <strong class="metric-value">{{ totalDurationText }}</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">待处理风险</span>
+            <strong class="metric-value is-alert">
+              {{ unlinkedItemCount + emptyMaterialItemCount + displayGapCount }}
+            </strong>
+          </div>
+        </div>
       </div>
       <div class="header-right">
         <el-form
@@ -59,25 +105,6 @@
               />
             </el-avatar-group>
           </el-form-item>
-          <el-form-item>
-            <el-tag
-              :type="getStatusType(scheduleForm.status || '')"
-              effect="light"
-              size="large"
-            >
-              {{ getStatusText(scheduleForm.status || '') }}
-            </el-tag>
-            <el-tag
-              v-if="scheduleForm.isLocked"
-              type="danger"
-              effect="light"
-              size="large"
-              style="margin-left: 8px"
-            >
-              <el-icon><Lock /></el-icon>
-              已锁定
-            </el-tag>
-          </el-form-item>
         </el-form>
       </div>
     </div>
@@ -91,37 +118,51 @@
           <!-- 时间轴头部 -->
           <div class="timeline-header">
             <div class="timeline-header-left">
-              <el-button
-                v-if="!isViewMode && !scheduleForm.isLocked"
-                type="primary"
-                :icon="Plus"
-                :disabled="allowedDialogTypes.length === 0"
-                @click="handleAddItem"
-              >
-                添加节目
-              </el-button>
-              <el-button
-                v-if="!isViewMode && !scheduleForm.isLocked"
-                :icon="CopyDocument"
-                @click="handleImportFromPlan"
-              >
-                从播出计划导入
-              </el-button>
-              <el-button
-                :type="showLayoutReference ? 'warning' : 'default'"
-                :icon="View"
-                @click="toggleLayoutReference"
-              >
-                {{ showLayoutReference ? '隐藏版面' : '显示版面' }}
-              </el-button>
-              <el-button
-                type="success"
-                :icon="MagicStick"
-                @click="toggleAISidebar"
-                class="ai-orchestration-btn"
-              >
-                {{ aiSidebarVisible ? '关闭 AI 助手' : 'AI 智能编排' }}
-              </el-button>
+              <div class="timeline-heading">
+                <span class="timeline-kicker">编排主工作区</span>
+                <h2 class="timeline-title">时间轴与素材清单</h2>
+              </div>
+              <div class="timeline-action-group">
+                <el-button
+                  v-if="!isViewMode && !scheduleForm.isLocked"
+                  type="primary"
+                  :icon="Plus"
+                  :disabled="allowedDialogTypes.length === 0"
+                  @click="handleAddItem"
+                >
+                  添加节目
+                </el-button>
+                <el-button
+                  v-if="!isViewMode && !scheduleForm.isLocked"
+                  :icon="CopyDocument"
+                  @click="handleImportFromPlan"
+                >
+                  从播出计划导入
+                </el-button>
+                <el-button
+                  type="success"
+                  :icon="MagicStick"
+                  @click="toggleAISidebar"
+                  class="ai-orchestration-btn"
+                >
+                  {{ aiSidebarVisible ? '关闭 AI 助手' : 'AI 智能编排' }}
+                </el-button>
+                <el-button
+                  v-if="orchestratorRuntime.progress.value"
+                  :type="progressPanelVisible ? 'warning' : 'default'"
+                  :icon="DataLine"
+                  @click="toggleProgressPanel"
+                >
+                  {{ progressPanelVisible ? '收起进度' : '查看进度' }}
+                </el-button>
+                <el-button
+                  v-if="orchestratorRuntime.canCancel.value"
+                  type="danger"
+                  @click="handleCancelOrchestration"
+                >
+                  中止编排
+                </el-button>
+              </div>
             </div>
             <div class="timeline-header-right">
               <span class="stats-text">
@@ -148,7 +189,7 @@
                 空成品 {{ emptyMaterialItemCount }} 条
               </el-tag>
               <el-popover
-                v-if="timeDiscontinuityCount > 0"
+                v-if="displayGapCount > 0"
                 placement="bottom-end"
                 :width="320"
                 trigger="click"
@@ -162,22 +203,60 @@
                     class="header-alert-tag"
                   >
                     <el-icon><WarningFilled /></el-icon>
-                    时间空缺 {{ timeDiscontinuityCount }} 条
+                    {{ gapSummaryLabel }} {{ displayGapCount }} 条
                   </el-tag>
                 </template>
                 <div class="continuity-popover">
                   <div
-                    v-for="gap in timeDiscontinuities"
+                    v-for="gap in displayGapEntries"
                     :key="gap.id"
                     class="continuity-item"
                   >
                     <div class="continuity-text">
                       缺失时间：{{ formatTime4(gap.from) }} - {{ formatTime4(gap.to) }}
                     </div>
-                    <el-button class="gap-fix-btn" type="primary" size="small" @click="openAddItemForGap(gap)">补齐</el-button>
+                    <div class="continuity-actions">
+                      <el-tag
+                        v-if="gap.source === 'runtime'"
+                        :type="getGapEntryTagType(gap.status)"
+                        effect="light"
+                        size="small"
+                      >
+                        {{ getGapEntryStatusText(gap.status) }}
+                      </el-tag>
+                      <el-button
+                        v-else
+                        class="gap-fix-btn"
+                        type="primary"
+                        size="small"
+                        @click="openAddItemForGap(gap)"
+                      >
+                        补齐
+                      </el-button>
+                    </div>
                   </div>
                 </div>
               </el-popover>
+            </div>
+          </div>
+          <div class="timeline-insight-bar">
+            <div class="insight-group">
+              <span class="insight-label">当前视图</span>
+              <span class="insight-pill">{{ isViewMode ? '查看模式' : '编辑模式' }}</span>
+              <span class="insight-pill">{{ currentChannelName }}</span>
+              <span class="insight-pill">{{ scheduleDate }}</span>
+            </div>
+            <div class="insight-group is-risk">
+              <span class="insight-label">风险概览</span>
+              <span class="insight-pill" :class="{ 'is-danger': unlinkedItemCount > 0 }">
+                未关联 {{ unlinkedItemCount }}
+              </span>
+              <span class="insight-pill" :class="{ 'is-danger': emptyMaterialItemCount > 0 }">
+                空成品 {{ emptyMaterialItemCount }}
+              </span>
+              <span class="insight-pill" :class="{ 'is-warning': displayGapCount > 0 }">
+                空窗 {{ displayGapCount }}
+              </span>
             </div>
           </div>
 
@@ -381,10 +460,20 @@
       <!-- 右侧：AI 助手侧边栏 -->
       <div v-if="aiSidebarVisible" class="ai-sidebar">
         <div class="ai-sidebar-header">
-          <h3 class="ai-sidebar-title">
-            <el-icon><ChatDotRound /></el-icon>
-            AI 助手
-          </h3>
+          <div class="ai-sidebar-heading">
+            <h3 class="ai-sidebar-title">
+              <el-icon><ChatDotRound /></el-icon>
+              AI 助手
+            </h3>
+            <p class="ai-sidebar-subtitle">围绕当前频道、日期和时间空窗，直接补齐、调整或校验编单。</p>
+          </div>
+          <div class="ai-sidebar-status">
+            <span class="ai-sidebar-pill">{{ currentChannelName }}</span>
+            <span class="ai-sidebar-pill">{{ displayGapCount }} 个空窗</span>
+            <span class="ai-sidebar-pill" :class="{ 'is-live': orchestratorRuntime.isRunning.value }">
+              {{ orchestratorRuntime.isRunning.value ? '编排进行中' : '待命中' }}
+            </span>
+          </div>
           <el-button link @click="aiSidebarVisible = false">
             <el-icon><Close /></el-icon>
           </el-button>
@@ -395,11 +484,14 @@
             :channel-id="currentChannelId"
             :channel-name="currentChannelName"
             :date="scheduleDate"
-            :gap-count="timeDiscontinuityCount"
+            :gap-count="displayGapCount"
             :orchestration-logs="orchestratorRuntime.recentLogs.value"
+            :is-orchestrating="orchestratorRuntime.isRunning.value"
+            :can-interrupt="orchestratorRuntime.canCancel.value"
             @command-executed="handleChatCommandExecuted"
             @schedule-updated="handleChatScheduleUpdated"
             @orchestrate-requested="handleChatOrchestrateRequested"
+            @cancel-requested="handleCancelOrchestration"
           />
         </div>
       </div>
@@ -439,6 +531,7 @@
       :default-sort-order="gapDialogDefaults?.sortOrder"
       :allowed-types="allowedDialogTypes"
       @save="handleSaveItem"
+      @delete="handleDeleteItemById"
     />
   </div>
 </template>
@@ -478,11 +571,13 @@ import {
   getScheduleDetail,
   generateImportedScheduleItems,
   generateId,
+  getProgramTypeName,
   materialStatusText,
   materialStatusType,
   timeToMinutes,
   getTimeDiff
 } from './scheduleData'
+import { demoBaseDate } from '@/mock/demoData'
 import { layoutReferenceData, type LayoutReferenceItem } from './layoutReferenceData'
 
 // AI 编排相关导入
@@ -490,6 +585,8 @@ import { useOrchestrator } from '@/composables/useOrchestrator'
 import { getAtomicCapabilities } from '@/services/atomicCapabilities'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
 import { getManualCommandAdapter } from '@/services/manualCommandAdapter'
+import { getCandidateService } from '@/services/candidateService'
+import type { GapProcessingStatus } from '@/types/orchestration'
 import ChatPanel from '@/components/dialogue/ChatPanel.vue'
 import OrchestrationProgress from '@/components/orchestration/OrchestrationProgress.vue'
 
@@ -508,14 +605,14 @@ const isHeaderFieldsDisabled = computed(() => {
   return isViewMode.value || Boolean(route.params.id) || Boolean(scheduleForm.value.isLocked)
 })
 
-const scheduleDate = computed<string>(() => scheduleForm.value.date || new Date().toISOString().split('T')[0] || '')
-const currentChannelId = computed<string>(() => scheduleForm.value.channelId || 'news')
-const currentChannelName = computed<string>(() => scheduleForm.value.channelName || '新闻综合')
+const scheduleDate = computed<string>(() => scheduleForm.value.date || demoBaseDate)
+const currentChannelId = computed<string>(() => scheduleForm.value.channelId || 'dragon')
+const currentChannelName = computed<string>(() => scheduleForm.value.channelName || '东方卫视')
 
 // 频道选项
 const channelOptions = ref([
-  { id: 'news', name: '新闻综合' },
   { id: 'dragon', name: '东方卫视' },
+  { id: 'news', name: '新闻综合' },
   { id: 'finance', name: '第一财经' },
   { id: 'sports', name: '五星体育' },
   { id: 'doc', name: '纪实人文' },
@@ -585,6 +682,31 @@ const shouldWarnEmptyMaterialFields = (item: ScheduleItem) => {
   if (!shouldShowMaterialFields(item)) return false
   return Boolean(item.isMaterialInfoEmpty)
 }
+
+const inferProgramTypeFromName = (name?: string): string => {
+  const text = (name || '').trim()
+  if (!text) return 'program'
+  if (/剧场|电视剧|第\d+集/.test(text)) return 'drama'
+  if (/考古|纪实|纪录|新纪实/.test(text)) return 'documentary'
+  if (/新闻|快报|看东方|ShanghaiEye|午间30分/.test(text)) return 'news'
+  if (/养生|健康|名医/.test(text)) return 'health'
+  if (/娱乐|真人秀/.test(text)) return 'entertainment'
+  if (/旅行|文旅|下一站/.test(text)) return 'travel'
+  if (/潮童|亲子|少儿/.test(text)) return 'kids'
+  if (/爱上海|生活/.test(text)) return 'lifestyle'
+  if (/锚点|两说|执牛耳者|环球交叉点/.test(text)) return 'commentary'
+  return 'program'
+}
+
+const resolveScheduleItemProgramType = (item: Partial<ScheduleItem>) =>
+  item.programType ||
+  (item.businessType === 'ad' ? 'ad' : item.sourceType === 'live' ? 'live' : inferProgramTypeFromName(item.programName || item.episodeName))
+
+const normalizeDemoDisplayName = (name?: string) => (name || '').replace(/带$/, '')
+
+const formatRelativeStart = () => '00:00:00'
+
+const formatPlayLengthText = (durationSeconds: number) => `${Math.max(1, Math.round(durationSeconds / 60))}分钟`
 
 const fillLiveStudios = () => {
   const studios = currentStudioOptions.value
@@ -659,9 +781,11 @@ const aiUserInput = ref('')
 const atomicCapabilities = getAtomicCapabilities()
 const scheduleCommandBus = getScheduleCommandBus()
 const manualCommandAdapter = getManualCommandAdapter()
+const candidateService = getCandidateService()
+let syncAtomicItemsRaf = 0
 
 const syncPageItemsToAtomic = () => {
-  const date = scheduleForm.value.date || new Date().toISOString().split('T')[0]
+  const date = scheduleForm.value.date || demoBaseDate
   atomicCapabilities.loadItems(
     scheduleItems.value.map((item, index) => ({
       id: item.id,
@@ -674,7 +798,7 @@ const syncPageItemsToAtomic = () => {
         ? item.endTime
         : `${date}T${item.endTime.length === 5 ? `${item.endTime}:00` : item.endTime}`,
       duration: Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime)),
-      programType: item.businessType === 'ad' ? 'ad' : item.sourceType === 'live' ? 'live' : 'program',
+      programType: resolveScheduleItemProgramType(item),
       sequence: index + 1,
     })),
   )
@@ -687,6 +811,7 @@ const syncAtomicItemsToPage = () => {
     scheduleId: scheduleForm.value.id || '',
     startTime: item.startTime.split('T')[1]?.slice(0, 8) || item.startTime,
     endTime: item.endTime.split('T')[1]?.slice(0, 8) || item.endTime,
+    programType: item.programType,
     episodeName: item.programName,
     programName: item.programName,
     businessType: item.programType === 'ad' ? 'ad' : 'program',
@@ -695,12 +820,22 @@ const syncAtomicItemsToPage = () => {
     duration: Math.max(1, Math.round(item.duration / 60)),
     programCode: item.programCode,
     code18: item.programCode,
-    materialStatus: 'ready',
-    materialName: `${item.programCode}-MAT`,
-    playLength: `${Math.max(1, Math.round(item.duration / 60))}分钟`,
-    relativeStart: item.startTime.split('T')[1]?.slice(0, 5) || '',
+    materialStatus: item.programType === 'ad' ? 'pending' : 'ready',
+    materialName: item.programType === 'ad' ? '待广告系统下发' : `${item.programCode}-MAT`,
+    playLength: formatPlayLengthText(item.duration),
+    relativeStart: formatRelativeStart(),
     remark: '',
   }))
+}
+
+const syncAtomicItemsToPageDeferred = () => {
+  if (syncAtomicItemsRaf) {
+    cancelAnimationFrame(syncAtomicItemsRaf)
+  }
+  syncAtomicItemsRaf = requestAnimationFrame(() => {
+    syncAtomicItemsRaf = 0
+    syncAtomicItemsToPage()
+  })
 }
 
 const chatScheduleItems = computed(() =>
@@ -711,7 +846,7 @@ const chatScheduleItems = computed(() =>
     startTime: item.startTime,
     endTime: item.endTime,
     duration: Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime)),
-    programType: item.businessType === 'ad' ? 'ad' : item.sourceType === 'live' ? 'live' : 'program',
+    programType: resolveScheduleItemProgramType(item),
   })),
 )
 
@@ -739,7 +874,13 @@ const orchestratorRuntime = useOrchestrator({
     ElMessage.error(`AI 编排失败: ${error.message}`)
   },
   onProgress: () => {
-    syncAtomicItemsToPage()
+    syncAtomicItemsToPageDeferred()
+  },
+  onStatusChange: (status) => {
+    if (status === 'cancelled') {
+      syncAtomicItemsToPage()
+      ElMessage.info('AI 编排已中止，当前已生成内容已保留')
+    }
   },
   onLog: (log: any) => {
     console.log('编排日志:', log.message || log)
@@ -775,7 +916,7 @@ const handleAICommand = async () => {
       date,
       isEmpty: scheduleItems.value.length === 0,
       itemCount: scheduleItems.value.length,
-      gapCount: timeDiscontinuityCount.value,
+      gapCount: displayGapCount.value,
       hasSelectedTimeRange: false,
     },
     userInput,
@@ -806,6 +947,24 @@ const toggleProgressPanel = () => {
   progressPanelVisible.value = !progressPanelVisible.value
 }
 
+const handleCancelOrchestration = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '中止后将保留当前已编排结果，剩余空窗不再继续自动处理。是否停止本次 AI 编排？',
+      '中止编排',
+      {
+        type: 'warning',
+        confirmButtonText: '中止编排',
+        cancelButtonText: '继续运行',
+      },
+    )
+    progressPanelVisible.value = true
+    orchestratorRuntime.cancel()
+  } catch {
+    // 用户取消中止
+  }
+}
+
 // 排序后的编单项
 const sortedItems = computed(() => {
   return [...scheduleItems.value].sort((a, b) => {
@@ -823,11 +982,12 @@ const referenceItems = computed<ScheduleItem[]>(() => {
     scheduleId: '',
     startTime: `${ref.startTime}:00`,
     endTime: `${ref.endTime}:00`,
-    episodeName: ref.programName,
+    programType: ref.programType,
+    episodeName: normalizeDemoDisplayName(ref.programName),
     indexingSheetCode: `IDX${ref.code18 || String(index + 1).padStart(6, '0')}`,
     materialStatus: 'ready' as const,
     businessType: ref.type,
-    programName: ref.programName,
+    programName: normalizeDemoDisplayName(ref.programName),
     sourceType: ref.sourceType,
     remark: ref.remark || '',
     sortOrder: index,
@@ -861,6 +1021,42 @@ const timeToSeconds = (time: string): number => {
   return h * 3600 + m * 60 + s
 }
 
+const normalizeClockText = (time: string): string => {
+  if (time.includes('T')) {
+    return time.split('T')[1]?.slice(0, 8) || time
+  }
+  return time.length === 5 ? `${time}:00` : time
+}
+
+const resolveManualCandidateId = async (item: Partial<ScheduleItem>): Promise<string | null> => {
+  const directId = item.programCode || item.code18
+  if (directId) {
+    const directCandidate = candidateService.getCandidateById(directId)
+    if (directCandidate) {
+      return directCandidate.id
+    }
+  }
+
+  const keyword = (item.programName || '').trim()
+  if (!keyword) {
+    return null
+  }
+
+  const candidates = await candidateService.searchPrograms({
+    channelId: currentChannelId.value,
+    channelName: currentChannelName.value,
+    programName: keyword,
+    limit: 5,
+  })
+
+  if (candidates.length === 0) {
+    return null
+  }
+
+  const exactMatch = candidates.find((candidate) => candidate.programName === keyword || candidate.programCode === keyword)
+  return (exactMatch ?? candidates[0])?.id ?? null
+}
+
 type TimeDiscontinuity = {
   id: string
   from: string
@@ -869,6 +1065,12 @@ type TimeDiscontinuity = {
   nextId: string
   prevSortOrder: number
   nextSortOrder: number
+}
+
+type GapEntry = TimeDiscontinuity & {
+  source: 'manual' | 'runtime'
+  status: GapProcessingStatus
+  error?: string
 }
 
 const timeDiscontinuities = computed<TimeDiscontinuity[]>(() => {
@@ -898,7 +1100,66 @@ const timeDiscontinuities = computed<TimeDiscontinuity[]>(() => {
   return list
 })
 
-const timeDiscontinuityCount = computed(() => timeDiscontinuities.value.length)
+const runtimeGapEntries = computed<GapEntry[]>(() => {
+  const progress = orchestratorRuntime.progress.value
+  if (!progress) return []
+
+  return progress.liveGaps
+    .filter((gap) => gap.status !== 'completed')
+    .map((gap) => ({
+      id: gap.id,
+      from: normalizeClockText(gap.startTime),
+      to: normalizeClockText(gap.endTime),
+      prevId: gap.precedingItemId || '',
+      nextId: gap.followingItemId || '',
+      prevSortOrder: 0,
+      nextSortOrder: 0,
+      source: 'runtime',
+      status: gap.status,
+      error: gap.error,
+    }))
+})
+
+const displayGapEntries = computed<GapEntry[]>(() => {
+  if (runtimeGapEntries.value.length > 0) {
+    return runtimeGapEntries.value
+  }
+
+  return timeDiscontinuities.value.map((gap) => ({
+    ...gap,
+    source: 'manual' as const,
+    status: 'pending' as const,
+  }))
+})
+
+const displayGapCount = computed(() => displayGapEntries.value.length)
+const gapSummaryLabel = computed(() => (runtimeGapEntries.value.length > 0 ? '待处理空窗' : '时间空缺'))
+
+const getGapEntryStatusText = (status: GapProcessingStatus) => {
+  switch (status) {
+    case 'processing':
+      return '处理中'
+    case 'failed':
+      return '处理失败'
+    case 'completed':
+      return '已完成'
+    default:
+      return '待处理'
+  }
+}
+
+const getGapEntryTagType = (status: GapProcessingStatus): 'info' | 'warning' | 'success' | 'danger' => {
+  switch (status) {
+    case 'processing':
+      return 'warning'
+    case 'failed':
+      return 'danger'
+    case 'completed':
+      return 'success'
+    default:
+      return 'info'
+  }
+}
 
 const gapDialogDefaults = ref<{ startTime: string; endTime: string; sortOrder: number } | null>(null)
 
@@ -964,8 +1225,7 @@ const handleBack = () => {
  * 切换版面参考显示
  */
 const toggleLayoutReference = () => {
-  showLayoutReference.value = !showLayoutReference.value
-  ElMessage.info(showLayoutReference.value ? '已切换到版面参考视图' : '已切换到实际编排视图')
+  showLayoutReference.value = false
 }
 
 /**
@@ -1064,6 +1324,31 @@ const handleDeleteItem = (item: ScheduleItem, index: number) => {
   })
 }
 
+const handleDeleteItemById = async (itemId: string) => {
+  const item = scheduleItems.value.find((entry) => entry.id === itemId)
+  if (!item) {
+    ElMessage.error('未找到待删除节目')
+    return
+  }
+
+  const result = await scheduleCommandBus.execute(
+    manualCommandAdapter.buildDeleteCommand(item),
+    {
+      scheduleDate: scheduleDate.value,
+      channelId: currentChannelId.value,
+    },
+  )
+
+  if (!result.success) {
+    ElMessage.error(result.error || result.message)
+    return
+  }
+
+  syncAtomicItemsToPage()
+  gapDialogDefaults.value = null
+  ElMessage.success(result.message)
+}
+
 const handleMoveUp = async (item: ScheduleItem, index: number) => {
   const currentIndex = sortedItems.value.findIndex(v => v.id === item.id)
   if (currentIndex <= 0) return
@@ -1123,16 +1408,23 @@ const handleMoveDown = async (item: ScheduleItem, index: number) => {
  * @param item - 编单项
  */
 const handleSaveItem = async (item: Partial<ScheduleItem>) => {
-  if (!item.id || !item.startTime || !item.endTime) {
+  if (!item.startTime || !item.endTime) {
     ElMessage.error('节目数据不完整，无法保存')
     return
   }
 
   const normalizedItem: ScheduleItem = {
     ...item,
-    id: item.id,
-    startTime: item.startTime,
-    endTime: item.endTime,
+    id: item.id || generateId(),
+    programType: resolveScheduleItemProgramType(item),
+    startTime: normalizeClockText(item.startTime),
+    endTime: normalizeClockText(item.endTime),
+    relativeStart: item.relativeStart || formatRelativeStart(),
+    playLength: item.playLength || formatPlayLengthText(Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime))),
+    materialStatus: item.materialStatus || (resolveScheduleItemProgramType(item) === 'ad' ? 'pending' : item.materialStatus),
+    materialName:
+      item.materialName ||
+      (resolveScheduleItemProgramType(item) === 'ad' ? '待广告系统下发' : item.programCode ? `${item.programCode}-MAT` : ''),
   }
   const commandContext: { scheduleDate: string; channelId: string } = {
     scheduleDate: scheduleDate.value,
@@ -1169,12 +1461,21 @@ const handleSaveItem = async (item: Partial<ScheduleItem>) => {
     endTime: normalizedItem.endTime || gapDialogDefaults.value?.endTime || normalizedItem.endTime,
     scheduleId: scheduleForm.value.id || ''
   }
-  const insertCommand = manualCommandAdapter.buildInsertCommand(newItem, commandContext)
+  let insertCommand = manualCommandAdapter.buildInsertCommand(newItem, commandContext)
 
   if (!insertCommand) {
-    scheduleItems.value.push(newItem)
-    gapDialogDefaults.value = null
-    ElMessage.warning('当前新增节目还没有匹配到标准候选，先按本地草稿保存。')
+    const resolvedCandidateId = await resolveManualCandidateId(newItem)
+    if (resolvedCandidateId) {
+      insertCommand = manualCommandAdapter.buildInsertCommandForCandidate(
+        resolvedCandidateId,
+        newItem,
+        commandContext,
+      )
+    }
+  }
+
+  if (!insertCommand) {
+    ElMessage.error('未匹配到可插入的节目候选，请输入有效节目编号或更准确的节目名称。')
     return
   }
 
@@ -1275,14 +1576,17 @@ const getTypeTagType = (item: Pick<ScheduleItem, 'sourceType' | 'businessType'>)
   return 'info'
 }
 
-const getContentTypeText = (item: Pick<ScheduleItem, 'episodeName' | 'programName' | 'businessType'>) => {
+const getContentTypeText = (item: Pick<ScheduleItem, 'episodeName' | 'programName' | 'businessType' | 'programType'>) => {
   if (item.businessType === 'ad') return '广告'
-  return '新闻'
+  const resolvedType = resolveScheduleItemProgramType(item)
+  return getProgramTypeName(resolvedType)
 }
 
-const getContentTypeTagType = (item: Pick<ScheduleItem, 'episodeName' | 'programName' | 'businessType'>) => {
+const getContentTypeTagType = (item: Pick<ScheduleItem, 'episodeName' | 'programName' | 'businessType' | 'programType'>) => {
   const type = getContentTypeText(item)
   if (type === '广告') return 'warning'
+  if (['电视剧', '纪录片', '评论', '生活', '文旅', '少儿', '健康'].includes(type)) return 'success'
+  if (['综艺'].includes(type)) return 'danger'
   return 'primary'
 }
 
@@ -1397,10 +1701,10 @@ onMounted(async () => {
       fillLiveStudios()
     } else {
       scheduleForm.value.id = id
-      scheduleForm.value.date = (route.query.date as string) || new Date().toISOString().split('T')[0]
-      scheduleForm.value.channelId = (route.query.channelId as string) || 'news'
+        scheduleForm.value.date = (route.query.date as string) || demoBaseDate
+      scheduleForm.value.channelId = (route.query.channelId as string) || 'dragon'
       const channel = channelOptions.value.find(c => c.id === scheduleForm.value.channelId)
-      scheduleForm.value.channelName = channel?.name || '新闻综合'
+      scheduleForm.value.channelName = channel?.name || '东方卫视'
       scheduleForm.value.name = (route.query.name as string) || `协同编单-${scheduleForm.value.date}`
       scheduleForm.value.status = 'draft'
       scheduleForm.value.isLocked = false
@@ -1412,9 +1716,9 @@ onMounted(async () => {
   } else {
     // 创建模式，初始化默认值
     scheduleForm.value.id = generateId()
-    scheduleForm.value.date = new Date().toISOString().split('T')[0]
-    scheduleForm.value.channelId = 'news'
-    scheduleForm.value.channelName = '新闻综合'
+      scheduleForm.value.date = demoBaseDate
+    scheduleForm.value.channelId = 'dragon'
+    scheduleForm.value.channelName = '东方卫视'
     fillLiveStudios()
   }
 
@@ -1620,6 +1924,12 @@ onBeforeUnmount(() => {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .continuity-actions {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
   }
 
   :deep(.gap-fix-btn) {
@@ -2086,7 +2396,7 @@ onBeforeUnmount(() => {
 
   &.with-ai-sidebar {
     .schedule-content {
-      width: 80%;
+      width: calc(100% - 540px);
     }
   }
 }
@@ -2102,9 +2412,9 @@ onBeforeUnmount(() => {
 
 // 右侧 AI 助手侧边栏
 .ai-sidebar {
-  width: 20%;
-  min-width: 280px;
-  max-width: 360px;
+  width: 540px;
+  min-width: 540px;
+  max-width: 540px;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--xnews-border-color);
@@ -2182,11 +2492,13 @@ onBeforeUnmount(() => {
 @media (max-width: 1200px) {
   .content-wrapper.with-ai-sidebar {
     .schedule-content {
-      width: 75%;
+      width: calc(100% - 460px);
     }
 
     .ai-sidebar {
-      width: 25%;
+      width: 460px;
+      min-width: 460px;
+      max-width: 460px;
     }
   }
 }
@@ -2194,12 +2506,13 @@ onBeforeUnmount(() => {
 @media (max-width: 992px) {
   .content-wrapper.with-ai-sidebar {
     .schedule-content {
-      width: 70%;
+      width: calc(100% - 380px);
     }
 
     .ai-sidebar {
-      width: 30%;
-      min-width: 260px;
+      width: 380px;
+      min-width: 380px;
+      max-width: 380px;
     }
   }
 }
@@ -2213,6 +2526,615 @@ onBeforeUnmount(() => {
     width: 300px;
     z-index: 1000;
     box-shadow: -4px 0 16px rgba(0, 0, 0, 0.1);
+  }
+}
+
+.create-schedule-page {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(249, 115, 22, 0.18), transparent 26%),
+    radial-gradient(circle at right center, rgba(15, 23, 42, 0.08), transparent 32%),
+    linear-gradient(180deg, #fffaf4 0%, #fff4e8 45%, #fff8f0 100%);
+  padding-bottom: 0;
+}
+
+.page-header {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(420px, 0.9fr);
+  gap: 24px;
+  padding: 28px 32px 18px;
+  border-bottom: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.page-header::before {
+  content: '';
+  position: absolute;
+  inset: 14px 32px 0;
+  border-radius: 28px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(255, 247, 237, 0.8)),
+    linear-gradient(120deg, rgba(249, 115, 22, 0.08), rgba(15, 23, 42, 0.04));
+  box-shadow: 0 18px 60px rgba(146, 64, 14, 0.12);
+  border: 1px solid rgba(251, 146, 60, 0.14);
+  pointer-events: none;
+}
+
+.page-header > * {
+  position: relative;
+  z-index: 1;
+}
+
+.page-header .header-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 16px 6px 8px;
+}
+
+.header-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.back-button {
+  padding: 0;
+  color: #7c2d12;
+  font-weight: 600;
+}
+
+.header-kicker,
+.timeline-kicker {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(249, 115, 22, 0.12);
+  color: #9a3412;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.header-title-group {
+  max-width: 640px;
+}
+
+.header-eyebrow {
+  margin: 0 0 8px;
+  color: rgba(68, 64, 60, 0.74);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.page-header .page-title {
+  margin: 0;
+  font-size: clamp(30px, 3vw, 46px);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  font-weight: 700;
+  color: #111827;
+}
+
+.header-summary {
+  margin: 12px 0 0;
+  max-width: 560px;
+  color: rgba(68, 64, 60, 0.88);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.header-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.header-status-row :deep(.el-tag) {
+  border: 1px solid rgba(251, 146, 60, 0.22);
+  backdrop-filter: blur(8px);
+}
+
+.header-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 160px));
+  gap: 12px;
+  width: 100%;
+}
+
+.metric-card {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 18px 16px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(255, 251, 235, 0.84));
+  border: 1px solid rgba(251, 146, 60, 0.14);
+  box-shadow: 0 10px 30px rgba(146, 64, 14, 0.08);
+}
+
+.metric-card::after {
+  content: '';
+  position: absolute;
+  inset: auto -24px -38px auto;
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(249, 115, 22, 0.2), transparent 68%);
+}
+
+.metric-label {
+  position: relative;
+  z-index: 1;
+  color: rgba(68, 64, 60, 0.68);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.metric-value {
+  position: relative;
+  z-index: 1;
+  color: #111827;
+  font-size: 24px;
+  line-height: 1.1;
+  font-weight: 700;
+}
+
+.metric-value.is-alert {
+  color: #b91c1c;
+}
+
+.page-header .header-right {
+  display: flex;
+  align-items: stretch;
+}
+
+.schedule-info-form {
+  width: 100%;
+  padding: 22px 22px 10px;
+  border-radius: 24px;
+  background: rgba(17, 24, 39, 0.92);
+  box-shadow: 0 24px 80px rgba(17, 24, 39, 0.22);
+  backdrop-filter: blur(18px);
+}
+
+.schedule-info-form :deep(.el-form-item) {
+  margin-right: 12px;
+  margin-bottom: 14px;
+}
+
+.schedule-info-form :deep(.el-form-item__label) {
+  color: rgba(255, 247, 237, 0.78);
+  font-weight: 600;
+}
+
+.schedule-info-form :deep(.el-input__wrapper),
+.schedule-info-form :deep(.el-select__wrapper),
+.schedule-info-form :deep(.el-date-editor.el-input__wrapper) {
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.schedule-info-form :deep(.el-input__inner),
+.schedule-info-form :deep(.el-select__selected-item),
+.schedule-info-form :deep(.el-range-input),
+.schedule-info-form :deep(input) {
+  color: #fff7ed;
+}
+
+.schedule-info-form :deep(.el-input__inner::placeholder) {
+  color: rgba(255, 247, 237, 0.42);
+}
+
+.content-wrapper {
+  gap: 16px;
+  padding: 0 32px 24px;
+}
+
+.timeline-container {
+  padding: 0;
+  gap: 0;
+}
+
+.timeline-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) auto;
+  gap: 16px;
+  align-items: end;
+  padding: 22px 24px 18px;
+  border: 1px solid rgba(251, 146, 60, 0.16);
+  border-bottom: none;
+  border-radius: 26px 26px 0 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 250, 245, 0.92));
+  box-shadow: 0 12px 40px rgba(146, 64, 14, 0.08);
+}
+
+.timeline-header-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.timeline-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timeline-title {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.15;
+  font-weight: 700;
+  color: #111827;
+}
+
+.timeline-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.timeline-header-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  align-self: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.timeline-header .stats-text {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.05);
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.header-alert-tag {
+  margin-left: 0;
+}
+
+.timeline-body {
+  border-radius: 0 0 26px 26px;
+  border-color: rgba(251, 146, 60, 0.16);
+  box-shadow: 0 18px 40px rgba(146, 64, 14, 0.08);
+}
+
+.timeline-insight-bar {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 18px;
+  background: rgba(255, 250, 245, 0.94);
+  border-left: 1px solid rgba(251, 146, 60, 0.16);
+  border-right: 1px solid rgba(251, 146, 60, 0.16);
+  border-bottom: 1px solid rgba(251, 146, 60, 0.12);
+}
+
+.insight-group {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.insight-label {
+  color: #78716c;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.insight-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(251, 146, 60, 0.14);
+  color: #44403c;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.insight-pill.is-danger {
+  color: #b91c1c;
+  background: rgba(254, 242, 242, 0.96);
+  border-color: rgba(239, 68, 68, 0.18);
+}
+
+.insight-pill.is-warning {
+  color: #b45309;
+  background: rgba(255, 251, 235, 0.98);
+  border-color: rgba(245, 158, 11, 0.18);
+}
+
+.timeline-table-header {
+  background: #fff3e0;
+  border-bottom-color: rgba(251, 146, 60, 0.2);
+}
+
+.timeline-table-header .header-cell {
+  color: #7c2d12;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.timeline-table-header .index-cell,
+.timeline-table-header .start-time-cell,
+.timeline-table-header .end-time-cell,
+.schedule-item-row .index-cell,
+.schedule-item-row .start-time-cell,
+.schedule-item-row .end-time-cell {
+  position: sticky;
+  z-index: 3;
+}
+
+.timeline-table-header .index-cell,
+.schedule-item-row .index-cell {
+  left: 0;
+  box-shadow: 1px 0 0 rgba(251, 146, 60, 0.12);
+}
+
+.timeline-table-header .start-time-cell,
+.schedule-item-row .start-time-cell {
+  left: 60px;
+  box-shadow: 1px 0 0 rgba(251, 146, 60, 0.12);
+}
+
+.timeline-table-header .end-time-cell,
+.schedule-item-row .end-time-cell {
+  left: 170px;
+  box-shadow: 8px 0 18px rgba(146, 64, 14, 0.05);
+}
+
+.timeline-table-header .index-cell,
+.timeline-table-header .start-time-cell,
+.timeline-table-header .end-time-cell {
+  z-index: 4;
+  background: #fff0da;
+}
+
+.schedule-item-row {
+  height: 54px;
+}
+
+.schedule-item-row:nth-child(even) {
+  background-color: rgba(255, 250, 245, 0.78);
+}
+
+.schedule-item-row:hover {
+  background-color: rgba(249, 115, 22, 0.08);
+}
+
+.schedule-item-row .item-cell {
+  border-right-color: rgba(251, 146, 60, 0.1);
+}
+
+.schedule-item-row.is-program {
+  background-color: rgba(245, 158, 11, 0.035);
+}
+
+.schedule-item-row.is-ad {
+  background-color: rgba(59, 130, 246, 0.03);
+}
+
+.schedule-item-row.is-promo {
+  background-color: rgba(16, 185, 129, 0.035);
+}
+
+.schedule-item-row.is-reference {
+  background-color: rgba(148, 163, 184, 0.08);
+}
+
+.schedule-item-row.is-unlinked {
+  background-color: rgba(254, 226, 226, 0.8);
+  box-shadow: inset 4px 0 0 0 rgba(220, 38, 38, 0.75);
+}
+
+.schedule-item-row .index-cell,
+.schedule-item-row .start-time-cell,
+.schedule-item-row .end-time-cell {
+  background-color: inherit;
+}
+
+.schedule-item-row .status-cell :deep(.el-tag) {
+  min-width: 62px;
+  justify-content: center;
+}
+
+.schedule-item-row .episode-name,
+.schedule-item-row .small-text,
+.schedule-item-row .time-text {
+  transition: color 160ms ease, transform 160ms ease;
+}
+
+.schedule-item-row:hover .episode-name,
+.schedule-item-row:hover .time-text {
+  color: #9a3412;
+}
+
+.ai-orchestration-btn {
+  background: linear-gradient(135deg, #111827 0%, #334155 100%);
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.18);
+}
+
+.ai-orchestration-btn:hover {
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+}
+
+.ai-sidebar {
+  border: 1px solid rgba(251, 146, 60, 0.14);
+  border-radius: 26px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 247, 237, 0.88));
+  box-shadow: 0 18px 50px rgba(146, 64, 14, 0.12);
+}
+
+.ai-sidebar-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 14px;
+  align-items: start;
+}
+
+.ai-sidebar-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-sidebar-subtitle {
+  margin: 0;
+  color: #78716c;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ai-sidebar-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ai-sidebar-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(251, 146, 60, 0.14);
+  color: #57534e;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ai-sidebar-pill.is-live {
+  background: rgba(220, 252, 231, 0.96);
+  border-color: rgba(34, 197, 94, 0.16);
+  color: #166534;
+}
+
+.ai-sidebar .ai-sidebar-header,
+.progress-panel .progress-panel-header {
+  background: rgba(255, 250, 245, 0.86);
+}
+
+.progress-panel {
+  margin: 0 32px 24px;
+  border: 1px solid rgba(251, 146, 60, 0.14);
+  border-radius: 26px;
+  overflow: hidden;
+  box-shadow: 0 18px 50px rgba(146, 64, 14, 0.1);
+}
+
+@media (max-width: 1280px) {
+  .page-header {
+    grid-template-columns: 1fr;
+  }
+
+  .header-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .page-header,
+  .content-wrapper,
+  .progress-panel {
+    margin-left: 0;
+    margin-right: 0;
+  }
+
+  .page-header {
+    padding: 20px 18px 14px;
+  }
+
+  .page-header::before {
+    inset: 8px 18px 0;
+  }
+
+  .content-wrapper {
+    padding: 0 18px 18px;
+  }
+
+  .progress-panel {
+    margin: 0 18px 18px;
+  }
+
+  .header-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .timeline-header {
+    grid-template-columns: 1fr;
+    align-items: flex-start;
+  }
+
+  .timeline-insight-bar {
+    padding: 12px 14px;
+  }
+}
+
+@media (max-width: 768px) {
+  .page-header .page-title {
+    font-size: 28px;
+  }
+
+  .schedule-info-form {
+    padding: 18px 16px 6px;
+  }
+
+  .timeline-header,
+  .timeline-body,
+  .ai-sidebar,
+  .progress-panel {
+    border-radius: 20px;
+  }
+
+  .timeline-insight-bar {
+    border-left: none;
+    border-right: none;
+  }
+
+  .ai-sidebar-header {
+    grid-template-columns: 1fr auto;
+  }
+
+  .ai-sidebar-status {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .timeline-body {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
   }
 }
 </style>
