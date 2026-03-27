@@ -1,10 +1,13 @@
 import {
-  demoChannels,
-  getDemoFixedItems,
-  getDemoHistorySchedules,
-  getDemoLayout,
-  demoPrograms,
-} from '@/mock/demoData'
+  getOrchestrationDemoColumn,
+  getOrchestrationDemoFixedItems,
+  getOrchestrationDemoHistorySchedules,
+  getOrchestrationDemoLayout,
+  getOrchestrationDemoProgramsByColumn,
+  orchestrationDemoCandidates,
+  orchestrationDemoChannels,
+  orchestrationDemoColumns,
+} from '@/mock/orchestrationMock'
 import type {
   ChannelContext,
   FixedItem,
@@ -29,11 +32,10 @@ export interface ChannelInfo {
 
 export class DataService {
   private channels = new Map<string, ChannelInfo>()
-  private layouts = new Map<string, LayoutReference>()
   private programs = new Map<string, ProgramCandidate>()
 
   constructor() {
-    for (const channel of demoChannels) {
+    for (const channel of orchestrationDemoChannels) {
       this.channels.set(channel.id, {
         id: channel.id,
         name: channel.name,
@@ -48,7 +50,7 @@ export class DataService {
       })
     }
 
-    demoPrograms.forEach((program) => {
+    orchestrationDemoCandidates.forEach((program) => {
       this.programs.set(program.programCode, program)
       this.programs.set(program.id, program)
     })
@@ -63,7 +65,7 @@ export class DataService {
   }
 
   async getLayoutReference(channelId: string, date: string): Promise<LayoutReference | null> {
-    return getDemoLayout(channelId, date)
+    return getOrchestrationDemoLayout(channelId, date)
   }
 
   async getLayoutSlots(channelId: string, date: string) {
@@ -71,7 +73,7 @@ export class DataService {
   }
 
   async getHistorySchedules(channelId: string, date: string): Promise<ScheduleSummary[]> {
-    return getDemoHistorySchedules(channelId, date)
+    return getOrchestrationDemoHistorySchedules(channelId, date)
   }
 
   async getRecentScheduleReference(channelId: string, date: string, _days = 7): Promise<{ dates: string[]; schedules: ScheduleSummary[] }> {
@@ -88,36 +90,29 @@ export class DataService {
 
   async queryProgramLibrary(query: {
     channelId?: string
-    slotLabel?: string
-    preferredProgramGroup?: string
     columnId?: string
-    columnName?: string
     programTypes?: string[]
     minDuration?: number
     maxDuration?: number
     keyword?: string
     limit?: number
   }): Promise<ProgramCandidate[]> {
-    let list = Array.from(new Map(demoPrograms.map((item) => [item.programCode, item])).values())
+    let list = [...orchestrationDemoCandidates]
 
     if (query.channelId) {
       list = list.filter((item) => item.channelId === query.channelId)
     }
-    if (query.slotLabel) {
-      list = list.filter((item) => {
-        const slot = item.preferredSlot ?? (typeof item.metadata?.preferredSlot === 'string' ? item.metadata.preferredSlot : '')
-        const label = item.columnName
-        return slot.includes(query.slotLabel!) || label.includes(query.slotLabel!)
-      })
-    }
-    if (query.preferredProgramGroup) {
-      list = list.filter((item) => item.seriesGroup === query.preferredProgramGroup)
-    }
+
     if (query.columnId) {
-      list = list.filter((item) => item.columnId === query.columnId)
-    }
-    if (query.columnName) {
-      list = list.filter((item) => item.columnName.includes(query.columnName!))
+      const column = getOrchestrationDemoColumn(query.columnId)
+      if (!column) return []
+      const allowedProgramIds = new Set(
+        getOrchestrationDemoProgramsByColumn(column.channelId, query.columnId).map((item) => item.programId),
+      )
+      list = list.filter((item) => {
+        const candidate = this.programs.get(item.id)
+        return candidate?.channelId === column.channelId && allowedProgramIds.has(item.programId)
+      })
     }
 
     if (query.programTypes?.length) {
@@ -137,7 +132,7 @@ export class DataService {
   }
 
   async getFixedItems(channelId: string, date: string): Promise<FixedItem[]> {
-    return getDemoFixedItems(channelId, date)
+    return getOrchestrationDemoFixedItems(channelId, date)
   }
 
   async getGenerationContext(channelId: string, date: string): Promise<GenerationContext | null> {
@@ -174,6 +169,10 @@ export class DataService {
         mandatoryPrograms: fixedItems.map((item) => item.programCode),
       },
     }
+  }
+
+  getColumnName(columnId: string): string {
+    return orchestrationDemoColumns.find((item) => item.columnId === columnId)?.columnName ?? columnId
   }
 }
 

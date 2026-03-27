@@ -197,19 +197,10 @@ export interface PlanCommand extends BaseCommand {
 export interface CandidateQueryCriteria {
   targetTimeRange: { start: string; end: string }
   expectedDuration: { min: number; max: number }
+  channelId: string
+  columnId: string
   programTypePreference?: string[]
-  searchKeywords?: string[]
-  preferredChannelId?: string
-  slotLabel?: string
-  preferredProgramGroup?: string
-  columnId?: string
-  columnName?: string
-  preferredSlot?: string
-  editorialBias?: string[]
-  sequentialPreference: boolean
   excludeUsed: boolean
-  considerRatings: boolean
-  allowShortFiller: boolean
 }
 
 /** 候选检索命令 */
@@ -327,27 +318,34 @@ export type OrchestrationCommand =
 // ==================== 节目候选相关 ====================
 
 /** 节目候选 */
+export interface ProgramDefinition {
+  programId: string
+  programName: string
+  columnId: string
+  channelId: string
+  programType: string
+  seriesGroup?: string
+}
+
+export interface ProgramInstance {
+  instanceId: string
+  programId: string
+  episodeName?: string
+  duration: number
+  issueNo?: string
+}
+
 export interface ProgramCandidate {
   id: string
+  programId: string
   programCode: string
   programName: string
   channelId: string
-  channelName?: string
-  columnId: string
-  columnCode: string
-  columnName: string
   duration: number
   programType: string
-  yearCode: string
-  issueNo: string
+  issueNo?: string
   seriesGroup?: string
-  editorialWeight?: number
-  preferredSlot?: string
-  rating?: number
-  description?: string
-  tags?: string[]
-  source: 'library' | 'history' | 'layout' | 'filler'
-  metadata?: Record<string, any>
+  episodeName?: string
 }
 
 /** 候选检索结果 */
@@ -565,13 +563,9 @@ export interface GenerationContext {
 
 export interface ColumnDefinition {
   columnId: string
-  columnCode: string
   columnName: string
   channelId: string
   defaultProgramType: string
-  editorialBias: string[]
-  preferredSlots: string[]
-  isFixedBand: boolean
 }
 
 /** 版面参考 */
@@ -584,20 +578,10 @@ export interface LayoutReference {
 /** 版面时段 */
 export interface LayoutSlot {
   id: string
+  channelId: string
   startTime: string
   endTime: string
-  programType: string
-   slotLabel?: string
-   preferredProgramTypes?: string[]
-   preferredKeywords?: string[]
-  columnId?: string
-  columnName?: string
-  preferredProgramGroup?: string
-  priority?: number
-  isWeakConstraint?: boolean
-  editorialBias?: string[]
-  isFixedBand?: boolean
-  fixedProgram?: string
+  columnId: string
 }
 
 /** 历史编排参考 */

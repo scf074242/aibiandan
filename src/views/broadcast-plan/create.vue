@@ -2,111 +2,44 @@
   <div class="create-schedule-page">
     <!-- 顶部信息栏 -->
     <div class="page-header">
-      <div class="header-left">
-        <div class="header-breadcrumb">
-          <el-button link :icon="ArrowLeft" class="back-button" @click="handleBack">返回</el-button>
-          <span class="header-kicker">播出编排工作台</span>
-        </div>
-        <div class="header-title-group">
-          <p class="header-eyebrow">{{ currentChannelName }} / {{ scheduleDate }}</p>
-          <h1 class="page-title">{{ pageTitle }}</h1>
-          <p class="header-summary">把编单、素材状态和 AI 编排动作收束到同一个清晰的工作面板里。</p>
-        </div>
-        <div class="header-status-row">
-          <el-tag
-            :type="getStatusType(scheduleForm.status || '')"
-            effect="light"
-            round
-            size="large"
-          >
-            {{ getStatusText(scheduleForm.status || '') }}
-          </el-tag>
-          <el-tag
-            v-if="scheduleForm.isLocked"
-            type="danger"
-            effect="light"
-            round
-            size="large"
-          >
-            <el-icon><Lock /></el-icon>
-            已锁定
-          </el-tag>
-          <el-tag effect="plain" round size="large">
-            {{ isViewMode ? '查看模式' : '编辑模式' }}
-          </el-tag>
-        </div>
-        <div class="header-metrics">
-          <div class="metric-card">
-            <span class="metric-label">节目总数</span>
-            <strong class="metric-value">{{ displayItems.length }}</strong>
-          </div>
-          <div class="metric-card">
-            <span class="metric-label">总时长</span>
-            <strong class="metric-value">{{ totalDurationText }}</strong>
-          </div>
-          <div class="metric-card">
-            <span class="metric-label">待处理风险</span>
-            <strong class="metric-value is-alert">
-              {{ unlinkedItemCount + emptyMaterialItemCount + displayGapCount }}
-            </strong>
-          </div>
-        </div>
+      <div class="header-breadcrumb">
+        <el-button link :icon="ArrowLeft" class="back-button" @click="handleBack">返回</el-button>
       </div>
-      <div class="header-right">
-        <el-form
-          ref="headerFormRef"
-          :model="scheduleForm"
-          :rules="headerFormRules"
-          inline
-          status-icon
-          class="schedule-info-form"
-        >
-          <el-form-item label="编单名称" prop="name" required>
-            <el-input
-              v-model="scheduleForm.name"
-              placeholder="请输入编单名称"
-              style="width: 200px"
-              :disabled="isHeaderFieldsDisabled"
+      <el-form
+        ref="headerFormRef"
+        :model="scheduleForm"
+        :rules="headerFormRules"
+        inline
+        status-icon
+        class="schedule-info-form"
+      >
+        <el-form-item label="频道" prop="channelId" required>
+          <el-select
+            v-model="scheduleForm.channelId"
+            placeholder="请选择频道"
+            style="width: 140px"
+            :disabled="isHeaderFieldsDisabled"
+            @change="handleChannelChange"
+          >
+            <el-option
+              v-for="channel in channelOptions"
+              :key="channel.id"
+              :label="channel.name"
+              :value="channel.id"
             />
-          </el-form-item>
-          <el-form-item label="所属频道" prop="channelId" required>
-            <el-select
-              v-model="scheduleForm.channelId"
-              placeholder="请选择频道"
-              style="width: 150px"
-              :disabled="isHeaderFieldsDisabled"
-              @change="handleChannelChange"
-            >
-              <el-option
-                v-for="channel in channelOptions"
-                :key="channel.id"
-                :label="channel.name"
-                :value="channel.id"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="日期" prop="date" required>
-            <el-date-picker
-              v-model="scheduleForm.date"
-              type="date"
-              placeholder="选择日期"
-              value-format="YYYY-MM-DD"
-              style="width: 150px"
-              :disabled="isHeaderFieldsDisabled"
-            />
-          </el-form-item>
-          <el-form-item label="编辑者">
-            <el-avatar-group :size="32" :max="3" class="editor-avatars">
-              <el-avatar
-                v-for="editor in editors"
-                :key="editor.id"
-                :src="editor.avatar"
-                :title="editor.name"
-              />
-            </el-avatar-group>
-          </el-form-item>
-        </el-form>
-      </div>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="日期" prop="date" required>
+          <el-date-picker
+            v-model="scheduleForm.date"
+            type="date"
+            placeholder="选择日期"
+            value-format="YYYY-MM-DD"
+            style="width: 144px"
+            :disabled="isHeaderFieldsDisabled"
+          />
+        </el-form-item>
+      </el-form>
     </div>
 
     <!-- 主内容区：左侧表格 + 右侧 AI 侧边栏 -->
@@ -119,7 +52,6 @@
           <div class="timeline-header">
             <div class="timeline-header-left">
               <div class="timeline-heading">
-                <span class="timeline-kicker">编排主工作区</span>
                 <h2 class="timeline-title">时间轴与素材清单</h2>
               </div>
               <div class="timeline-action-group">
@@ -145,15 +77,7 @@
                   @click="toggleAISidebar"
                   class="ai-orchestration-btn"
                 >
-                  {{ aiSidebarVisible ? '关闭 AI 助手' : 'AI 智能编排' }}
-                </el-button>
-                <el-button
-                  v-if="orchestratorRuntime.progress.value"
-                  :type="progressPanelVisible ? 'warning' : 'default'"
-                  :icon="DataLine"
-                  @click="toggleProgressPanel"
-                >
-                  {{ progressPanelVisible ? '收起进度' : '查看进度' }}
+                  {{ aiSidebarVisible ? '隐藏 AI' : 'AI 助手' }}
                 </el-button>
                 <el-button
                   v-if="orchestratorRuntime.canCancel.value"
@@ -497,28 +421,6 @@
       </div>
     </div>
 
-    <!-- 底部：编排进度面板 -->
-    <div v-if="progressPanelVisible" class="progress-panel">
-      <div class="progress-panel-header">
-        <h3 class="progress-panel-title">
-          <el-icon><DataLine /></el-icon>
-          编排进度
-        </h3>
-        <el-button link @click="progressPanelVisible = false">
-          <el-icon><Close /></el-icon>
-        </el-button>
-      </div>
-      <div class="progress-panel-content">
-        <OrchestrationProgress
-          v-if="orchestratorRuntime.progress.value"
-          :progress="orchestratorRuntime.progress.value"
-          :can-cancel="orchestratorRuntime.canCancel.value"
-          @cancel="orchestratorRuntime.cancel()"
-          @reset="orchestratorRuntime.reset()"
-        />
-      </div>
-    </div>
-
     <!-- 节目项编辑对话框 -->
     <ScheduleItemDialog
       v-model="dialogVisible"
@@ -558,7 +460,6 @@ import {
   WarningFilled,
   MagicStick,
   ChatDotRound,
-  DataLine,
   Close
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
@@ -588,7 +489,6 @@ import { getManualCommandAdapter } from '@/services/manualCommandAdapter'
 import { getCandidateService } from '@/services/candidateService'
 import type { GapProcessingStatus } from '@/types/orchestration'
 import ChatPanel from '@/components/dialogue/ChatPanel.vue'
-import OrchestrationProgress from '@/components/orchestration/OrchestrationProgress.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -775,7 +675,6 @@ const saving = ref(false)
 
 // AI 编排相关状态
 const aiSidebarVisible = ref(true)
-const progressPanelVisible = ref(false)
 const aiUserInput = ref('')
 
 const atomicCapabilities = getAtomicCapabilities()
@@ -889,7 +788,7 @@ const orchestratorRuntime = useOrchestrator({
 
 const startOrchestrationRuntime = async () => {
   try {
-    progressPanelVisible.value = true
+    syncPageItemsToAtomic()
     await orchestratorRuntime.startFullGeneration(
       currentChannelId.value,
       scheduleDate.value,
@@ -923,7 +822,6 @@ const handleAICommand = async () => {
   )
 
   aiUserInput.value = ''
-  progressPanelVisible.value = true
 
   if (task.mode === 'partial_generate' && scheduleItems.value.length > 0) {
     syncPageItemsToAtomic()
@@ -942,11 +840,6 @@ const toggleAISidebar = () => {
   aiSidebarVisible.value = !aiSidebarVisible.value
 }
 
-// 显示/隐藏编排进度面板
-const toggleProgressPanel = () => {
-  progressPanelVisible.value = !progressPanelVisible.value
-}
-
 const handleCancelOrchestration = async () => {
   try {
     await ElMessageBox.confirm(
@@ -958,7 +851,6 @@ const handleCancelOrchestration = async () => {
         cancelButtonText: '继续运行',
       },
     )
-    progressPanelVisible.value = true
     orchestratorRuntime.cancel()
   } catch {
     // 用户取消中止
@@ -1044,7 +936,6 @@ const resolveManualCandidateId = async (item: Partial<ScheduleItem>): Promise<st
 
   const candidates = await candidateService.searchPrograms({
     channelId: currentChannelId.value,
-    channelName: currentChannelName.value,
     programName: keyword,
     limit: 5,
   })
@@ -2450,44 +2341,6 @@ onBeforeUnmount(() => {
   }
 }
 
-// 底部编排进度面板
-.progress-panel {
-  height: 250px;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--xnews-border-color);
-  background-color: var(--xnews-bg-white);
-
-  .progress-panel-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: var(--xnews-spacing-2) var(--xnews-spacing-4);
-    border-bottom: 1px solid var(--xnews-border-color);
-    background-color: var(--xnews-bg-color);
-
-    .progress-panel-title {
-      display: flex;
-      align-items: center;
-      gap: var(--xnews-spacing-2);
-      font-size: var(--xnews-font-size-sm);
-      font-weight: var(--xnews-font-weight-medium);
-      color: var(--xnews-text-primary);
-      margin: 0;
-
-      .el-icon {
-        color: var(--el-color-primary);
-      }
-    }
-  }
-
-  .progress-panel-content {
-    flex: 1;
-    overflow: auto;
-    padding: var(--xnews-spacing-2);
-  }
-}
-
 // 响应式适配
 @media (max-width: 1200px) {
   .content-wrapper.with-ai-sidebar {
@@ -2531,215 +2384,112 @@ onBeforeUnmount(() => {
 
 .create-schedule-page {
   min-height: 100vh;
-  background:
-    radial-gradient(circle at top left, rgba(249, 115, 22, 0.18), transparent 26%),
-    radial-gradient(circle at right center, rgba(15, 23, 42, 0.08), transparent 32%),
-    linear-gradient(180deg, #fffaf4 0%, #fff4e8 45%, #fff8f0 100%);
+  background: #f7f8fa;
   padding-bottom: 0;
 }
 
 .page-header {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(420px, 0.9fr);
-  gap: 24px;
-  padding: 28px 32px 18px;
-  border-bottom: none;
-  background: transparent;
-  box-shadow: none;
-}
-
-.page-header::before {
-  content: '';
-  position: absolute;
-  inset: 14px 32px 0;
-  border-radius: 28px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(255, 247, 237, 0.8)),
-    linear-gradient(120deg, rgba(249, 115, 22, 0.08), rgba(15, 23, 42, 0.04));
-  box-shadow: 0 18px 60px rgba(146, 64, 14, 0.12);
-  border: 1px solid rgba(251, 146, 60, 0.14);
-  pointer-events: none;
-}
-
-.page-header > * {
-  position: relative;
-  z-index: 1;
-}
-
-.page-header .header-left {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 18px;
-  padding: 16px 6px 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  margin: 8px 16px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .header-breadcrumb {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 .back-button {
   padding: 0;
-  color: #7c2d12;
+  color: #4b5563;
   font-weight: 600;
 }
 
-.header-kicker,
 .timeline-kicker {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 12px;
+  min-height: 24px;
+  padding: 0 10px;
   border-radius: 999px;
-  background: rgba(249, 115, 22, 0.12);
+  background: #fff7ed;
   color: #9a3412;
-  font-size: 12px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  font-weight: 700;
-}
-
-.header-title-group {
-  max-width: 640px;
-}
-
-.header-eyebrow {
-  margin: 0 0 8px;
-  color: rgba(68, 64, 60, 0.74);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 11px;
   letter-spacing: 0.04em;
+  font-weight: 600;
 }
 
 .page-header .page-title {
   margin: 0;
-  font-size: clamp(30px, 3vw, 46px);
-  line-height: 1.05;
-  letter-spacing: -0.03em;
-  font-weight: 700;
-  color: #111827;
-}
-
-.header-summary {
-  margin: 12px 0 0;
-  max-width: 560px;
-  color: rgba(68, 64, 60, 0.88);
-  font-size: 15px;
-  line-height: 1.7;
-}
-
-.header-status-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.header-status-row :deep(.el-tag) {
-  border: 1px solid rgba(251, 146, 60, 0.22);
-  backdrop-filter: blur(8px);
-}
-
-.header-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 160px));
-  gap: 12px;
-  width: 100%;
-}
-
-.metric-card {
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 18px 18px 16px;
-  border-radius: 20px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(255, 251, 235, 0.84));
-  border: 1px solid rgba(251, 146, 60, 0.14);
-  box-shadow: 0 10px 30px rgba(146, 64, 14, 0.08);
-}
-
-.metric-card::after {
-  content: '';
-  position: absolute;
-  inset: auto -24px -38px auto;
-  width: 92px;
-  height: 92px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(249, 115, 22, 0.2), transparent 68%);
-}
-
-.metric-label {
-  position: relative;
-  z-index: 1;
-  color: rgba(68, 64, 60, 0.68);
-  font-size: 12px;
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: 0;
   font-weight: 600;
-  letter-spacing: 0.04em;
-}
-
-.metric-value {
-  position: relative;
-  z-index: 1;
   color: #111827;
-  font-size: 24px;
-  line-height: 1.1;
-  font-weight: 700;
-}
-
-.metric-value.is-alert {
-  color: #b91c1c;
-}
-
-.page-header .header-right {
-  display: flex;
-  align-items: stretch;
 }
 
 .schedule-info-form {
-  width: 100%;
-  padding: 22px 22px 10px;
-  border-radius: 24px;
-  background: rgba(17, 24, 39, 0.92);
-  box-shadow: 0 24px 80px rgba(17, 24, 39, 0.22);
-  backdrop-filter: blur(18px);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: transparent;
 }
 
 .schedule-info-form :deep(.el-form-item) {
-  margin-right: 12px;
-  margin-bottom: 14px;
+  margin-right: 0;
+  margin-bottom: 0;
 }
 
 .schedule-info-form :deep(.el-form-item__label) {
-  color: rgba(255, 247, 237, 0.78);
+  color: #4b5563;
+  font-size: 12px;
   font-weight: 600;
+  line-height: 30px;
 }
 
 .schedule-info-form :deep(.el-input__wrapper),
 .schedule-info-form :deep(.el-select__wrapper),
 .schedule-info-form :deep(.el-date-editor.el-input__wrapper) {
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px #d1d5db;
 }
 
 .schedule-info-form :deep(.el-input__inner),
 .schedule-info-form :deep(.el-select__selected-item),
 .schedule-info-form :deep(.el-range-input),
 .schedule-info-form :deep(input) {
-  color: #fff7ed;
+  color: #111827;
+  font-size: 13px;
 }
 
 .schedule-info-form :deep(.el-input__inner::placeholder) {
-  color: rgba(255, 247, 237, 0.42);
+  color: #9ca3af;
 }
 
 .content-wrapper {
   gap: 16px;
-  padding: 0 32px 24px;
+  padding: 0 16px 16px;
+}
+
+.content-wrapper.with-ai-sidebar .schedule-content {
+  width: 70%;
+  flex: none;
+}
+
+.content-wrapper.with-ai-sidebar .ai-sidebar {
+  width: 30%;
+  min-width: 360px;
+  max-width: none;
+  flex: none;
 }
 
 .timeline-container {
@@ -2750,34 +2500,32 @@ onBeforeUnmount(() => {
 .timeline-header {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) auto;
-  gap: 16px;
+  gap: 12px;
   align-items: end;
-  padding: 22px 24px 18px;
-  border: 1px solid rgba(251, 146, 60, 0.16);
+  padding: 10px 12px 10px;
+  border: 1px solid #e5e7eb;
   border-bottom: none;
-  border-radius: 26px 26px 0 0;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 250, 245, 0.92));
-  box-shadow: 0 12px 40px rgba(146, 64, 14, 0.08);
+  border-radius: 10px 10px 0 0;
+  background: #ffffff;
+  box-shadow: none;
 }
 
 .timeline-header-left {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 16px;
+  gap: 10px;
 }
 
 .timeline-heading {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  align-items: center;
 }
 
 .timeline-title {
   margin: 0;
-  font-size: 24px;
-  line-height: 1.15;
+  font-size: 14px;
+  line-height: 1.2;
   font-weight: 700;
   color: #111827;
 }
@@ -2785,7 +2533,7 @@ onBeforeUnmount(() => {
 .timeline-action-group {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }
 
 .timeline-header-right {
@@ -2800,10 +2548,10 @@ onBeforeUnmount(() => {
 .timeline-header .stats-text {
   display: inline-flex;
   align-items: center;
-  min-height: 34px;
-  padding: 0 14px;
+  min-height: 28px;
+  padding: 0 10px;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.05);
+  background: #f3f4f6;
   color: #475569;
   font-size: 12px;
   font-weight: 600;
@@ -2814,21 +2562,21 @@ onBeforeUnmount(() => {
 }
 
 .timeline-body {
-  border-radius: 0 0 26px 26px;
-  border-color: rgba(251, 146, 60, 0.16);
-  box-shadow: 0 18px 40px rgba(146, 64, 14, 0.08);
+  border-radius: 0 0 10px 10px;
+  border-color: #e5e7eb;
+  box-shadow: none;
 }
 
 .timeline-insight-bar {
   display: flex;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
   flex-wrap: wrap;
-  padding: 12px 18px;
-  background: rgba(255, 250, 245, 0.94);
-  border-left: 1px solid rgba(251, 146, 60, 0.16);
-  border-right: 1px solid rgba(251, 146, 60, 0.16);
-  border-bottom: 1px solid rgba(251, 146, 60, 0.12);
+  padding: 8px 12px;
+  background: #f9fafb;
+  border-left: 1px solid #e5e7eb;
+  border-right: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
 }
 
 .insight-group {
@@ -2840,7 +2588,7 @@ onBeforeUnmount(() => {
 
 .insight-label {
   color: #78716c;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
 }
@@ -2848,13 +2596,13 @@ onBeforeUnmount(() => {
 .insight-pill {
   display: inline-flex;
   align-items: center;
-  min-height: 30px;
-  padding: 0 12px;
+  min-height: 24px;
+  padding: 0 8px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.96);
   border: 1px solid rgba(251, 146, 60, 0.14);
   color: #44403c;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -2871,15 +2619,15 @@ onBeforeUnmount(() => {
 }
 
 .timeline-table-header {
-  background: #fff3e0;
-  border-bottom-color: rgba(251, 146, 60, 0.2);
+  background: #f9fafb;
+  border-bottom-color: #e5e7eb;
 }
 
 .timeline-table-header .header-cell {
-  color: #7c2d12;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  color: #374151;
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .timeline-table-header .index-cell,
@@ -2914,23 +2662,24 @@ onBeforeUnmount(() => {
 .timeline-table-header .start-time-cell,
 .timeline-table-header .end-time-cell {
   z-index: 4;
-  background: #fff0da;
+  background: #f9fafb;
 }
 
 .schedule-item-row {
-  height: 54px;
+  height: 42px;
 }
 
 .schedule-item-row:nth-child(even) {
-  background-color: rgba(255, 250, 245, 0.78);
+  background-color: #fcfcfd;
 }
 
 .schedule-item-row:hover {
-  background-color: rgba(249, 115, 22, 0.08);
+  background-color: #f3f4f6;
 }
 
 .schedule-item-row .item-cell {
-  border-right-color: rgba(251, 146, 60, 0.1);
+  border-right-color: #eef0f2;
+  padding: 6px 8px;
 }
 
 .schedule-item-row.is-program {
@@ -2986,12 +2735,11 @@ onBeforeUnmount(() => {
 }
 
 .ai-sidebar {
-  border: 1px solid rgba(251, 146, 60, 0.14);
-  border-radius: 26px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
   overflow: hidden;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 247, 237, 0.88));
-  box-shadow: 0 18px 50px rgba(146, 64, 14, 0.12);
+  background: #ffffff;
+  box-shadow: none;
 }
 
 .ai-sidebar-header {
@@ -3041,55 +2789,33 @@ onBeforeUnmount(() => {
   color: #166534;
 }
 
-.ai-sidebar .ai-sidebar-header,
-.progress-panel .progress-panel-header {
+.ai-sidebar .ai-sidebar-header {
   background: rgba(255, 250, 245, 0.86);
 }
 
-.progress-panel {
-  margin: 0 32px 24px;
-  border: 1px solid rgba(251, 146, 60, 0.14);
-  border-radius: 26px;
-  overflow: hidden;
-  box-shadow: 0 18px 50px rgba(146, 64, 14, 0.1);
-}
-
 @media (max-width: 1280px) {
-  .page-header {
-    grid-template-columns: 1fr;
-  }
-
-  .header-metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .content-wrapper.with-ai-sidebar .schedule-content,
+  .content-wrapper.with-ai-sidebar .ai-sidebar {
+    width: auto;
+    min-width: 0;
   }
 }
 
 @media (max-width: 900px) {
   .page-header,
-  .content-wrapper,
-  .progress-panel {
+  .content-wrapper {
     margin-left: 0;
     margin-right: 0;
   }
 
   .page-header {
-    padding: 20px 18px 14px;
-  }
-
-  .page-header::before {
-    inset: 8px 18px 0;
+    margin: 8px 12px;
+    padding: 8px 10px;
+    flex-wrap: wrap;
   }
 
   .content-wrapper {
-    padding: 0 18px 18px;
-  }
-
-  .progress-panel {
-    margin: 0 18px 18px;
-  }
-
-  .header-metrics {
-    grid-template-columns: 1fr;
+    padding: 0 12px 12px;
   }
 
   .timeline-header {
@@ -3108,14 +2834,13 @@ onBeforeUnmount(() => {
   }
 
   .schedule-info-form {
-    padding: 18px 16px 6px;
+    padding: 8px 8px 0;
   }
 
   .timeline-header,
   .timeline-body,
-  .ai-sidebar,
-  .progress-panel {
-    border-radius: 20px;
+  .ai-sidebar {
+    border-radius: 10px;
   }
 
   .timeline-insight-bar {

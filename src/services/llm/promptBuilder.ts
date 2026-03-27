@@ -195,7 +195,7 @@ ${usedProgramCodes.length > 0 ? usedProgramCodes.join(', ') : '无'}
 }`
 
     const candidatesStr = candidates.map((c, i) => 
-      `${i + 1}. ${c.programName} (ID: ${c.id}, 时长: ${this.formatDuration(c.duration)}, 类型: ${c.programType}, 评分: ${c.rating || 'N/A'}, 来源: ${c.source})`
+      `${i + 1}. ${c.programName} (ID: ${c.id}, 时长: ${this.formatDuration(c.duration)}, 类型: ${c.programType}, 节目编码: ${c.programCode})`
     ).join('\n')
 
     const contextStr = `【当前空窗】

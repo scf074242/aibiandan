@@ -50,7 +50,7 @@ export class GapManager {
    */
   queryRemainingGaps(): GapInfo[] {
     return Array.from(this.gaps.values())
-      .filter((gap) => !this.isGapCompleted(gap.id))
+      .filter((gap) => !this.isGapCompleted(gap.id) && !this.isGapFailed(gap.id))
       .sort((a, b) => {
         // 先按优先级排序，再按开始时间排序
         if (a.metadata.priority !== b.metadata.priority) {
@@ -87,7 +87,15 @@ export class GapManager {
   /**
    * 从版面初始化空窗
    */
-  initializeFromLayout(layoutSlots: Array<{ startTime: string; endTime: string; programType: string; fixedProgram?: string }>): void {
+  initializeFromLayout(
+    layoutSlots: Array<{
+      startTime: string
+      endTime: string
+      programType: string
+      preferredProgramTypes?: string[]
+      fixedProgram?: string
+    }>,
+  ): void {
     this.gaps.clear()
 
     for (const slot of layoutSlots) {
@@ -205,6 +213,115 @@ export class GapManager {
     })
 
     this.gaps.set(gap.id, gap)
+  }
+
+  initializeFromLayoutBands(
+    layoutSlots: Array<{
+      startTime: string
+      endTime: string
+      programType: string
+      preferredProgramTypes?: string[]
+      priority?: number
+    }>,
+  ): void {
+    this.gaps.clear()
+
+    for (const slot of layoutSlots) {
+      const gap = this.createGap({
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        constraints: {
+          allowedTypes: slot.preferredProgramTypes?.length ? slot.preferredProgramTypes : [slot.programType],
+        },
+        metadata: {
+          source: 'layout',
+          priority: slot.priority ?? 50,
+        },
+      })
+      this.gaps.set(gap.id, gap)
+    }
+  }
+
+  alignGapsToLayoutBands(
+    layoutSlots: Array<{
+      startTime: string
+      endTime: string
+      programType: string
+      preferredProgramTypes?: string[]
+      priority?: number
+    }>,
+  ): void {
+    if (!layoutSlots.length || this.gaps.size === 0) return
+
+    const originalGaps = Array.from(this.gaps.values())
+    this.gaps.clear()
+
+    for (const gap of originalGaps) {
+      const gapStart = new Date(gap.startTime).getTime()
+      const gapEnd = new Date(gap.endTime).getTime()
+      const overlapSlots = layoutSlots
+        .map((slot) => {
+          const slotStart = new Date(slot.startTime).getTime()
+          const slotEnd = new Date(slot.endTime).getTime()
+          return { slot, slotStart, slotEnd }
+        })
+        .filter(({ slotStart, slotEnd }) => slotStart < gapEnd && slotEnd > gapStart)
+        .sort((left, right) => left.slotStart - right.slotStart)
+
+      if (!overlapSlots.length) {
+        this.gaps.set(gap.id, gap)
+        continue
+      }
+
+      let cursor = gapStart
+      for (const { slot, slotStart, slotEnd } of overlapSlots) {
+        const segmentStart = Math.max(cursor, slotStart)
+        const segmentEnd = Math.min(gapEnd, slotEnd)
+
+        if (segmentStart > cursor) {
+          const leadingGap = this.createGap({
+            startTime: this.formatLocalDateTime(cursor),
+            endTime: this.formatLocalDateTime(segmentStart),
+            constraints: gap.constraints,
+            metadata: {
+              source: gap.metadata.source,
+              priority: gap.metadata.priority,
+            },
+          })
+          this.gaps.set(leadingGap.id, leadingGap)
+        }
+
+        if (segmentEnd > segmentStart) {
+          const alignedGap = this.createGap({
+            startTime: this.formatLocalDateTime(segmentStart),
+            endTime: this.formatLocalDateTime(segmentEnd),
+            constraints: {
+              ...gap.constraints,
+              allowedTypes: slot.preferredProgramTypes?.length ? slot.preferredProgramTypes : [slot.programType],
+            },
+            metadata: {
+              source: 'layout',
+              priority: slot.priority ?? gap.metadata.priority,
+            },
+          })
+          this.gaps.set(alignedGap.id, alignedGap)
+          cursor = segmentEnd
+        }
+      }
+
+      if (cursor < gapEnd) {
+        const trailingGap = this.createGap({
+          startTime: this.formatLocalDateTime(cursor),
+          endTime: this.formatLocalDateTime(gapEnd),
+          constraints: gap.constraints,
+          metadata: {
+            source: gap.metadata.source,
+            priority: gap.metadata.priority,
+          },
+        })
+        this.gaps.set(trailingGap.id, trailingGap)
+      }
+    }
   }
 
   // ==================== 空窗更新 ====================
@@ -484,6 +601,17 @@ export class GapManager {
         updatedAt: now,
       },
     }
+  }
+
+  private formatLocalDateTime(timestampMs: number): string {
+    const date = new Date(timestampMs)
+    const year = date.getFullYear()
+    const month = `${date.getMonth() + 1}`.padStart(2, '0')
+    const day = `${date.getDate()}`.padStart(2, '0')
+    const hours = `${date.getHours()}`.padStart(2, '0')
+    const minutes = `${date.getMinutes()}`.padStart(2, '0')
+    const seconds = `${date.getSeconds()}`.padStart(2, '0')
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
   }
 
   /**

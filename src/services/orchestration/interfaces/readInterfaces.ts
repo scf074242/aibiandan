@@ -78,11 +78,10 @@ export class ReadInterfaces {
     const criteria = {
       targetTimeRange: params.timeRange,
       expectedDuration: params.durationRange,
+      channelId: '',
+      columnId: '',
       programTypePreference: params.programTypes,
-      sequentialPreference: true,
       excludeUsed: true,
-      considerRatings: true,
-      allowShortFiller: true,
     }
 
     return this.candidateService.queryCandidates(gap, criteria)

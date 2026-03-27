@@ -17,12 +17,7 @@
         </el-col>
         <el-col :span="12">
           <el-form-item label="栏目" prop="columnId">
-            <el-select
-              v-model="formData.columnId"
-              placeholder="请选择栏目"
-              filterable
-              @change="handleReferenceChange"
-            >
+            <el-select v-model="formData.columnId" placeholder="请选择栏目" filterable @change="handleReferenceChange">
               <el-option
                 v-for="reference in availableReferences"
                 :key="reference.columnId"
@@ -38,7 +33,7 @@
         <div class="search-row">
           <el-input
             v-model="formData.keyword"
-            placeholder="输入关键字，或直接回车列出当前栏目下的节目"
+            placeholder="输入关键词，或直接回车列出当前栏目下的节目实例"
             clearable
             @keyup.enter="handleSearch"
           />
@@ -47,12 +42,7 @@
       </el-form-item>
 
       <el-form-item label="搜索结果" prop="selectedCandidateId">
-        <el-select
-          v-model="formData.selectedCandidateId"
-          placeholder="请选择节目"
-          filterable
-          @change="handleCandidateChange"
-        >
+        <el-select v-model="formData.selectedCandidateId" placeholder="请选择节目" filterable @change="handleCandidateChange">
           <el-option
             v-for="candidate in searchResults"
             :key="candidate.id"
@@ -65,7 +55,7 @@
       <div v-if="selectedCandidate" class="selected-program-card">
         <div class="program-title">{{ selectedCandidate.programName }}</div>
         <div class="program-meta">
-          <span>栏目：{{ formatColumnDisplayName(selectedCandidate.columnName) }}</span>
+          <span>栏目：{{ selectedColumnName }}</span>
           <span>节目编号：{{ selectedCandidate.programCode }}</span>
           <span>素材时长：{{ formatDuration(selectedCandidate.duration) }}</span>
         </div>
@@ -123,7 +113,7 @@
 import { computed, ref, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage } from 'element-plus'
-import { demoBaseDate, getDemoLayout } from '@/mock/demoData'
+import { getOrchestrationDemoColumn, getOrchestrationDemoLayout, orchestrationDemoBaseDate } from '@/mock/orchestrationMock'
 import { getCandidateService } from '@/services/candidateService'
 import type { ProgramCandidate } from '@/types/orchestration'
 import type { ScheduleItem } from '../scheduleData'
@@ -177,15 +167,15 @@ const dialogVisible = computed({
 })
 
 const allReferences = computed<ReferenceOption[]>(() => {
-  const slots = getDemoLayout(props.channelId || 'dragon', props.scheduleDate || demoBaseDate)?.slots ?? []
+  const slots = getOrchestrationDemoLayout(props.channelId || 'dragon', props.scheduleDate || orchestrationDemoBaseDate)?.slots ?? []
   const map = new Map<string, ReferenceOption>()
   slots.forEach((slot) => {
-    const key = slot.columnId ?? slot.id
-    if (!key || map.has(key)) return
-    map.set(key, {
-      columnId: key,
-      columnName: formatColumnDisplayName(slot.slotLabel ?? slot.columnName ?? slot.programType),
-      defaultProgramType: slot.programType,
+    if (map.has(slot.columnId)) return
+    const column = getOrchestrationDemoColumn(slot.columnId)
+    map.set(slot.columnId, {
+      columnId: slot.columnId,
+      columnName: column?.columnName ?? slot.columnId,
+      defaultProgramType: column?.defaultProgramType ?? 'program',
     })
   })
   return Array.from(map.values())
@@ -219,6 +209,11 @@ const selectedCandidate = computed(() =>
   null,
 )
 
+const selectedColumnName = computed(() => {
+  const column = getOrchestrationDemoColumn(formData.value.columnId)
+  return column?.columnName ?? '-'
+})
+
 const formRules: FormRules = {
   businessType: [{ required: true, message: '请选择类型', trigger: 'change' }],
   columnId: [{ required: true, message: '请选择栏目', trigger: 'change' }],
@@ -236,7 +231,7 @@ watch(
       const existingCandidate = candidateService.getCandidateById(props.item.programCode || props.item.code18 || '')
       formData.value = {
         businessType: props.item.businessType === 'ad' ? 'ad' : 'program',
-        columnId: existingCandidate?.columnId || availableReferences.value[0]?.columnId || '',
+        columnId: props.item.keySlot || availableReferences.value[0]?.columnId || '',
         keyword: props.item.programName || '',
         selectedCandidateId: existingCandidate?.id || '',
         startTime: normalizeClockText(props.item.startTime || ''),
@@ -360,7 +355,7 @@ const handleSave = async () => {
     episodeName: formData.value.programName,
     duration: formData.value.duration,
     remark: formData.value.remark,
-    keySlot: selectedCandidate.value?.columnCode || '',
+    keySlot: formData.value.columnId,
     sortOrder: props.item?.sortOrder ?? (props.maxSortOrder || 0) + 1,
   }
 
@@ -369,21 +364,18 @@ const handleSave = async () => {
 }
 
 const searchByReference = async (referenceId: string, keyword: string) => {
-  const slot = getDemoLayout(props.channelId || 'dragon', props.scheduleDate || demoBaseDate)
-    ?.slots.find((item) => (item.columnId ?? item.id) === referenceId)
-  const programTypes = formData.value.businessType === 'ad'
-    ? ['ad']
-    : slot?.preferredProgramTypes?.length
-      ? slot.preferredProgramTypes
-      : undefined
+  const reference = availableReferences.value.find((item) => item.columnId === referenceId)
+  const programTypes =
+    formData.value.businessType === 'ad'
+      ? ['ad']
+      : reference?.defaultProgramType
+        ? [reference.defaultProgramType]
+        : undefined
 
   searchResults.value = await candidateService.searchPrograms({
     channelId: props.channelId || 'dragon',
     programName: keyword,
     columnId: referenceId,
-    slotLabel: slot?.slotLabel ?? slot?.columnName,
-    preferredProgramGroup: slot?.preferredProgramGroup,
-    searchKeywords: slot?.preferredKeywords,
     programTypes,
     limit: 20,
   })

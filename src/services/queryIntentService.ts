@@ -1,3 +1,4 @@
+import { getOrchestrationDemoColumn } from '@/mock/orchestrationMock'
 import type {
   CandidateQueryCriteria,
   GapInfo,
@@ -6,91 +7,78 @@ import type {
 } from '@/types/orchestration'
 import type { LLMClient } from './llm/llmClient'
 import type { GapPlanningThought } from './orchestrationStrategyService'
-import { buildQueryIntentPrompt } from './orchestrationPromptBuilder'
 
 export class QueryIntentService {
-  constructor(private llmClient: LLMClient) {}
+  constructor(private llmClient: LLMClient) {
+    void this.llmClient
+  }
 
   async generateCriteria(
     gap: GapInfo,
     thought: GapPlanningThought,
     context: GenerationContext,
-    strategy: PlanningStrategy,
-    userIntent?: string,
+    _strategy: PlanningStrategy,
+    _userIntent?: string,
   ): Promise<CandidateQueryCriteria> {
-    const fallback = this.buildFallbackCriteria(gap, thought, context, strategy)
     const layoutMatch = this.findLayoutMatch(gap, context)
-    const shouldLockToLayout = Boolean(layoutMatch && !layoutMatch.isWeakConstraint)
+    const columnId = layoutMatch?.columnId
+    const column = columnId ? getOrchestrationDemoColumn(columnId) : undefined
 
-    if (shouldLockToLayout) {
-      return fallback
-    }
-
-    try {
-      const response = await this.llmClient.chat(
-        buildQueryIntentPrompt({
-          channelName: context.channel.channelName,
-          channelId: context.channel.channelId,
-          date: context.date,
-          gap,
-          planningThought: thought,
-          userIntent,
-        }),
-        { temperature: 0.1, maxTokens: 420 },
-      )
-
-      const parsed = this.parseCriteria(response.content)
-      return parsed ? { ...fallback, ...parsed } : fallback
-    } catch {
-      return fallback
-    }
-  }
-
-  private buildFallbackCriteria(
-    gap: GapInfo,
-    thought: GapPlanningThought,
-    context: GenerationContext,
-    strategy: PlanningStrategy,
-  ): CandidateQueryCriteria {
     return {
       targetTimeRange: { start: gap.startTime, end: gap.endTime },
-      expectedDuration: thought.durationPreference,
+      expectedDuration: this.resolveExpectedDuration(gap, thought, column?.defaultProgramType),
+      channelId: context.channel.channelId,
+      columnId: columnId ?? '',
       programTypePreference:
         thought.targetProgramTypes.length > 0
           ? thought.targetProgramTypes
-          : gap.constraints.allowedTypes,
-      searchKeywords: thought.searchKeywords,
-      preferredChannelId: context.channel.channelId,
-      slotLabel: thought.targetSlotLabel,
-      preferredProgramGroup: thought.preferredProgramGroup,
-      preferredSlot: thought.targetSlotLabel,
-      editorialBias: thought.searchKeywords,
-      sequentialPreference: thought.sequentialPreference,
+          : column?.defaultProgramType
+            ? [column.defaultProgramType]
+            : gap.constraints.allowedTypes,
       excludeUsed: true,
-      considerRatings: true,
-      allowShortFiller: strategy.allowFiller && thought.allowFiller,
+    }
+  }
+
+  private resolveExpectedDuration(
+    gap: GapInfo,
+    thought: GapPlanningThought,
+    defaultProgramType?: string,
+  ): CandidateQueryCriteria['expectedDuration'] {
+    const preferredTypes = thought.targetProgramTypes.length > 0
+      ? thought.targetProgramTypes
+      : defaultProgramType
+        ? [defaultProgramType]
+        : []
+
+    const isDramaLike = preferredTypes.includes('drama')
+    if (!isDramaLike || gap.duration <= 3600) {
+      return thought.durationPreference
+    }
+
+    return {
+      min: 1200,
+      max: Math.min(3600, gap.duration),
     }
   }
 
   private findLayoutMatch(gap: GapInfo, context: GenerationContext) {
-    return (context.layoutReference?.slots ?? []).find((slot) => {
-      const gapStart = new Date(gap.startTime).getTime()
-      const slotStart = new Date(slot.startTime).getTime()
-      const slotEnd = new Date(slot.endTime).getTime()
-      return gapStart >= slotStart && gapStart < slotEnd
-    })
-  }
+    const gapStart = new Date(gap.startTime).getTime()
+    const gapEnd = new Date(gap.endTime).getTime()
 
-  private parseCriteria(content: string): Partial<CandidateQueryCriteria> | null {
-    try {
-      const match = content.match(/\{[\s\S]*\}/)
-      if (!match) return null
-      const parsed = JSON.parse(match[0]) as Partial<CandidateQueryCriteria>
-      if (!parsed.expectedDuration || !parsed.targetTimeRange) return null
-      return parsed
-    } catch {
-      return null
-    }
+    return (context.layoutReference?.slots ?? [])
+      .map((slot) => {
+        const slotStart = new Date(slot.startTime).getTime()
+        const slotEnd = new Date(slot.endTime).getTime()
+        const overlap = Math.min(gapEnd, slotEnd) - Math.max(gapStart, slotStart)
+        return { slot, overlap, slotStart }
+      })
+      .filter((entry) => entry.overlap > 0)
+      .sort((left, right) => {
+        if (right.overlap !== left.overlap) {
+          return right.overlap - left.overlap
+        }
+        return left.slotStart - right.slotStart
+      })[0]?.slot
   }
 }
 

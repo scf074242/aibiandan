@@ -1,3 +1,4 @@
+import { getOrchestrationDemoColumn } from '@/mock/orchestrationMock'
 import type { GapInfo, LayoutReference, ScheduleItemSnapshot } from '@/types/orchestration'
 
 const AD_DURATIONS = [1800, 900, 300]
@@ -30,7 +31,7 @@ const findPrimarySlotType = (gap: GapInfo, layoutReference?: LayoutReference): s
   }
 
   const matchedSlot = layoutReference?.slots.find((slot) => slot.startTime <= gap.startTime && slot.endTime >= gap.endTime)
-  return matchedSlot?.programType
+  return matchedSlot?.columnId ? getOrchestrationDemoColumn(matchedSlot.columnId)?.defaultProgramType : undefined
 }
 
 export function canAutoInsertAd(gap: GapInfo, layoutReference?: LayoutReference): boolean {

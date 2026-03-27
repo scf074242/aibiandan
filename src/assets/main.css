@@ -17,9 +17,11 @@ body {
 }
 
 .el-button {
-  border-radius: 14px;
-  font-weight: 600;
+  border-radius: 8px;
+  font-weight: 500;
   letter-spacing: 0.01em;
+  font-size: 12px;
+  padding: 8px 12px;
 }
 
 .el-button--primary {
@@ -41,8 +43,16 @@ body {
 .el-select__wrapper,
 .el-textarea__inner,
 .el-date-editor.el-input__wrapper {
-  border-radius: 14px;
-  box-shadow: 0 0 0 1px rgba(194, 101, 22, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px rgba(209, 213, 219, 1);
+}
+
+.el-input__inner,
+.el-textarea__inner,
+.el-select__selected-item,
+.el-form-item__label,
+.el-date-editor .el-range-input {
+  font-size: 12px;
 }
 
 .el-input__wrapper.is-focus,
@@ -54,7 +64,8 @@ body {
 
 .el-tag {
   border-radius: 999px;
-  font-weight: 600;
+  font-weight: 500;
+  font-size: 11px;
 }
 
 .el-table,

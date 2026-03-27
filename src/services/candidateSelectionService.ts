@@ -120,7 +120,7 @@ export class CandidateSelectionService {
     const exactMatch = normalizedName === normalizedTarget ? 100 : 0
     const prefixMatch = normalizedName.startsWith(normalizedTarget) ? 30 : 0
     const containsMatch = normalizedName.includes(normalizedTarget) ? 20 : 0
-    return exactMatch + prefixMatch + containsMatch + (candidate.rating ?? 0)
+    return exactMatch + prefixMatch + containsMatch
   }
 
   private scoreCandidateForGap(
@@ -129,13 +129,12 @@ export class CandidateSelectionService {
     planningThought?: GapPlanningThought,
   ): number {
     const durationScore = 100 - Math.abs(candidate.duration - gap.duration) / 60
-    const ratingScore = (candidate.rating ?? 0) * 10
     const typeScore = planningThought?.targetProgramTypes?.includes(candidate.programType) ? 25 : 0
-    const keywordScore = (planningThought?.searchKeywords ?? []).reduce((score, keyword) => {
-      const haystack = `${candidate.programName} ${(candidate.tags ?? []).join(' ')}`.toLowerCase()
-      return haystack.includes(keyword.toLowerCase()) ? score + 8 : score
-    }, 0)
-    return durationScore + ratingScore + typeScore + keywordScore
+    const keywordScore = (planningThought?.searchKeywords ?? []).reduce(
+      (score, keyword) => (candidate.programName.toLowerCase().includes(keyword.toLowerCase()) ? score + 8 : score),
+      0,
+    )
+    return durationScore + typeScore + keywordScore
   }
 }
 

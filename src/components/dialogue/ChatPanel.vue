@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="chat-panel">
     <div ref="messagesContainer" class="messages-container">
       <div
@@ -16,10 +16,10 @@
         >
           <div v-if="message.role !== 'user'" class="system-summary-row">
             <span class="process-pill" :class="message.processType ? `process-${message.processType}` : ''">
-              {{ message.processTypeLabel || '系统' }}
+              {{ message.processTypeLabel || '绯荤粺' }}
             </span>
+            <div class="system-summary-text" :title="message.content">{{ message.content }}</div>
             <el-button
-              v-if="messageHasDetails(message)"
               link
               size="small"
               class="process-toggle"
@@ -29,11 +29,12 @@
             </el-button>
           </div>
 
-          <div class="message-text">{{ message.content }}</div>
+          <div v-if="message.role === 'user'" class="message-text">{{ message.content }}</div>
 
-          <div v-if="message.explanation && (message.expanded ?? true)" class="explanation-card">
-            <div class="explanation-content">{{ message.explanation.explanation }}</div>
-            <pre v-if="message.explanation.details" class="details-data">{{ formatDetails(message.explanation.details) }}</pre>
+          <div v-if="message.role !== 'user' && (message.expanded ?? false)" class="explanation-card">
+            <div class="explanation-content">{{ message.content }}</div>
+            <div v-if="message.explanation?.explanation" class="explanation-content is-secondary">{{ message.explanation.explanation }}</div>
+            <pre v-if="message.explanation?.details" class="details-data">{{ formatDetails(message.explanation?.details) }}</pre>
           </div>
         </div>
       </div>
@@ -113,6 +114,7 @@ import { getCandidateService } from '@/services/candidateService'
 import { getCandidateSelectionService } from '@/services/candidateSelectionService'
 import { getInsertCommandExecutor } from '@/services/insertCommandExecutor'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
+import { getOrchestrationDemoColumn } from '@/mock/orchestrationMock'
 
 type ProcessType =
   | 'planning'
@@ -182,9 +184,8 @@ const entityLinker = getEntityLinker()
 const candidateService = getCandidateService()
 const candidateSelectionService = getCandidateSelectionService(llmClient)
 const displayedLogIds = ref<string[]>([])
-const displayedLogSignatures = ref<string[]>([])
-const MAX_DISPLAYED_LOG_IDS = 200
-const MAX_MESSAGE_COUNT = 160
+const MAX_DISPLAYED_LOG_IDS = 60
+const MAX_MESSAGE_COUNT = 40
 
 const quickActions = [
   { label: '全天编排', prompt: '帮我填充全天节目' },
@@ -240,7 +241,7 @@ const sendMessage = async () => {
           role: 'assistant',
           content: result.message || '已识别为局部修改，但暂时无法稳定生成命令。',
           processType: 'general',
-          processTypeLabel: '任务判别',
+          processTypeLabel: '任务识别',
           expanded: false,
         })
         return
@@ -263,7 +264,7 @@ const sendMessage = async () => {
             details: result.details,
           },
           processType: 'execution',
-          processTypeLabel: '待确认修改',
+          processTypeLabel: '待确认',
           expanded: false,
         })
       } else {
@@ -281,7 +282,7 @@ const sendMessage = async () => {
         role: 'assistant',
         content:
           classification.mode === 'full_generate'
-            ? '已识别为全量编排需求，正在准备启动编排流程。'
+            ? '已识别为全天编排需求，正在准备启动编排流程。'
             : '已识别为局部补排需求，正在准备补齐空窗。',
         explanation: {
           type: 'command',
@@ -290,15 +291,15 @@ const sendMessage = async () => {
         },
         processType: 'planning',
         processTypeLabel:
-          classification.mode === 'full_generate' ? '任务判别 / 全量编排' : '任务判别 / 局部补排',
+          classification.mode === 'full_generate' ? '任务识别' : '任务识别',
         expanded: false,
       })
       const latestMessage = messages.value[messages.value.length - 1]
       if (latestMessage) {
         latestMessage.content =
           classification.mode === 'full_generate'
-            ? '已进入全量编排，将开始按空窗循环检查并补排。'
-            : '已进入局部补排，将开始检查目标空窗并补排。'
+            ? '已进入全天编排，将开始按空窗循环检查并补排。'
+            : '已进入局部补排，将开始检查目标空窗并补排。',
         latestMessage.explanation = {
           type: 'command',
           targetId: 'orchestration',
@@ -308,7 +309,7 @@ const sendMessage = async () => {
               : '接下来会围绕目标空窗执行候选查询、选择和落表。',
         }
         latestMessage.processTypeLabel =
-          classification.mode === 'full_generate' ? '任务判别 / 全量编排' : '任务判别 / 局部补排'
+          classification.mode === 'full_generate' ? '任务识别' : '任务识别'
       }
 
       emit('orchestrateRequested', {
@@ -346,19 +347,19 @@ const sendMessage = async () => {
       return
     }
 
-    messages.value.push({
-      role: 'assistant',
-      content:
-        classification.mode === 'clarify'
-          ? '我还不能完全确定你的目标。你可以直接说“全天编排”“补齐空窗”或“在9点插入节目看东方”。'
-          : `已识别到你的意图是 ${classification.mode}，但当前演示优先支持全量编排、局部补排和插入/移动节目。`,
+      messages.value.push({
+        role: 'assistant',
+        content:
+          classification.mode === 'clarify'
+            ? '我还不能完全确定你的目标。你可以直接说“全天编排”“补齐空窗”或“在9点插入节目看东方”。'
+            : `已识别到你的意图是 ${classification.mode}，但当前演示优先支持全天编排、局部补排和插入/移动节目。`,
       explanation: {
         type: 'command',
         targetId: 'classification',
         explanation: classification.reasoning,
       },
       processType: 'general',
-      processTypeLabel: '任务判别',
+      processTypeLabel: '任务识别',
       expanded: false,
     })
   } catch (error) {
@@ -411,7 +412,6 @@ const buildMicroEditCommand = async (
     const query = entityLinker.createInsertQuery(context, params)
     const candidates = await candidateService.searchPrograms({
       channelId: query.searchParams.channelId,
-      channelName: query.searchParams.channelName,
       programName: query.searchParams.programName,
       limit: 5,
     })
@@ -513,7 +513,6 @@ const buildMicroEditCommand = async (
 
     const candidates = await candidateService.searchPrograms({
       channelId: props.channelId,
-      channelName: props.channelName,
       programName: params.programName,
       limit: 5,
     })
@@ -643,13 +642,13 @@ const formatExpectedDuration = (expectedDuration: unknown): string => {
 }
 
 const buildQueryCriteriaSummary = (criteria: Record<string, any>): string => {
-  const parts = [
-    formatProgramTypes(criteria.programTypePreference) ? `类型：${formatProgramTypes(criteria.programTypePreference)}` : '',
-    formatKeywords(criteria.searchKeywords) ? `关键词：${formatKeywords(criteria.searchKeywords)}` : '',
-    formatExpectedDuration(criteria.expectedDuration) ? `时长：${formatExpectedDuration(criteria.expectedDuration)}` : '',
-  ].filter(Boolean)
-
-  return parts.join('；')
+  const columnName =
+    typeof criteria.columnId === 'string' && criteria.columnId.trim()
+      ? getOrchestrationDemoColumn(criteria.columnId)?.columnName ?? criteria.columnId
+      : ''
+  const duration = formatExpectedDuration(criteria.expectedDuration)
+  const result = [columnName, duration].filter(Boolean).join('，')
+  return result ? `查询：${result}` : '查询：未指定'
 }
 
 const truncateText = (text: string, maxLength = 42): string => {
@@ -676,14 +675,6 @@ const compressLogDetails = (details: Record<string, any>, processType: ProcessTy
 const shouldDisplayLog = (log: PlanningLogEntry): boolean => {
   const details = log.details ?? {}
 
-  if (log.phase === 'planning' && 'criteria' in details) {
-    return false
-  }
-
-  if (log.phase === 'planning' && typeof details.layoutSlotCount === 'number') {
-    return false
-  }
-
   if (log.phase === 'planning' && details.strategy && typeof details.initialGapCount === 'number') {
     return false
   }
@@ -692,15 +683,24 @@ const shouldDisplayLog = (log: PlanningLogEntry): boolean => {
     return false
   }
 
+  if (log.phase === 'planning' && details.criteria && typeof details.criteria === 'object') {
+    return false
+  }
+
   return true
 }
-
-const buildMessageSignature = (message: Pick<Message, 'content' | 'processTypeLabel' | 'processType'>) =>
-  `${message.processType ?? 'general'}|${message.processTypeLabel ?? ''}|${message.content}`
 
 const isNoCandidateCase = (details: Record<string, any>) => details.error === 'No candidates found'
 
 const buildFriendlyLogExplanation = (log: PlanningLogEntry, details: Record<string, any>) => {
+  if (typeof details.layoutSlotCount === 'number') {
+    return `已命中版面参考，并初始化 ${details.layoutSlotCount} 个待处理时段。`
+  }
+
+  if (typeof details.existingItemCount === 'number') {
+    return `当前编单已有 ${details.existingItemCount} 个节目，本次会基于剩余空窗继续编排。`
+  }
+
   if (isNoCandidateCase(details)) {
     const timeRange =
       typeof details.startTime === 'string'
@@ -773,10 +773,10 @@ const buildFallbackCommandWithLLM = async (userInput: string): Promise<Orchestra
       {
         role: 'user',
         content:
-          `频道=${props.channelName} 日期=${props.date}\n` +
+          `棰戦亾=${props.channelName} 鏃ユ湡=${props.date}\n` +
           `当前节目单：\n${scheduleSummary || '当前为空表'}\n` +
-          `用户要求：${userInput}\n` +
-          'JSON 示例：{"action":"delete","data":{"itemId":"xxx"},"reasoning":"..."}',
+          `鐢ㄦ埛瑕佹眰锛?{userInput}\n` +
+          'JSON 绀轰緥锛歿"action":"delete","data":{"itemId":"xxx"},"reasoning":"..."}',
       },
     ],
     {
@@ -888,18 +888,15 @@ const summarizeCommand = (command: OrchestrationCommand): string => {
     case 'replace':
       return '替换已编排节目'
     case 'move':
-      return '修改节目起始时间'
+      return '修改节目开始时间'
     case 'insert':
-      return '插入节目'
+      return '鎻掑叆鑺傜洰'
     case 'update_field':
-      return '修改节目字段'
+      return '淇敼鑺傜洰瀛楁'
     default:
       return `执行 ${command.action} 命令`
   }
 }
-
-const messageHasDetails = (message: Message) =>
-  Boolean(message.explanation?.details || message.explanation?.explanation)
 
 const toggleExpanded = (message: Message) => {
   message.expanded = !(message.expanded ?? false)
@@ -932,6 +929,20 @@ const buildLogMessage = (log: PlanningLogEntry): Message => {
   }
 }
 
+const appendSystemLogMessage = (message: Message) => {
+  const lastMessage = messages.value[messages.value.length - 1]
+  if (
+    lastMessage &&
+    lastMessage.role !== 'user' &&
+    lastMessage.processType === message.processType &&
+    lastMessage.content === message.content
+  ) {
+    return
+  }
+
+  messages.value.push(message)
+}
+
 const summarizeLog = (log: PlanningLogEntry): string => {
   const details = log.details ?? {}
 
@@ -945,13 +956,13 @@ const summarizeLog = (log: PlanningLogEntry): string => {
       )
       .filter(Boolean)
 
-    return ranges.length > 0 ? `发现待处理空窗：${ranges.join('，')}` : '发现待处理空窗'
+    return ranges.length > 0 ? `发现待处理空窗：${ranges.join('；')}` : '发现待处理空窗'
   }
 
   if (typeof details.selectedCandidateName === 'string') {
     const gapRange =
       typeof details.startTime === 'string'
-        ? `，对应空窗 ${formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)}`
+        ? `锛屽搴旂┖绐?${formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)}`
         : ''
     return `已选中节目《${details.selectedCandidateName}》${gapRange}`
   }
@@ -967,35 +978,12 @@ const summarizeLog = (log: PlanningLogEntry): string => {
   }
 
   if (typeof details.candidateCount === 'number') {
-    const topCandidates = Array.isArray(details.topCandidates)
-      ? details.topCandidates
-          .slice(0, 3)
-          .map((item) => (typeof item?.programName === 'string' ? item.programName : ''))
-          .filter(Boolean)
-      : []
-
-    return topCandidates.length > 0
-      ? `候选检索完成，共返回 ${details.candidateCount} 个候选：${topCandidates.join('、')}`
-      : `候选检索完成，共返回 ${details.candidateCount} 个候选`
+    return `查询结果：${details.candidateCount} 个`
   }
 
   if (details.criteria && typeof details.criteria === 'object') {
     const criteria = details.criteria as Record<string, any>
-    const types = Array.isArray(criteria.programTypePreference)
-      ? criteria.programTypePreference.join('、')
-      : ''
-    const keywords = Array.isArray(criteria.searchKeywords)
-      ? criteria.searchKeywords.join('、')
-      : ''
-    const duration = criteria.expectedDuration
-      ? `${criteria.expectedDuration.min}-${criteria.expectedDuration.max}秒`
-      : ''
-    const parts = [
-      types ? `类型=${types}` : '',
-      keywords ? `关键词=${keywords}` : '',
-      duration ? `时长=${duration}` : '',
-    ].filter(Boolean)
-    return parts.length > 0 ? `已生成检索参数：${parts.join('；')}` : '已生成候选检索参数'
+    return buildQueryCriteriaSummary(criteria)
   }
 
   if (typeof details.programName === 'string' && typeof details.startTime === 'string') {
@@ -1048,6 +1036,14 @@ const summarizeLog = (log: PlanningLogEntry): string => {
 const summarizeRuntimeLog = (log: PlanningLogEntry): string => {
   const details = log.details ?? {}
 
+  if (typeof details.layoutSlotCount === 'number') {
+    return `已命中版面参考，初始化 ${details.layoutSlotCount} 个待处理时段`
+  }
+
+  if (typeof details.existingItemCount === 'number') {
+    return `保留当前编单，基于剩余空窗继续编排`
+  }
+
   if (isNoCandidateCase(details)) {
     const timeRange =
       typeof details.startTime === 'string'
@@ -1066,7 +1062,7 @@ const summarizeRuntimeLog = (log: PlanningLogEntry): string => {
       )
       .filter(Boolean)
 
-    return ranges.length > 0 ? `发现待处理空窗：${ranges.join('，')}` : '发现待处理空窗'
+    return ranges.length > 0 ? `发现待处理空窗：${ranges.join('；')}` : '发现待处理空窗'
   }
 
   if (typeof details.selectedCandidateName === 'string') {
@@ -1087,16 +1083,7 @@ const summarizeRuntimeLog = (log: PlanningLogEntry): string => {
   }
 
   if (typeof details.candidateCount === 'number') {
-    const topCandidates = Array.isArray(details.topCandidates)
-      ? details.topCandidates
-          .slice(0, 3)
-          .map((item) => (typeof item?.programName === 'string' ? item.programName : ''))
-          .filter(Boolean)
-      : []
-
-    return topCandidates.length > 0
-      ? `接口返回 ${details.candidateCount} 个候选：${topCandidates.join('、')}`
-      : `接口返回 ${details.candidateCount} 个候选`
+    return `查询结果：${details.candidateCount} 个`
   }
 
   if (details.criteria && typeof details.criteria === 'object') {
@@ -1168,13 +1155,13 @@ const mapLogToProcessType = (log: PlanningLogEntry): ProcessType => {
   if (isNoCandidateCase(log.details ?? {})) return 'planning'
   if (log.level === 'error') return 'error'
   if (log.phase === 'validation') return 'validation'
+  if ('itemId' in (log.details ?? {}) || 'programName' in (log.details ?? {})) return 'execution'
   if ('criteria' in (log.details ?? {}) || 'candidateCount' in (log.details ?? {})) return 'query'
   if (
     'selectedCandidateId' in (log.details ?? {}) ||
     'selectedCandidateName' in (log.details ?? {})
   )
     return 'selection'
-  if ('itemId' in (log.details ?? {}) || 'programName' in (log.details ?? {})) return 'execution'
   if (log.phase === 'planning') return 'planning'
   return 'general'
 }
@@ -1182,13 +1169,13 @@ const mapLogToProcessType = (log: PlanningLogEntry): ProcessType => {
 const mapLogToProcessLabel = (log: PlanningLogEntry) => {
   const type = mapLogToProcessType(log)
   const mapping: Record<ProcessType, string> = {
-    planning: '编排想法',
-    query: '候选查询',
-    selection: '候选选择',
-    execution: '落表执行',
-    validation: '校验结果',
+    planning: '想法',
+    query: '查询',
+    selection: '选择',
+    execution: '执行',
+    validation: '校验',
     error: '异常',
-    general: '编排过程',
+    general: '过程',
   }
   return mapping[type]
 }
@@ -1196,13 +1183,13 @@ const mapLogToProcessLabel = (log: PlanningLogEntry) => {
 const mapRuntimeLogToProcessLabel = (log: PlanningLogEntry) => {
   const type = mapLogToProcessType(log)
   const mapping: Record<ProcessType, string> = {
-    planning: '编排想法',
-    query: '接口调用',
-    selection: '候选选择',
-    execution: '落表执行',
-    validation: '校验结果',
+    planning: '想法',
+    query: '查询',
+    selection: '选择',
+    execution: '执行',
+    validation: '校验',
     error: '异常',
-    general: '编排过程',
+    general: '过程',
   }
   return mapping[type]
 }
@@ -1215,31 +1202,25 @@ watch(
 )
 
 watch(
-  () => props.orchestrationLogs ?? [],
-  (logs) => {
-    const newLogs = logs.filter((log) => !displayedLogIds.value.includes(log.id))
-    if (newLogs.length === 0) return
+  () => props.orchestrationLogs?.length ?? 0,
+  (count) => {
+    if (!count || !props.isOrchestrating) return
+    const logs = props.orchestrationLogs ?? []
+    const unseenLogs = logs.filter((log) => !displayedLogIds.value.includes(log.id))
+    if (unseenLogs.length === 0) return
 
-    for (const log of newLogs) {
+    for (const log of unseenLogs) {
       displayedLogIds.value.push(log.id)
-      if (displayedLogIds.value.length > MAX_DISPLAYED_LOG_IDS) {
-        displayedLogIds.value.splice(0, displayedLogIds.value.length - MAX_DISPLAYED_LOG_IDS)
-      }
       if (!shouldDisplayLog(log)) continue
+      appendSystemLogMessage(buildLogMessage(log))
+    }
 
-      const message = buildLogMessage(log)
-      const signature = buildMessageSignature(message)
-      if (displayedLogSignatures.value.includes(signature)) continue
+    if (displayedLogIds.value.length > MAX_DISPLAYED_LOG_IDS) {
+      displayedLogIds.value.splice(0, displayedLogIds.value.length - MAX_DISPLAYED_LOG_IDS)
+    }
 
-      displayedLogSignatures.value.push(signature)
-      if (displayedLogSignatures.value.length > 100) {
-        displayedLogSignatures.value.shift()
-      }
-
-      messages.value.push(message)
-      if (messages.value.length > MAX_MESSAGE_COUNT) {
-        messages.value.splice(0, messages.value.length - MAX_MESSAGE_COUNT)
-      }
+    if (messages.value.length > MAX_MESSAGE_COUNT) {
+      messages.value.splice(0, messages.value.length - MAX_MESSAGE_COUNT)
     }
   },
   { immediate: true },
@@ -1264,7 +1245,6 @@ watch(
 
 .message-item {
   margin-bottom: 14px;
-  animation: fade-up 180ms ease;
 }
 
 .message-item.is-user {
@@ -1289,22 +1269,29 @@ watch(
 .system-row {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 14px 12px;
+  gap: 8px;
+  padding: 10px 12px;
   border: 1px solid rgba(251, 146, 60, 0.1);
-  border-radius: 18px;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.76);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 12px 28px rgba(120, 53, 15, 0.06);
+  box-shadow: 0 2px 8px rgba(120, 53, 15, 0.05);
 }
 
 .system-summary-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
+}
+
+.system-summary-text {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #223046;
+  white-space: normal;
+  word-break: break-all;
 }
 
 .process-pill {
@@ -1373,17 +1360,28 @@ watch(
   word-break: break-word;
 }
 
+.user-bubble .message-text {
+  color: #fff7ed;
+}
+
 .explanation-card {
   margin-top: 2px;
   border: 1px solid #e6ecf5;
-  border-radius: 14px;
-  padding: 14px;
+  border-radius: 12px;
+  padding: 12px;
   background: rgba(255, 255, 255, 0.88);
 }
 
 .explanation-content {
   font-size: 13px;
   line-height: 1.7;
+}
+
+.explanation-content.is-secondary {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  color: #475569;
 }
 
 .details-data,
@@ -1472,24 +1470,11 @@ watch(
   padding: 18px;
   border-top: 1px solid rgba(251, 146, 60, 0.12);
   background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(12px);
 }
 
 .input-area :deep(.el-textarea__inner) {
   min-height: 76px;
   padding: 12px 14px;
-}
-
-@keyframes fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 @media (max-width: 768px) {
@@ -1505,3 +1490,4 @@ watch(
   }
 }
 </style>
+
