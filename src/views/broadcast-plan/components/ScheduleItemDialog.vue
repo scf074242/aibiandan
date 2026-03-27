@@ -352,7 +352,7 @@ const handleSave = async () => {
     programCode: formData.value.programCode,
     code18: formData.value.programCode,
     programName: formData.value.programName,
-    episodeName: formData.value.programName,
+    instanceName: formData.value.programName,
     duration: formData.value.duration,
     remark: formData.value.remark,
     keySlot: formData.value.columnId,

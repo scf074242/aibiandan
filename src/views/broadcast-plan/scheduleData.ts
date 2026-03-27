@@ -10,7 +10,7 @@ export interface ScheduleItem {
   startTime: string
   endTime: string
   programType?: string
-  episodeName?: string
+  instanceName?: string
   indexingSheetCode?: string
   materialStatus?: MaterialStatus | string
   businessType?: BusinessType

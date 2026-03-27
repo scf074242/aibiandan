@@ -1,4 +1,4 @@
-import type { LLMClient } from './llm/llmClient'
+﻿import type { LLMClient } from './llm/llmClient'
 import type { DialogueContext } from './dialogueContext'
 
 export interface InsertParams {
@@ -10,6 +10,11 @@ export interface MoveParams {
   targetTime: string
   offsetSeconds: number
   direction: 'forward' | 'backward'
+}
+
+export interface DeleteParams {
+  targetTime: string
+  programName?: string
 }
 
 export interface ReplaceParams {
@@ -91,6 +96,41 @@ export class ParamExtractor {
     }
   }
 
+  async extractDeleteParams(context: DialogueContext): Promise<DeleteParams | null> {
+    const ruleBased = this.ruleBasedExtractDelete(context.userInput)
+    if (ruleBased) return ruleBased
+
+    try {
+      const response = await this.llmClient.chat(
+        [
+          {
+            role: 'system',
+            content:
+              '你是广播电视节目串联单命令参数提取器。请从用户输入中提取 targetTime 和可选 programName，并且只返回 JSON。',
+          },
+          {
+            role: 'user',
+            content:
+              `用户指令: ${context.userInput}\n` +
+              '输出格式: {"targetTime":"12:00:00","programName":"午间30"}',
+          },
+        ],
+        { temperature: 0, maxTokens: 120 },
+      )
+
+      const match = response.content.match(/\{[\s\S]*\}/)
+      if (!match) return null
+      const parsed = JSON.parse(match[0]) as Partial<DeleteParams>
+      if (!parsed.targetTime) return null
+      return {
+        targetTime: this.normalizeTime(parsed.targetTime),
+        programName: parsed.programName?.trim(),
+      }
+    } catch {
+      return null
+    }
+  }
+
   async extractReplaceParams(context: DialogueContext): Promise<ReplaceParams | null> {
     const ruleBased = this.ruleBasedExtractReplace(context.userInput)
     if (ruleBased) return ruleBased
@@ -142,7 +182,7 @@ export class ParamExtractor {
 
     return {
       targetTime: this.normalizeTime(`${timeMatch[1] ?? '09'}:${timeMatch[2] ?? '00'}`),
-      programName: programMatch[1].replace(/[，。,；;]/g, '').trim(),
+      programName: programMatch[1].replace(/[，。？?]/g, '').trim(),
     }
   }
 
@@ -185,6 +225,37 @@ export class ParamExtractor {
     return null
   }
 
+  private ruleBasedExtractDelete(userInput: string): DeleteParams | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const timePatterns = [
+      /(?:删除|删掉|移除)(\d{1,2})点半的?(.+)?/,
+      /(?:删除|删掉|移除)(\d{1,2})点(?:(\d{1,2})分)?的?(.+)?/,
+      /(?:删除|删掉|移除)(\d{1,2})[:：](\d{2})的?(.+)?/,
+    ]
+
+    for (const pattern of timePatterns) {
+      const match = normalized.match(pattern)
+      if (!match?.[1]) continue
+
+      if (pattern.source.includes('点半')) {
+        const programName = (match[2] || '').replace(/[，。？?]/g, '').replace(/节目/g, '').replace(/^的/, '').trim()
+        return {
+          targetTime: this.normalizeTime(`${match[1]}:30`),
+          programName: programName || undefined,
+        }
+      }
+
+      const minutes = match[2] ?? '00'
+      const programName = (match[3] || '').replace(/[，。？?]/g, '').replace(/节目/g, '').replace(/^的/, '').trim()
+      return {
+        targetTime: this.normalizeTime(`${match[1]}:${minutes}`),
+        programName: programName || undefined,
+      }
+    }
+
+    return null
+  }
+
   private ruleBasedExtractReplace(userInput: string): ReplaceParams | null {
     const normalized = userInput.replace(/\s+/g, '')
     const timeMatch =
@@ -195,12 +266,12 @@ export class ParamExtractor {
 
     return {
       targetTime: this.normalizeTime(`${timeMatch[1]}:${timeMatch[2] ?? '00'}`),
-      programName: timeMatch[3].replace(/[，。,；;]/g, '').trim(),
+      programName: timeMatch[3].replace(/[，。？?]/g, '').trim(),
     }
   }
 
   private normalizeTime(timeText: string): string {
-    const match = timeText.match(/(\d{1,2})[:：]?(\d{2})?(?:[:：]?(\d{2}))?/)
+    const match = timeText.match(/(\d{1,2})[:：]?(\d{2})?(?:[:：]?(\d{2}))?/) 
     if (!match) return '09:00:00'
 
     const hours = (match[1] ?? '09').padStart(2, '0')

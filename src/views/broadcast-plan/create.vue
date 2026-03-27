@@ -282,7 +282,7 @@
                   <div class="item-cell episode-cell">
                     <div class="episode-name" :class="{ 'is-reference': item.isReference }">
                       <el-icon v-if="item.isReference" class="reference-icon"><View /></el-icon>
-                      {{ item.episodeName || '-' }}
+                      {{ item.instanceName || '-' }}
                     </div>
                   </div>
 
@@ -600,11 +600,17 @@ const inferProgramTypeFromName = (name?: string): string => {
 
 const resolveScheduleItemProgramType = (item: Partial<ScheduleItem>) =>
   item.programType ||
-  (item.businessType === 'ad' ? 'ad' : item.sourceType === 'live' ? 'live' : inferProgramTypeFromName(item.programName || item.episodeName))
+  (item.businessType === 'ad' ? 'ad' : item.sourceType === 'live' ? 'live' : inferProgramTypeFromName(item.programName || item.instanceName))
 
 const normalizeDemoDisplayName = (name?: string) => (name || '').replace(/带$/, '')
 
-const formatRelativeStart = () => '00:00:00'
+const formatRelativeStart = (seconds = 0) => {
+  const totalSeconds = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const remainSeconds = totalSeconds % 60
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainSeconds).padStart(2, '0')}`
+}
 
 const formatPlayLengthText = (durationSeconds: number) => `${Math.max(1, Math.round(durationSeconds / 60))}分钟`
 
@@ -689,7 +695,7 @@ const syncPageItemsToAtomic = () => {
     scheduleItems.value.map((item, index) => ({
       id: item.id,
       programCode: item.programCode || item.code18 || item.id,
-      programName: item.programName || item.episodeName || '未命名节目',
+      programName: item.programName || item.instanceName || '未命名节目',
       startTime: item.startTime.includes('T')
         ? item.startTime
         : `${date}T${item.startTime.length === 5 ? `${item.startTime}:00` : item.startTime}`,
@@ -699,6 +705,7 @@ const syncPageItemsToAtomic = () => {
       duration: Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime)),
       programType: resolveScheduleItemProgramType(item),
       sequence: index + 1,
+      relativeStartSeconds: timeToSeconds(item.relativeStart || '00:00:00'),
     })),
   )
 }
@@ -711,7 +718,7 @@ const syncAtomicItemsToPage = () => {
     startTime: item.startTime.split('T')[1]?.slice(0, 8) || item.startTime,
     endTime: item.endTime.split('T')[1]?.slice(0, 8) || item.endTime,
     programType: item.programType,
-    episodeName: item.programName,
+    instanceName: item.programName,
     programName: item.programName,
     businessType: item.programType === 'ad' ? 'ad' : 'program',
     sourceType: item.programType === 'live' ? 'live' : 'record',
@@ -722,7 +729,7 @@ const syncAtomicItemsToPage = () => {
     materialStatus: item.programType === 'ad' ? 'pending' : 'ready',
     materialName: item.programType === 'ad' ? '待广告系统下发' : `${item.programCode}-MAT`,
     playLength: formatPlayLengthText(item.duration),
-    relativeStart: formatRelativeStart(),
+    relativeStart: formatRelativeStart(item.relativeStartSeconds ?? 0),
     remark: '',
   }))
 }
@@ -741,7 +748,7 @@ const chatScheduleItems = computed(() =>
   scheduleItems.value.map((item) => ({
     id: item.id,
     programCode: item.programCode || item.code18 || item.id,
-    programName: item.programName || item.episodeName || '未命名节目',
+    programName: item.programName || item.instanceName || '未命名节目',
     startTime: item.startTime,
     endTime: item.endTime,
     duration: Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime)),
@@ -875,7 +882,7 @@ const referenceItems = computed<ScheduleItem[]>(() => {
     startTime: `${ref.startTime}:00`,
     endTime: `${ref.endTime}:00`,
     programType: ref.programType,
-    episodeName: normalizeDemoDisplayName(ref.programName),
+    instanceName: normalizeDemoDisplayName(ref.programName),
     indexingSheetCode: `IDX${ref.code18 || String(index + 1).padStart(6, '0')}`,
     materialStatus: 'ready' as const,
     businessType: ref.type,
@@ -1467,13 +1474,13 @@ const getTypeTagType = (item: Pick<ScheduleItem, 'sourceType' | 'businessType'>)
   return 'info'
 }
 
-const getContentTypeText = (item: Pick<ScheduleItem, 'episodeName' | 'programName' | 'businessType' | 'programType'>) => {
+const getContentTypeText = (item: Pick<ScheduleItem, 'instanceName' | 'programName' | 'businessType' | 'programType'>) => {
   if (item.businessType === 'ad') return '广告'
   const resolvedType = resolveScheduleItemProgramType(item)
   return getProgramTypeName(resolvedType)
 }
 
-const getContentTypeTagType = (item: Pick<ScheduleItem, 'episodeName' | 'programName' | 'businessType' | 'programType'>) => {
+const getContentTypeTagType = (item: Pick<ScheduleItem, 'instanceName' | 'programName' | 'businessType' | 'programType'>) => {
   const type = getContentTypeText(item)
   if (type === '广告') return 'warning'
   if (['电视剧', '纪录片', '评论', '生活', '文旅', '少儿', '健康'].includes(type)) return 'success'

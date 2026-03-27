@@ -1,26 +1,13 @@
-/**
- * 确定性物化器
- * 将 LLM 的候选选择结果转换为完整的业务对象
- * 
- * 核心职责：
- * 1. 补齐系统字段（ID、时间、序号等）
- * 2. 计算精确时间边界
- * 3. 生成完整的 ScheduleItem / RundownItem
- * 
- * 原则：LLM 只负责"选什么"，物化器负责"怎么填"
- */
-
 import type {
+  BroadcastRules,
+  GapInfo,
   MaterializeInput,
   MaterializeResult,
-  ScheduleItemSnapshot,
-  ChannelContext,
+  ProgramAdBreak,
   ProgramCandidate,
-  GapInfo,
-  BroadcastRules,
+  ScheduleItemSnapshot,
 } from '@/types/orchestration'
 
-/** 物化器配置 */
 export interface MaterializerConfig {
   defaultTimezone: string
   idPrefix: string
@@ -29,7 +16,6 @@ export interface MaterializerConfig {
   enableDurationValidation: boolean
 }
 
-/** 默认配置 */
 const DEFAULT_CONFIG: MaterializerConfig = {
   defaultTimezone: 'Asia/Shanghai',
   idPrefix: 'item',
@@ -38,15 +24,13 @@ const DEFAULT_CONFIG: MaterializerConfig = {
   enableDurationValidation: true,
 }
 
-/** 物化选项 */
 export interface MaterializeOptions {
-  forceStartTime?: string    // 强制指定开始时间
-  forceEndTime?: string      // 强制指定结束时间
-  customSequence?: number    // 自定义序号
-  skipValidation?: boolean   // 跳过验证
+  forceStartTime?: string
+  forceEndTime?: string
+  customSequence?: number
+  skipValidation?: boolean
 }
 
-/** 确定性物化器 */
 export class Materializer {
   private config: MaterializerConfig
 
@@ -54,15 +38,10 @@ export class Materializer {
     this.config = { ...DEFAULT_CONFIG, ...config }
   }
 
-  /**
-   * 物化单个条目
-   * 将 LLM 选择的候选节目转换为完整的 ScheduleItem
-   */
   materialize(input: MaterializeInput, options?: MaterializeOptions): MaterializeResult {
     const { gap, selectedCandidate, precedingItem, followingItem, channelContext } = input
 
     try {
-      // 1. 计算时间边界
       const timeBoundaries = this.calculateTimeBoundaries(
         gap,
         selectedCandidate,
@@ -71,7 +50,6 @@ export class Materializer {
         options,
       )
 
-      // 2. 验证时长
       if (this.config.enableDurationValidation && !options?.skipValidation) {
         const validation = this.validateDuration(
           selectedCandidate,
@@ -89,31 +67,24 @@ export class Materializer {
         }
       }
 
-      // 3. 生成系统字段
-      const systemFields = this.generateSystemFields(
-        selectedCandidate,
-        timeBoundaries,
-        precedingItem,
-      )
+      const sequenceStart = options?.customSequence
+        ?? (precedingItem ? precedingItem.sequence + 1 : this.config.sequenceStart)
+      const items = this.buildScheduleItems(selectedCandidate, timeBoundaries, sequenceStart)
+      const item = items[items.length - 1]
 
-      // 4. 组装完整条目
-      const item: ScheduleItemSnapshot = {
-        id: systemFields.id,
-        programCode: selectedCandidate.programCode,
-        programName: selectedCandidate.programName,
-        startTime: timeBoundaries.startTime,
-        endTime: timeBoundaries.endTime,
-        duration: timeBoundaries.duration,
-        programType: selectedCandidate.programType,
-        sequence: systemFields.sequence,
+      if (!item) {
+        return {
+          success: false,
+          error: '物化失败: 未生成任何编排记录',
+        }
       }
 
-      // 5. 生成警告信息
       const warnings = this.generateWarnings(input, item)
 
       return {
         success: true,
         item,
+        items,
         warnings: warnings.length > 0 ? warnings : undefined,
       }
     } catch (error) {
@@ -124,155 +95,103 @@ export class Materializer {
     }
   }
 
-  /**
-   * 批量物化
-   */
-  materializeBatch(
-    inputs: MaterializeInput[],
-    options?: MaterializeOptions,
-  ): MaterializeResult[] {
-    return inputs.map((input, index) => {
-      // 批量物化时，自动计算序号
-      const batchOptions: MaterializeOptions = {
-        ...options,
-        customSequence: options?.customSequence
-          ? options.customSequence + index
-          : undefined,
-      }
-      return this.materialize(input, batchOptions)
+  materializeBatch(inputs: MaterializeInput[], options?: MaterializeOptions): MaterializeResult[] {
+    return inputs.map((input, index) => this.materialize(input, {
+      ...options,
+      customSequence: options?.customSequence ? options.customSequence + index : undefined,
+    }))
+  }
+
+  previewMaterialize(input: MaterializeInput, options?: MaterializeOptions): MaterializeResult {
+    return this.materialize(input, {
+      ...options,
+      skipValidation: true,
     })
   }
 
-  /**
-   * 预演物化结果（不实际生成）
-   */
-  previewMaterialize(input: MaterializeInput, options?: MaterializeOptions): MaterializeResult {
-    // 预览模式跳过部分验证
-    const previewOptions: MaterializeOptions = {
-      ...options,
-      skipValidation: true,
-    }
-    return this.materialize(input, previewOptions)
-  }
-
-  // ==================== 时间计算 ====================
-
-  /**
-   * 计算时间边界
-   */
   private calculateTimeBoundaries(
     gap: GapInfo,
     candidate: ProgramCandidate,
     precedingItem?: ScheduleItemSnapshot,
-    followingItem?: ScheduleItemSnapshot,
+    _followingItem?: ScheduleItemSnapshot,
     options?: MaterializeOptions,
-  ): {
-    startTime: string
-    endTime: string
-    duration: number
-  } {
-    // 优先使用强制指定的时间
+  ) {
     if (options?.forceStartTime && options?.forceEndTime) {
-      const duration =
-        (new Date(options.forceEndTime).getTime() - new Date(options.forceStartTime).getTime()) /
-        1000
       return {
         startTime: options.forceStartTime,
         endTime: options.forceEndTime,
-        duration,
+        duration: this.calculateDuration(options.forceStartTime, options.forceEndTime),
       }
     }
 
-    // 确定开始时间
     let startTime: string
     if (options?.forceStartTime) {
       startTime = options.forceStartTime
     } else if (gap.constraints.fixedStart) {
-      // 空窗开始时间固定
       startTime = gap.startTime
     } else if (precedingItem) {
-      // 紧接前一条目
       startTime = precedingItem.endTime
     } else {
-      // 使用空窗开始时间
       startTime = gap.startTime
     }
 
-    // 计算结束时间（基于节目时长）
-    const startTimeMs = new Date(startTime).getTime()
-    const endTimeMs = startTimeMs + candidate.duration * 1000
-    let endTime = this.formatLocalDateTime(endTimeMs)
+    const computedEndTime = this.calculateEndTime(startTime, candidate.duration)
+    let endTime = options?.forceEndTime ?? computedEndTime
 
-    // 如果指定了强制结束时间
-    if (options?.forceEndTime) {
-      endTime = options.forceEndTime
-    } else if (gap.constraints.fixedEnd) {
-      // 如果空窗结束时间固定，需要调整
+    if (!options?.forceEndTime && gap.constraints.fixedEnd) {
       const gapEndMs = new Date(gap.endTime).getTime()
+      const endTimeMs = new Date(endTime).getTime()
       if (endTimeMs > gapEndMs) {
-        // 节目超出空窗，截断到空窗结束时间
         endTime = gap.endTime
       }
     }
 
-    // 重新计算实际时长
-    const actualDuration =
-      (new Date(endTime).getTime() - new Date(startTime).getTime()) / 1000
-
     return {
       startTime,
       endTime,
-      duration: actualDuration,
+      duration: this.calculateDuration(startTime, endTime),
     }
   }
 
-  /**
-   * 验证时长
-   */
   private validateDuration(
     candidate: ProgramCandidate,
     actualDuration: number,
     gap: GapInfo,
     rules: BroadcastRules,
-  ): {
-    valid: boolean
-    error?: string
-    warnings?: string[]
-  } {
+  ) {
     const warnings: string[] = []
 
-    // 1. 检查是否满足最小时长要求
     if (rules.minProgramDuration && actualDuration < rules.minProgramDuration) {
       return {
         valid: false,
-        error: `节目时长 ${actualDuration}秒 小于最小时长 ${rules.minProgramDuration}秒`,
+        error: `节目时长 ${actualDuration} 秒小于最小时长 ${rules.minProgramDuration} 秒`,
+        warnings,
       }
     }
 
-    // 2. 检查是否超过最大时长限制
     if (rules.maxProgramDuration && actualDuration > rules.maxProgramDuration) {
       return {
         valid: false,
-        error: `节目时长 ${actualDuration}秒 超过最大时长 ${rules.maxProgramDuration}秒`,
+        error: `节目时长 ${actualDuration} 秒超过最大时长 ${rules.maxProgramDuration} 秒`,
+        warnings,
       }
     }
 
-    // 3. 检查空窗约束
     if (gap.constraints.minDuration && actualDuration < gap.constraints.minDuration) {
-      warnings.push(`节目时长 ${actualDuration}秒 小于空窗建议最小时长 ${gap.constraints.minDuration}秒`)
+      warnings.push(`节目时长 ${actualDuration} 秒小于空窗建议最小时长 ${gap.constraints.minDuration} 秒`)
     }
 
     if (gap.constraints.maxDuration && actualDuration > gap.constraints.maxDuration) {
-      warnings.push(`节目时长 ${actualDuration}秒 超过空窗建议最大时长 ${gap.constraints.maxDuration}秒`)
+      warnings.push(`节目时长 ${actualDuration} 秒超过空窗建议最大时长 ${gap.constraints.maxDuration} 秒`)
     }
 
-    // 4. 检查与候选节目时长的差异
     const durationDiff = Math.abs(actualDuration - candidate.duration)
-    const durationDiffPercent = (durationDiff / candidate.duration) * 100
-
+    const durationDiffPercent = candidate.duration > 0
+      ? (durationDiff / candidate.duration) * 100
+      : 0
     if (durationDiffPercent > 10) {
       warnings.push(
-        `实际时长 ${actualDuration}秒 与候选节目时长 ${candidate.duration}秒 差异 ${durationDiffPercent.toFixed(1)}%`,
+        `物化后时长 ${actualDuration} 秒与候选时长 ${candidate.duration} 秒差异 ${durationDiffPercent.toFixed(1)}%`,
       )
     }
 
@@ -282,66 +201,153 @@ export class Materializer {
     }
   }
 
-  // ==================== 系统字段生成 ====================
-
-  /**
-   * 生成系统字段
-   */
-  private generateSystemFields(
+  private buildScheduleItems(
     candidate: ProgramCandidate,
     timeBoundaries: { startTime: string; endTime: string; duration: number },
-    precedingItem?: ScheduleItemSnapshot,
-  ): {
-    id: string
-    sequence: number
-  } {
-    // 生成唯一ID
-    const id = this.generateItemId()
-
-    // 计算序号
-    let sequence: number
-    if (precedingItem) {
-      sequence = precedingItem.sequence + 1
-    } else {
-      sequence = this.config.sequenceStart
+    sequenceStart: number,
+  ): ScheduleItemSnapshot[] {
+    const adBreaks = this.normalizeAdBreaks(candidate.adBreaks, timeBoundaries.duration)
+    if (adBreaks.length === 0) {
+      return [this.createProgramSegment(candidate, timeBoundaries.startTime, 0, timeBoundaries.duration, sequenceStart, 0)]
     }
 
+    const items: ScheduleItemSnapshot[] = []
+    let currentOffset = 0
+    let currentSequence = sequenceStart
+    let consumedContentDuration = 0
+
+    adBreaks.forEach((adBreak, index) => {
+      const contentDuration = adBreak.offsetSeconds - currentOffset
+      if (contentDuration > 0) {
+        items.push(this.createProgramSegment(
+          candidate,
+          timeBoundaries.startTime,
+          currentOffset,
+          contentDuration,
+          currentSequence,
+          consumedContentDuration,
+        ))
+        currentSequence += 1
+        consumedContentDuration += contentDuration
+      }
+
+      items.push(this.createAdSegment(
+        timeBoundaries.startTime,
+        adBreak.offsetSeconds,
+        adBreak.durationSeconds,
+        currentSequence,
+        index,
+        consumedContentDuration,
+      ))
+      currentSequence += 1
+      currentOffset = adBreak.offsetSeconds + adBreak.durationSeconds
+    })
+
+    const trailingDuration = timeBoundaries.duration - currentOffset
+    if (trailingDuration > 0) {
+      items.push(this.createProgramSegment(
+        candidate,
+        timeBoundaries.startTime,
+        currentOffset,
+        trailingDuration,
+        currentSequence,
+        consumedContentDuration,
+      ))
+    }
+
+    return items
+  }
+
+  private normalizeAdBreaks(adBreaks: ProgramAdBreak[] | undefined, scheduledDuration: number): ProgramAdBreak[] {
+    const normalized = [...(adBreaks ?? [])]
+      .filter((item) => item.durationSeconds > 0)
+      .sort((left, right) => left.offsetSeconds - right.offsetSeconds)
+
+    if (normalized.length === 0) {
+      return []
+    }
+
+    let previousEnd = 0
+    for (const adBreak of normalized) {
+      if (adBreak.offsetSeconds <= previousEnd) {
+        return []
+      }
+      if (adBreak.offsetSeconds >= scheduledDuration) {
+        return []
+      }
+      if (adBreak.offsetSeconds + adBreak.durationSeconds >= scheduledDuration) {
+        return []
+      }
+      previousEnd = adBreak.offsetSeconds + adBreak.durationSeconds
+    }
+
+    return normalized
+  }
+
+  private createProgramSegment(
+    candidate: ProgramCandidate,
+    baseStartTime: string,
+    offsetSeconds: number,
+    durationSeconds: number,
+    sequence: number,
+    relativeStartSeconds: number,
+  ): ScheduleItemSnapshot {
+    const startTime = this.addSeconds(baseStartTime, offsetSeconds)
+    const endTime = this.addSeconds(startTime, durationSeconds)
+
     return {
-      id,
+      id: this.generateItemId(),
+      programCode: candidate.programCode,
+      programName: candidate.programName,
+      startTime,
+      endTime,
+      duration: durationSeconds,
+      programType: candidate.programType,
       sequence,
+      relativeStartSeconds,
     }
   }
 
-  /**
-   * 生成条目ID
-   */
+  private createAdSegment(
+    baseStartTime: string,
+    offsetSeconds: number,
+    durationSeconds: number,
+    sequence: number,
+    index: number,
+    relativeStartSeconds: number,
+  ): ScheduleItemSnapshot {
+    const startTime = this.addSeconds(baseStartTime, offsetSeconds)
+    const endTime = this.addSeconds(startTime, durationSeconds)
+    const durationMinutes = Math.round(durationSeconds / 60)
+
+    return {
+      id: `ad_internal_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 8)}`,
+      programCode: `AD-${durationMinutes}M-${String(sequence).padStart(3, '0')}`,
+      programName: '广告',
+      startTime,
+      endTime,
+      duration: durationSeconds,
+      programType: 'ad',
+      sequence,
+      relativeStartSeconds,
+    }
+  }
+
   private generateItemId(): string {
     const timestamp = Date.now()
-    const random = Math.random().toString(36).substr(2, 9)
+    const random = Math.random().toString(36).slice(2, 11)
     return `${this.config.idPrefix}_${timestamp}_${random}`
   }
 
-  // ==================== 警告生成 ====================
-
-  /**
-   * 生成警告信息
-   */
-  private generateWarnings(
-    input: MaterializeInput,
-    item: ScheduleItemSnapshot,
-  ): string[] {
+  private generateWarnings(input: MaterializeInput, item: ScheduleItemSnapshot): string[] {
     const warnings: string[] = []
     const { gap, selectedCandidate } = input
 
-    // 1. 时长不匹配警告
     const durationDiff = Math.abs(item.duration - selectedCandidate.duration)
-    if (durationDiff > 60) {
-      warnings.push(
-        `物化后时长 ${item.duration}秒 与候选时长 ${selectedCandidate.duration}秒 差异较大`,
-      )
+    if (durationDiff > 60 && !(selectedCandidate.adBreaks?.length)) {
+      warnings.push(`物化后时长 ${item.duration} 秒与候选时长 ${selectedCandidate.duration} 秒差异较大`)
     }
 
-    // 2. 时间边界警告
     const gapStart = new Date(gap.startTime).getTime()
     const gapEnd = new Date(gap.endTime).getTime()
     const itemStart = new Date(item.startTime).getTime()
@@ -355,94 +361,62 @@ export class Materializer {
       warnings.push('节目结束时间晚于空窗结束时间')
     }
 
-    // 3. 类型约束警告
     if (
-      gap.constraints.allowedTypes &&
-      gap.constraints.allowedTypes.length > 0 &&
-      !gap.constraints.allowedTypes.includes(item.programType)
+      gap.constraints.allowedTypes?.length
+      && !gap.constraints.allowedTypes.includes(item.programType)
+      && item.programType !== 'ad'
     ) {
-      warnings.push(
-        `节目类型 ${item.programType} 不在空窗允许类型 [${gap.constraints.allowedTypes.join(', ')}] 中`,
-      )
+      warnings.push(`节目类型 ${item.programType} 不在空窗允许类型内`)
     }
 
     return warnings
   }
 
-  // ==================== 公共工具方法 ====================
-
-  /**
-   * 计算节目结束时间
-   */
   calculateEndTime(startTime: string, durationSeconds: number): string {
-    const startTimeMs = new Date(startTime).getTime()
-    const endTimeMs = startTimeMs + durationSeconds * 1000
-    return this.formatLocalDateTime(endTimeMs)
+    return this.addSeconds(startTime, durationSeconds)
   }
 
-  /**
-   * 计算两个时间点之间的时长（秒）
-   */
   calculateDuration(startTime: string, endTime: string): number {
-    const startMs = new Date(startTime).getTime()
-    const endMs = new Date(endTime).getTime()
-    return Math.floor((endMs - startMs) / 1000)
+    return Math.floor((new Date(endTime).getTime() - new Date(startTime).getTime()) / 1000)
   }
 
-  /**
-   * 格式化时长为可读字符串
-   */
   formatDuration(seconds: number): string {
     const hours = Math.floor(seconds / 3600)
     const minutes = Math.floor((seconds % 3600) / 60)
     const secs = seconds % 60
 
-    if (hours > 0) {
-      return `${hours}小时${minutes}分钟${secs}秒`
-    } else if (minutes > 0) {
-      return `${minutes}分钟${secs}秒`
-    } else {
-      return `${secs}秒`
-    }
+    if (hours > 0) return `${hours}小时${minutes}分钟${secs}秒`
+    if (minutes > 0) return `${minutes}分钟${secs}秒`
+    return `${secs}秒`
   }
 
-  /**
-   * 检查时间范围是否重叠
-   */
-  checkTimeOverlap(
-    range1: { start: string; end: string },
-    range2: { start: string; end: string },
-  ): boolean {
+  checkTimeOverlap(range1: { start: string; end: string }, range2: { start: string; end: string }): boolean {
     const start1 = new Date(range1.start).getTime()
     const end1 = new Date(range1.end).getTime()
     const start2 = new Date(range2.start).getTime()
     const end2 = new Date(range2.end).getTime()
-
     return start1 < end2 && start2 < end1
   }
 
-  /**
-   * 调整条目时间以适应空窗
-   */
-  adjustItemToGap(
-    item: ScheduleItemSnapshot,
-    gap: GapInfo,
-  ): ScheduleItemSnapshot {
+  adjustItemToGap(item: ScheduleItemSnapshot, gap: GapInfo): ScheduleItemSnapshot {
     const adjusted = { ...item }
 
-    // 确保开始时间不早于空窗开始
     if (new Date(item.startTime).getTime() < new Date(gap.startTime).getTime()) {
       adjusted.startTime = gap.startTime
       adjusted.endTime = this.calculateEndTime(adjusted.startTime, item.duration)
     }
 
-    // 确保结束时间不晚于空窗结束
     if (new Date(adjusted.endTime).getTime() > new Date(gap.endTime).getTime()) {
       adjusted.endTime = gap.endTime
       adjusted.duration = this.calculateDuration(adjusted.startTime, adjusted.endTime)
     }
 
     return adjusted
+  }
+
+  private addSeconds(baseStartTime: string, seconds: number): string {
+    const next = new Date(new Date(baseStartTime).getTime() + seconds * 1000)
+    return this.formatLocalDateTime(next.getTime())
   }
 
   private formatLocalDateTime(timestampMs: number): string {
@@ -457,7 +431,6 @@ export class Materializer {
   }
 }
 
-// 导出工厂函数
 let globalMaterializer: Materializer | null = null
 
 export function getMaterializer(config?: Partial<MaterializerConfig>): Materializer {
@@ -471,17 +444,10 @@ export function resetMaterializer(): void {
   globalMaterializer = null
 }
 
-// 导出便捷函数
-export function materializeItem(
-  input: MaterializeInput,
-  options?: MaterializeOptions,
-): MaterializeResult {
+export function materializeItem(input: MaterializeInput, options?: MaterializeOptions): MaterializeResult {
   return getMaterializer().materialize(input, options)
 }
 
-export function previewItemMaterialize(
-  input: MaterializeInput,
-  options?: MaterializeOptions,
-): MaterializeResult {
+export function previewItemMaterialize(input: MaterializeInput, options?: MaterializeOptions): MaterializeResult {
   return getMaterializer().previewMaterialize(input, options)
 }

@@ -1,38 +1,25 @@
-/**
- * 命令执行器（重构版）
- * 负责执行 LLM 生成的各种命令
- * 
- * 新架构特点：
- * 1. 支持 10 种命令类型（新命令体系）
- * 2. 集成物化器到 fill_item 命令
- * 3. 每个命令执行后自动触发校验
- * 4. 基于原子能力服务实现
- * 5. 支持命令预演
- */
-import type {
-  OrchestrationCommand,
-  OrchestrationCommandType,
-  PlanCommand,
-  QueryCandidatesCommand,
-  FillItemCommand,
-  RepairCommand,
-  InsertCommand,
-  DeleteCommand,
-  ReplaceCommand,
-  MoveCommand,
-  UpdateFieldCommand,
+﻿import type {
   ClarificationCommand,
-  ScheduleItemSnapshot,
-  ValidationReport,
-  ProgramCandidate,
+  DeleteCommand,
+  FillItemCommand,
   GapInfo,
+  InsertCommand,
+  MoveCommand,
+  OrchestrationCommand,
+  PlanCommand,
+  ProgramCandidate,
+  QueryCandidatesCommand,
+  RepairCommand,
+  ReplaceCommand,
+  ScheduleItemSnapshot,
+  UpdateFieldCommand,
+  ValidationReport,
 } from '@/types/orchestration'
-import { getAtomicCapabilities, type AtomicCapabilities } from './atomicCapabilities'
-import { getMaterializer } from './materializer'
-import { getCandidateService } from './candidateService'
 import type { MaterializeInput } from '@/types/orchestration'
+import { getAtomicCapabilities, type AtomicCapabilities } from './atomicCapabilities'
+import { getCandidateService } from './candidateService'
+import { getMaterializer } from './materializer'
 
-/** 执行结果 */
 export interface ExecutionResult<T = any> {
   success: boolean
   message: string
@@ -43,7 +30,6 @@ export interface ExecutionResult<T = any> {
   validationReport?: ValidationReport
 }
 
-/** 预演结果 */
 export interface PreviewResult {
   canExecute: boolean
   command: OrchestrationCommand
@@ -54,28 +40,25 @@ export interface PreviewResult {
   risks: string[]
 }
 
-/** 命令执行器配置 */
 export interface CommandExecutorConfig {
   enableAutoValidation: boolean
   enableSnapshot: boolean
   maxRetries: number
 }
 
-/** 默认配置 */
 const DEFAULT_CONFIG: CommandExecutorConfig = {
   enableAutoValidation: true,
   enableSnapshot: true,
   maxRetries: 3,
 }
 
-/** 命令执行器 */
 export class CommandExecutor {
   private atomicCapabilities: AtomicCapabilities
   private config: CommandExecutorConfig
   private executionLog: string[] = []
   private onValidation?: (scope: 'item' | 'full') => Promise<ValidationReport>
-  private candidates: Map<string, ProgramCandidate[]> = new Map()
-  private gaps: Map<string, GapInfo> = new Map()
+  private candidates = new Map<string, ProgramCandidate[]>()
+  private gaps = new Map<string, GapInfo>()
 
   constructor(
     atomicCapabilities: AtomicCapabilities,
@@ -87,239 +70,160 @@ export class CommandExecutor {
     this.onValidation = onValidation
   }
 
-  /**
-   * 执行单个命令
-   */
   async execute(command: OrchestrationCommand): Promise<ExecutionResult> {
     try {
       this.logExecution(`Executing command: ${command.action}`)
-
       switch (command.action) {
         case 'plan':
-          return this.executePlan(command as PlanCommand)
+          return this.executePlan(command)
         case 'query_candidates':
-          return this.executeQueryCandidates(command as QueryCandidatesCommand)
+          return this.executeQueryCandidates(command)
         case 'fill_item':
-          return this.executeFillItem(command as FillItemCommand)
+          return this.executeFillItem(command)
         case 'repair':
-          return this.executeRepair(command as RepairCommand)
+          return this.executeRepair(command)
         case 'insert':
-          return this.executeInsert(command as InsertCommand)
+          return this.executeInsert(command)
         case 'delete':
-          return this.executeDelete(command as DeleteCommand)
+          return this.executeDelete(command)
         case 'replace':
-          return this.executeReplace(command as ReplaceCommand)
+          return this.executeReplace(command)
         case 'move':
-          return this.executeMove(command as MoveCommand)
+          return this.executeMove(command)
         case 'update_field':
-          return this.executeUpdateField(command as UpdateFieldCommand)
+          return this.executeUpdateField(command)
         case 'clarification':
-          return this.executeClarification(command as ClarificationCommand)
+          return this.executeClarification(command)
         default:
-          return {
-            success: false,
-            message: `Unknown command type: ${(command as any).action}`,
-          }
+          return { success: false, message: `Unknown command type: ${(command as OrchestrationCommand).action}` }
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error)
       this.logExecution(`Command failed: ${errorMsg}`)
       return {
         success: false,
-        message: `Command execution failed`,
+        message: 'Command execution failed',
         error: errorMsg,
       }
     }
   }
 
-  /**
-   * 预演命令
-   */
   async preview(command: OrchestrationCommand): Promise<PreviewResult> {
     const warnings: string[] = []
     const risks: string[] = []
     const affectedItems: string[] = []
     const affectedTimeRanges: { start: string; end: string }[] = []
 
-    try {
-      switch (command.action) {
-        case 'fill_item': {
-          const fillCmd = command as FillItemCommand
-          const gap = this.gaps.get(fillCmd.data.gapId)
-          if (!gap) {
-            warnings.push(`空窗 ${fillCmd.data.gapId} 不存在`)
-          } else {
-            affectedTimeRanges.push({ start: gap.startTime, end: gap.endTime })
-          }
-          break
+    switch (command.action) {
+      case 'fill_item': {
+        const gap = this.gaps.get(command.data.gapId)
+        if (!gap) {
+          warnings.push(`Gap not found: ${command.data.gapId}`)
+        } else {
+          affectedTimeRanges.push({ start: gap.startTime, end: gap.endTime })
         }
-        case 'delete': {
-          const deleteCmd = command as DeleteCommand
-          const item = this.atomicCapabilities.getItem(deleteCmd.data.itemId)
-          if (!item) {
-            warnings.push(`条目 ${deleteCmd.data.itemId} 不存在`)
-          } else {
-            affectedItems.push(item.id)
-            affectedTimeRanges.push({ start: item.startTime, end: item.endTime })
-          }
-          break
-        }
-        case 'replace': {
-          const replaceCmd = command as ReplaceCommand
-          const item = this.atomicCapabilities.getItem(replaceCmd.data.itemId)
-          if (!item) {
-            warnings.push(`条目 ${replaceCmd.data.itemId} 不存在`)
-          } else {
-            affectedItems.push(item.id)
-            affectedTimeRanges.push({ start: item.startTime, end: item.endTime })
-          }
-          break
-        }
-        case 'move': {
-          const moveCmd = command as MoveCommand
-          const item = this.atomicCapabilities.getItem(moveCmd.data.itemId)
-          if (!item) {
-            warnings.push(`条目 ${moveCmd.data.itemId} 不存在`)
-          } else {
-            affectedItems.push(item.id)
-            affectedTimeRanges.push(
-              { start: item.startTime, end: item.endTime },
-              { start: moveCmd.data.newStartTime, end: this.calculateEndTime(moveCmd.data.newStartTime, item.duration) }
-            )
-            // 检查目标时间是否可用
-            if (!this.atomicCapabilities.isTimeRangeAvailable(
-              moveCmd.data.newStartTime,
-              this.calculateEndTime(moveCmd.data.newStartTime, item.duration),
-              moveCmd.data.itemId
-            )) {
-              risks.push('目标时间范围与其他条目重叠')
-            }
-          }
-          break
-        }
-        case 'insert': {
-          const insertCmd = command as InsertCommand
-          if (!insertCmd.data.insertTime || !insertCmd.data.scheduleDate) {
-            warnings.push('插入命令缺少目标时间或日期')
-            break
-          }
-
-          const candidate = getCandidateService().getCandidateById(insertCmd.data.candidateId)
-          if (!candidate) {
-            warnings.push(`未找到候选节目 ${insertCmd.data.candidateId}`)
-            break
-          }
-
-          const normalizedTime = insertCmd.data.insertTime.length === 5
-            ? `${insertCmd.data.insertTime}:00`
-            : insertCmd.data.insertTime
-          const startTime = `${insertCmd.data.scheduleDate}T${normalizedTime}`
-          const endTime = this.calculateEndTime(startTime, candidate.duration)
-          affectedTimeRanges.push({ start: startTime, end: endTime })
-
-          if (!this.atomicCapabilities.isTimeRangeAvailable(startTime, endTime)) {
-            risks.push('目标时间段已被现有节目占用，当前演示版本仅支持插入到空闲时间段。')
-          }
-          break
-        }
+        break
       }
+      case 'delete': {
+        const item = this.atomicCapabilities.getItem(command.data.itemId)
+        if (!item) {
+          warnings.push(`Item not found: ${command.data.itemId}`)
+        } else {
+          affectedItems.push(item.id)
+          affectedTimeRanges.push({ start: item.startTime, end: item.endTime })
+        }
+        break
+      }
+      case 'move': {
+        const item = this.atomicCapabilities.getItem(command.data.itemId)
+        if (!item) {
+          warnings.push(`Item not found: ${command.data.itemId}`)
+        } else {
+          affectedItems.push(item.id)
+          const endTime = this.calculateEndTime(command.data.newStartTime, item.duration)
+          affectedTimeRanges.push({ start: item.startTime, end: item.endTime })
+          affectedTimeRanges.push({ start: command.data.newStartTime, end: endTime })
+          if (!this.atomicCapabilities.isTimeRangeAvailable(command.data.newStartTime, endTime, command.data.itemId)) {
+            risks.push('目标时间段与其他条目重叠')
+          }
+        }
+        break
+      }
+      case 'insert': {
+        if (!command.data.insertTime || !command.data.scheduleDate) {
+          warnings.push('插入命令缺少目标时间或日期')
+          break
+        }
+        const candidate = getCandidateService().getCandidateById(command.data.candidateId)
+        if (!candidate) {
+          warnings.push(`未找到候选节目: ${command.data.candidateId}`)
+          break
+        }
+        const normalizedTime = command.data.insertTime.length === 5
+          ? `${command.data.insertTime}:00`
+          : command.data.insertTime
+        const startTime = `${command.data.scheduleDate}T${normalizedTime}`
+        const endTime = this.calculateEndTime(startTime, candidate.duration)
+        affectedTimeRanges.push({ start: startTime, end: endTime })
+        if (!this.atomicCapabilities.isTimeRangeAvailable(startTime, endTime)) {
+          risks.push('目标时间段已被占用')
+        }
+        break
+      }
+    }
 
-      return {
-        canExecute: warnings.length === 0,
-        command,
-        affectedItems,
-        affectedTimeRanges,
-        warnings,
-        risks,
-      }
-    } catch (error) {
-      return {
-        canExecute: false,
-        command,
-        affectedItems: [],
-        affectedTimeRanges: [],
-        warnings: [`预演失败: ${(error as Error).message}`],
-        risks: ['无法确定执行结果'],
-      }
+    return {
+      canExecute: warnings.length === 0,
+      command,
+      affectedItems,
+      affectedTimeRanges,
+      warnings,
+      risks,
     }
   }
 
-  /**
-   * 批量执行命令
-   */
   async executeBatch(commands: OrchestrationCommand[]): Promise<ExecutionResult> {
-    const results: ExecutionResult[] = []
-    const allAffectedItems: string[] = []
-
-    for (const command of commands) {
-      const result = await this.execute(command)
-      results.push(result)
-      if (result.affectedItems) {
-        allAffectedItems.push(...result.affectedItems)
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length
+    const results = await Promise.all(commands.map((command) => this.execute(command)))
+    const successCount = results.filter((result) => result.success).length
     const failCount = results.length - successCount
+    const affectedItems = [...new Set(results.flatMap((result) => result.affectedItems ?? []))]
 
     return {
       success: failCount === 0,
-      message: `批量执行: ${successCount} 成功, ${failCount} 失败`,
-      affectedItems: [...new Set(allAffectedItems)],
+      message: `Batch executed: ${successCount} succeeded, ${failCount} failed`,
+      data: results,
+      affectedItems,
     }
   }
 
-  // ==================== 具体命令执行 ====================
-
-  /**
-   * 执行策略初始化命令
-   */
   private executePlan(command: PlanCommand): ExecutionResult {
     return {
       success: true,
-      message: `策略初始化完成: ${command.data.strategy.target}`,
+      message: `Strategy initialized: ${command.data.strategy.target}`,
       data: command.data.strategy,
     }
   }
 
-  /**
-   * 执行候选检索命令
-   */
   private executeQueryCandidates(command: QueryCandidatesCommand): ExecutionResult {
-    // 候选检索只是记录检索条件，实际检索由外部服务完成
     return {
       success: true,
-      message: `候选检索条件已生成`,
+      message: 'Candidate query criteria generated',
       data: command.data.criteria,
     }
   }
 
-  /**
-   * 执行填充命令（集成物化器）
-   */
   private async executeFillItem(command: FillItemCommand): Promise<ExecutionResult> {
-    const { gapId, selectedCandidateId } = command.data
-
-    // 获取空窗信息
-    const gap = this.gaps.get(gapId)
+    const gap = this.gaps.get(command.data.gapId)
     if (!gap) {
-      return {
-        success: false,
-        message: `空窗不存在: ${gapId}`,
-      }
+      return { success: false, message: `Gap not found: ${command.data.gapId}` }
     }
 
-    // 获取候选节目
-    const candidates = this.candidates.get(gapId) || []
-    const selectedCandidate = candidates.find((c) => c.id === selectedCandidateId)
+    const candidates = this.candidates.get(command.data.gapId) ?? []
+    const selectedCandidate = candidates.find((item) => item.id === command.data.selectedCandidateId)
     if (!selectedCandidate) {
-      return {
-        success: false,
-        message: `候选节目不存在: ${selectedCandidateId}`,
-      }
+      return { success: false, message: `Candidate not found: ${command.data.selectedCandidateId}` }
     }
 
-    // 使用物化器生成完整条目
     const materializer = getMaterializer()
     const materializeInput: MaterializeInput = {
       gap,
@@ -340,19 +244,16 @@ export class CommandExecutor {
     }
 
     const materializeResult = materializer.materialize(materializeInput)
-
-    if (!materializeResult.success || !materializeResult.item) {
+    if (!materializeResult.success || !materializeResult.item || !materializeResult.items?.length) {
       return {
         success: false,
         message: `物化失败: ${materializeResult.error}`,
       }
     }
 
-    // 使用原子能力添加条目
-    const atomicResult = await this.atomicCapabilities.appendItems([materializeResult.item], {
+    const atomicResult = await this.atomicCapabilities.appendItems(materializeResult.items, {
       skipValidation: !this.config.enableAutoValidation,
     })
-
     if (!atomicResult.success) {
       return {
         success: false,
@@ -360,7 +261,6 @@ export class CommandExecutor {
       }
     }
 
-    // 触发校验
     let validationReport: ValidationReport | undefined
     if (this.config.enableAutoValidation && this.onValidation) {
       validationReport = await this.onValidation('item')
@@ -369,102 +269,56 @@ export class CommandExecutor {
     return {
       success: true,
       message: `已填充节目: ${materializeResult.item.programName}`,
-      data: materializeResult.item,
-      affectedItems: [materializeResult.item.id],
-      affectedTimeRanges: [{ start: materializeResult.item.startTime, end: materializeResult.item.endTime }],
+      data: materializeResult.items,
+      affectedItems: materializeResult.items.map((entry) => entry.id),
+      affectedTimeRanges: materializeResult.items.map((entry) => ({ start: entry.startTime, end: entry.endTime })),
       validationReport,
     }
   }
 
-  /**
-   * 执行修复命令
-   */
   private async executeRepair(command: RepairCommand): Promise<ExecutionResult> {
-    const { targetId, targetType, strategy, parameters } = command.data
+    const { targetId, strategy } = command.data
 
     switch (strategy) {
       case 'replace_candidate': {
-        // 替换候选：删除旧条目，添加新条目
         const deleteResult = await this.atomicCapabilities.deleteItem(targetId, { skipValidation: true })
         if (!deleteResult.success) {
-          return {
-            success: false,
-            message: `替换候选失败: ${deleteResult.error}`,
-          }
+          return { success: false, message: `Replace repair failed: ${deleteResult.error}` }
         }
-        return {
-          success: true,
-          message: `已替换候选: ${targetId}`,
-          affectedItems: [targetId],
-        }
-      }
-      case 'add_filler': {
-        // 补短片：添加填充内容
-        return {
-          success: true,
-          message: `补短片策略: ${targetId}`,
-        }
-      }
-      case 'adjust_item': {
-        // 调整条目
-        return {
-          success: true,
-          message: `调整条目: ${targetId}`,
-        }
+        return { success: true, message: `Replaced candidate for ${targetId}`, affectedItems: [targetId] }
       }
       case 'local_fallback': {
-        // 局部回退
         const restoreResult = this.atomicCapabilities.restoreSnapshot(targetId)
         return {
           success: restoreResult.success,
-          message: restoreResult.success ? `已回退: ${targetId}` : `回退失败: ${restoreResult.error}`,
+          message: restoreResult.success ? `Rolled back: ${targetId}` : `Rollback failed: ${restoreResult.error}`,
           affectedItems: [targetId],
         }
       }
-      case 'request_manual': {
-        // 请求人工
-        return {
-          success: false,
-          message: `需要人工处理: ${targetId}`,
-        }
-      }
+      case 'add_filler':
+      case 'adjust_item':
+        return { success: true, message: `Repair strategy applied: ${strategy}` }
+      case 'request_manual':
       default:
-        return {
-          success: false,
-          message: `未知修复策略: ${strategy}`,
-        }
+        return { success: false, message: `Manual action required: ${targetId}` }
     }
   }
 
-  /**
-   * 执行插入命令
-   */
-  private async executeInsert(command: InsertCommand): Promise<ExecutionResult> {
-    // 插入命令需要先生成新条目
+  private async executeInsert(_command: InsertCommand): Promise<ExecutionResult> {
     return {
       success: false,
-      message: '插入命令需要配合候选选择使用',
+      message: 'Insert command should be handled by InsertCommandExecutor',
     }
   }
 
-  /**
-   * 执行删除命令
-   */
   private async executeDelete(command: DeleteCommand): Promise<ExecutionResult> {
-    const { itemId, cascade } = command.data
-
-    const result = await this.atomicCapabilities.deleteItem(itemId, {
+    const result = await this.atomicCapabilities.deleteItem(command.data.itemId, {
       skipValidation: !this.config.enableAutoValidation,
     })
-
     if (!result.success) {
-      return {
-        success: false,
-        message: `删除失败: ${result.error}`,
-      }
+      return { success: false, message: `Delete failed: ${result.error}` }
     }
 
-    // 触发校验
     let validationReport: ValidationReport | undefined
     if (this.config.enableAutoValidation && this.onValidation) {
       validationReport = await this.onValidation('full')
@@ -472,50 +326,34 @@ export class CommandExecutor {
 
     return {
       success: true,
-      message: `已删除条目: ${result.data?.deletedItem.programName}`,
+      message: `Deleted item: ${result.data?.deletedItem.programName}`,
       data: result.data,
-      affectedItems: [itemId],
+      affectedItems: [command.data.itemId],
       affectedTimeRanges: result.affectedTimeRanges,
       validationReport,
     }
   }
 
-  /**
-   * 执行替换命令
-   */
   private async executeReplace(command: ReplaceCommand): Promise<ExecutionResult> {
-    const { itemId, newCandidateId } = command.data
-
-    // 获取旧条目
-    const oldItem = this.atomicCapabilities.getItem(itemId)
+    const oldItem = this.atomicCapabilities.getItem(command.data.itemId)
     if (!oldItem) {
-      return {
-        success: false,
-        message: `条目不存在: ${itemId}`,
-      }
+      return { success: false, message: `Item not found: ${command.data.itemId}` }
     }
 
-    // 这里需要获取新候选的信息来创建新条目
-    // 简化处理：创建一个新条目
     const newItem: ScheduleItemSnapshot = {
       ...oldItem,
       id: `item_${Date.now()}`,
-      programCode: newCandidateId,
+      programCode: command.data.newCandidateId,
       programName: '新节目',
     }
 
-    const result = await this.atomicCapabilities.replaceItem(itemId, newItem, {
+    const result = await this.atomicCapabilities.replaceItem(command.data.itemId, newItem, {
       skipValidation: !this.config.enableAutoValidation,
     })
-
     if (!result.success) {
-      return {
-        success: false,
-        message: `替换失败: ${result.error}`,
-      }
+      return { success: false, message: `Replace failed: ${result.error}` }
     }
 
-    // 触发校验
     let validationReport: ValidationReport | undefined
     if (this.config.enableAutoValidation && this.onValidation) {
       validationReport = await this.onValidation('item')
@@ -523,32 +361,22 @@ export class CommandExecutor {
 
     return {
       success: true,
-      message: `已替换条目`,
+      message: 'Item replaced',
       data: result.data,
-      affectedItems: [itemId, newItem.id],
+      affectedItems: [command.data.itemId, newItem.id],
       affectedTimeRanges: result.affectedTimeRanges,
       validationReport,
     }
   }
 
-  /**
-   * 执行移动命令
-   */
   private async executeMove(command: MoveCommand): Promise<ExecutionResult> {
-    const { itemId, newStartTime } = command.data
-
-    const result = await this.atomicCapabilities.moveItem(itemId, newStartTime, {
+    const result = await this.atomicCapabilities.moveItem(command.data.itemId, command.data.newStartTime, {
       skipValidation: !this.config.enableAutoValidation,
     })
-
     if (!result.success) {
-      return {
-        success: false,
-        message: `移动失败: ${result.error}`,
-      }
+      return { success: false, message: `Move failed: ${result.error}` }
     }
 
-    // 触发校验
     let validationReport: ValidationReport | undefined
     if (this.config.enableAutoValidation && this.onValidation) {
       validationReport = await this.onValidation('item')
@@ -556,32 +384,25 @@ export class CommandExecutor {
 
     return {
       success: true,
-      message: `已移动条目`,
+      message: `Moved item: ${command.data.itemId}`,
       data: result.data,
-      affectedItems: [itemId],
+      affectedItems: [command.data.itemId],
       affectedTimeRanges: result.affectedTimeRanges,
       validationReport,
     }
   }
 
-  /**
-   * 执行更新字段命令
-   */
   private async executeUpdateField(command: UpdateFieldCommand): Promise<ExecutionResult> {
-    const { itemId, field, value } = command.data
-
-    const result = await this.atomicCapabilities.updateField(itemId, field, value, {
-      skipValidation: !this.config.enableAutoValidation,
-    })
-
+    const result = await this.atomicCapabilities.updateField(
+      command.data.itemId,
+      command.data.field,
+      command.data.value,
+      { skipValidation: !this.config.enableAutoValidation },
+    )
     if (!result.success) {
-      return {
-        success: false,
-        message: `更新字段失败: ${result.error}`,
-      }
+      return { success: false, message: `Update field failed: ${result.error}` }
     }
 
-    // 触发校验
     let validationReport: ValidationReport | undefined
     if (this.config.enableAutoValidation && this.onValidation) {
       validationReport = await this.onValidation('item')
@@ -589,85 +410,63 @@ export class CommandExecutor {
 
     return {
       success: true,
-      message: `已更新字段: ${field}`,
+      message: `Field updated: ${command.data.field}`,
       data: result.data,
-      affectedItems: [itemId],
+      affectedItems: [command.data.itemId],
       affectedTimeRanges: result.affectedTimeRanges,
       validationReport,
     }
   }
 
-  /**
-   * 执行澄清命令
-   */
   private executeClarification(command: ClarificationCommand): ExecutionResult {
     return {
       success: true,
-      message: `需要澄清: ${command.data.question}`,
+      message: command.data.question,
       data: command.data,
     }
   }
 
-  // ==================== 辅助方法 ====================
-
-  /**
-   * 计算结束时间
-   */
   private calculateEndTime(startTime: string, durationSeconds: number): string {
     const startMs = new Date(startTime).getTime()
-    const endMs = startMs + durationSeconds * 1000
-    return new Date(endMs).toISOString()
+    const end = new Date(startMs + durationSeconds * 1000)
+    return this.formatLocalDateTime(end)
   }
 
-  /**
-   * 记录执行日志
-   */
+  private formatLocalDateTime(value: Date): string {
+    const year = value.getFullYear()
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    const hours = String(value.getHours()).padStart(2, '0')
+    const minutes = String(value.getMinutes()).padStart(2, '0')
+    const seconds = String(value.getSeconds()).padStart(2, '0')
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
+  }
+
   private logExecution(message: string): void {
-    const timestamp = new Date().toISOString()
-    this.executionLog.push(`[${timestamp}] ${message}`)
+    this.executionLog.push(`${new Date().toISOString()} ${message}`)
+    if (this.executionLog.length > 200) {
+      this.executionLog.shift()
+    }
   }
 
-  /**
-   * 获取执行日志
-   */
   getExecutionLog(): string[] {
     return [...this.executionLog]
-  }
-
-  /**
-   * 清空执行日志
-   */
-  clearExecutionLog(): void {
-    this.executionLog = []
-  }
-
-  /**
-   * 设置候选列表
-   */
-  setCandidates(gapId: string, candidates: ProgramCandidate[]): void {
-    this.candidates.set(gapId, candidates)
-  }
-
-  /**
-   * 设置空窗信息
-   */
-  setGap(gap: GapInfo): void {
-    this.gaps.set(gap.id, gap)
-  }
-
-  /**
-   * 设置校验回调
-   */
-  setValidationCallback(callback: (scope: 'item' | 'full') => Promise<ValidationReport>): void {
-    this.onValidation = callback
   }
 
   getScheduleItems(): ScheduleItemSnapshot[] {
     return this.atomicCapabilities.getAllItems()
   }
+
+  setCandidates(gapId: string, candidates: ProgramCandidate[]): void {
+    this.candidates.set(gapId, candidates)
+  }
+
+  setGaps(gaps: GapInfo[]): void {
+    this.gaps.clear()
+    gaps.forEach((gap) => this.gaps.set(gap.id, gap))
+  }
 }
 
-// 导出工厂函数
 let globalCommandExecutor: CommandExecutor | null = null
 
 export function getCommandExecutor(
@@ -688,3 +487,4 @@ export function getCommandExecutor(
 export function resetCommandExecutor(): void {
   globalCommandExecutor = null
 }
+

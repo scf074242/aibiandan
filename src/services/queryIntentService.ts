@@ -1,4 +1,8 @@
-import { getOrchestrationDemoColumn } from '@/mock/orchestrationMock'
+import {
+  getOrchestrationDemoColumn,
+  getOrchestrationDemoInstancesByColumn,
+  getOrchestrationDemoProgramsByColumn,
+} from '@/mock/orchestrationMock'
 import type {
   CandidateQueryCriteria,
   GapInfo,
@@ -22,18 +26,23 @@ export class QueryIntentService {
   ): Promise<CandidateQueryCriteria> {
     const layoutMatch = this.findLayoutMatch(gap, context)
     const columnId = layoutMatch?.columnId
-    const column = columnId ? getOrchestrationDemoColumn(columnId) : undefined
+    const columnInstances = columnId
+      ? getOrchestrationDemoInstancesByColumn(context.channel.channelId, columnId)
+      : []
+    const columnPrograms = columnId
+      ? getOrchestrationDemoProgramsByColumn(context.channel.channelId, columnId)
+      : []
 
     return {
       targetTimeRange: { start: gap.startTime, end: gap.endTime },
-      expectedDuration: this.resolveExpectedDuration(gap, thought, column?.defaultProgramType),
+      expectedDuration: this.resolveExpectedDuration(gap, thought, columnId, context.channel.channelId),
       channelId: context.channel.channelId,
       columnId: columnId ?? '',
       programTypePreference:
         thought.targetProgramTypes.length > 0
           ? thought.targetProgramTypes
-          : column?.defaultProgramType
-            ? [column.defaultProgramType]
+          : columnInstances.length > 0
+            ? Array.from(new Set(columnPrograms.map((program) => program.programType)))
             : gap.constraints.allowedTypes,
       excludeUsed: true,
     }
@@ -42,13 +51,23 @@ export class QueryIntentService {
   private resolveExpectedDuration(
     gap: GapInfo,
     thought: GapPlanningThought,
-    defaultProgramType?: string,
+    columnId?: string,
+    channelId?: string,
   ): CandidateQueryCriteria['expectedDuration'] {
-    const preferredTypes = thought.targetProgramTypes.length > 0
-      ? thought.targetProgramTypes
-      : defaultProgramType
-        ? [defaultProgramType]
+    const columnInstances =
+      columnId && channelId
+        ? getOrchestrationDemoInstancesByColumn(channelId, columnId)
         : []
+
+    if (columnInstances.length > 0) {
+      const durations = columnInstances.map((item) => item.duration)
+      return {
+        min: Math.min(...durations),
+        max: Math.min(gap.duration, Math.max(...durations)),
+      }
+    }
+
+    const preferredTypes = thought.targetProgramTypes.length > 0 ? thought.targetProgramTypes : []
 
     const isDramaLike = preferredTypes.includes('drama')
     if (!isDramaLike || gap.duration <= 3600) {

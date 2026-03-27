@@ -62,8 +62,7 @@ export class CandidateService {
     const filtered = this.candidates
       .filter((candidate) => candidate.channelId === criteria.channelId)
       .filter((candidate) => allowedProgramIds.size === 0 || allowedProgramIds.has(candidate.programId))
-      .filter((candidate) => candidate.duration >= criteria.expectedDuration.min)
-      .filter((candidate) => candidate.duration <= criteria.expectedDuration.max)
+      .filter((candidate) => this.matchesDuration(candidate, criteria))
       .filter((candidate) => this.matchesProgramType(candidate, criteria.programTypePreference))
       .filter((candidate) => this.matchesUsageState(candidate, criteria.excludeUsed))
       .sort((left, right) => this.scoreCandidate(right, gap, criteria) - this.scoreCandidate(left, gap, criteria))
@@ -110,22 +109,57 @@ export class CandidateService {
   }
 
   private scoreCandidate(candidate: ProgramCandidate, gap: GapInfo, criteria: CandidateQueryCriteria): number {
-    const durationScore = 100 - Math.abs(candidate.duration - gap.duration) / 60
+    const durationScore = criteria.columnId
+      ? 60
+      : 100 - Math.abs(candidate.duration - gap.duration) / 60
     const typeScore = criteria.programTypePreference?.includes(candidate.programType) ? 25 : 0
-    const issueScore = candidate.issueNo ? Math.max(0, 10 - Number(candidate.issueNo)) : 0
-    return durationScore + typeScore + issueScore
+    const serialScore = this.getProgramSerialPriority(candidate)
+    return durationScore + typeScore + serialScore
   }
 
   private scoreProgramSearch(candidate: ProgramCandidate, keyword: string): number {
     if (!keyword) {
-      return candidate.duration <= 3600 ? 20 : 0
+      return (candidate.duration <= 3600 ? 20 : 0) + this.getProgramSerialPriority(candidate)
     }
 
     const normalizedName = candidate.programName.toLowerCase()
     const exactMatch = normalizedName === keyword ? 100 : 0
     const prefixMatch = normalizedName.startsWith(keyword) ? 30 : 0
     const containsMatch = normalizedName.includes(keyword) ? 10 : 0
-    return exactMatch + prefixMatch + containsMatch
+    return exactMatch + prefixMatch + containsMatch + this.getProgramSerialPriority(candidate)
+  }
+
+  private getProgramSerialPriority(candidate: ProgramCandidate): number {
+    const fromProgramCode = this.extractProgramSerial(candidate.programCode)
+    if (fromProgramCode !== null) {
+      return Math.max(0, 20 - fromProgramCode)
+    }
+
+    if (candidate.issueNo) {
+      return Math.max(0, 20 - Number(candidate.issueNo))
+    }
+
+    return 0
+  }
+
+  private extractProgramSerial(programCode: string): number | null {
+    const normalized = programCode.trim()
+    if (!/^\d{12}$/.test(normalized)) {
+      return null
+    }
+
+    return Number(normalized.slice(-4))
+  }
+
+  private matchesDuration(candidate: ProgramCandidate, criteria: CandidateQueryCriteria): boolean {
+    if (criteria.columnId) {
+      return true
+    }
+
+    return (
+      candidate.duration >= criteria.expectedDuration.min
+      && candidate.duration <= criteria.expectedDuration.max
+    )
   }
 
   private matchesProgramType(candidate: ProgramCandidate, preferredTypes?: string[]): boolean {

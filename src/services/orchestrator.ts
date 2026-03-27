@@ -25,7 +25,11 @@ import { getOrchestrationStrategyService } from './orchestrationStrategyService'
 import type { GapPlanningThought } from './orchestrationStrategyService'
 import { getQueryIntentService } from './queryIntentService'
 import { getCandidateSelectionService } from './candidateSelectionService'
-import { tryBuildAdFillItems } from './adFillService'
+import {
+  applyAdInsertionPlan,
+  buildAdInsertionPlan,
+  collectAdInsertionOpportunities,
+} from './adFillService'
 import { LLMClient } from './llm/llmClient'
 import { TaskClassifier } from './llm/taskClassifier'
 import { getValidationEngine } from './validators/validationEngine'
@@ -427,7 +431,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     if (!this.isCancelled && this.gapManager) {
-      const filledCount = await this.fillRemainingGapsWithAds(generationContext?.layoutReference)
+      const filledCount = await this.fillRemainingGapsWithAds(generationContext)
       processed += filledCount
       if (filledCount > 0) {
         this.session!.gaps.pending = this.gapManager.queryRemainingGaps()
@@ -687,21 +691,30 @@ export class Orchestrator extends EventEmitter {
       channelContext: context.channel,
     })
 
-    if (!materialized.success || !materialized.item) {
+    if (!materialized.success || !materialized.item || !materialized.items?.length) {
       throw new Error(materialized.error || 'Materialize failed')
     }
 
-    const appendResult = await this.atomicCapabilities.appendItems([materialized.item], { skipValidation: true })
+    const appendResult = await this.atomicCapabilities.appendItems(materialized.items, { skipValidation: true })
     if (!appendResult.success) {
       throw new Error(appendResult.error || 'Append failed')
     }
 
     this.log('info', 'execution', `空窗 ${plan.gap.id} 已插入节目`, {
       gapId: plan.gap.id,
+      insertedCount: materialized.items.length,
       itemId: materialized.item.id,
       programName: materialized.item.programName,
-      startTime: materialized.item.startTime,
+      startTime: materialized.items[0]?.startTime ?? materialized.item.startTime,
       endTime: materialized.item.endTime,
+      insertedItems: materialized.items.map((entry) => ({
+        itemId: entry.id,
+        programName: entry.programName,
+        startTime: entry.startTime,
+        endTime: entry.endTime,
+        duration: entry.duration,
+        programType: entry.programType,
+      })),
       selectionReason: plan.fillCommand.data.selectionReason,
       selectedCandidateId: plan.selectedCandidate.id,
       selectedCandidateName: plan.selectedCandidate.programName,
@@ -710,58 +723,86 @@ export class Orchestrator extends EventEmitter {
     return materialized.item
   }
 
-  private async fillRemainingGapsWithAds(layoutReference?: LayoutReference): Promise<number> {
-    if (!this.gapManager) return 0
+  private async fillRemainingGapsWithAds(generationContext?: Awaited<ReturnType<ReturnType<typeof getDataService>['getGenerationContext']>> | null): Promise<number> {
+    const layoutReference = generationContext?.layoutReference
+    if (!layoutReference) return 0
 
-    const remainingGaps = this.gapManager.queryRemainingGaps()
-    let filledCount = 0
+    let insertedCount = 0
+    let currentItems = this.atomicCapabilities.getAllItems()
 
-    for (const gap of remainingGaps) {
+    for (const slot of layoutReference.slots) {
       if (this.isCancelled) break
-      if (!this.hasAdjacentProgramBeforeGap(gap)) continue
 
-      const result = tryBuildAdFillItems(gap, layoutReference, this.atomicCapabilities.getAllItems().length + 1)
-      if (!result.success || result.items.length === 0) continue
+      let slotChanged = true
+      while (!this.isCancelled && slotChanged) {
+        slotChanged = false
+        const opportunities = collectAdInsertionOpportunities(
+          { ...layoutReference, slots: [slot] },
+          currentItems,
+        )
 
-      const appendResult = await this.atomicCapabilities.appendItems(result.items, { skipValidation: true })
-      if (!appendResult.success) {
-        this.log('warn', 'execution', `空窗 ${gap.id} 广告补齐写入失败`, {
-          gapId: gap.id,
-          error: appendResult.error || 'Append failed',
-        })
-        continue
+        for (const opportunity of opportunities) {
+          const plan = buildAdInsertionPlan(
+            opportunity,
+            slot,
+            currentItems,
+            generationContext?.constraints.fixedItems ?? [],
+          )
+          if (!plan) {
+            this.log('info', 'execution', '版面 ' + slot.id + ' 的广告机会点已跳过', {
+              slotId: slot.id,
+              slotStartTime: slot.startTime,
+              slotEndTime: slot.endTime,
+              position: opportunity.position,
+              insertAt: opportunity.insertAt,
+              reason: 'slot_boundary_or_fixed_item_conflict',
+            })
+            continue
+          }
+
+          const replacedItems = applyAdInsertionPlan(plan, currentItems)
+          const replaceResult = await this.atomicCapabilities.replaceAllItems(replacedItems, { skipValidation: true })
+          if (!replaceResult.success) {
+            this.log('warn', 'execution', '版面 ' + slot.id + ' 广告插播写入失败', {
+              slotId: slot.id,
+              position: opportunity.position,
+              insertAt: opportunity.insertAt,
+              error: replaceResult.error || 'Replace failed',
+            })
+            continue
+          }
+
+          currentItems = this.atomicCapabilities.getAllItems()
+          insertedCount += 1
+          slotChanged = true
+          this.session!.execution.totalCommands += 1
+          this.session!.execution.successfulCommands += 1
+
+          this.log('info', 'execution', '版面 ' + slot.id + ' 已插入广告并顺延后续节目', {
+            slotId: slot.id,
+            slotStartTime: slot.startTime,
+            slotEndTime: slot.endTime,
+            position: opportunity.position,
+            insertAt: opportunity.insertAt,
+            durationSeconds: plan.durationSeconds,
+            shiftedItemCount: plan.shiftedItems.length,
+            insertedItems: [plan.adItem],
+            shiftedItems: plan.shiftedItems.map((item) => ({
+              itemId: item.id,
+              programName: item.programName,
+              startTime: item.startTime,
+              endTime: item.endTime,
+              duration: item.duration,
+              programType: item.programType,
+            })),
+          })
+
+          break
+        }
       }
-
-      const lastItem = result.items[result.items.length - 1]!
-      this.gapManager.onGapFilled(gap.id, lastItem)
-      this.session!.gaps.completed.push(gap.id)
-      this.session!.execution.totalCommands += result.items.length
-      this.session!.execution.successfulCommands += result.items.length
-      filledCount += 1
-
-      this.log('info', 'execution', `空窗 ${gap.id} 已按规则插入广告`, {
-        gapId: gap.id,
-        startTime: gap.startTime,
-        endTime: gap.endTime,
-        insertedItems: result.items.map((item) => ({
-          itemId: item.id,
-          programName: item.programName,
-          startTime: item.startTime,
-          endTime: item.endTime,
-          duration: item.duration,
-          programType: item.programType,
-        })),
-      })
-
-      result.items.forEach((item) => this.emit('gap-complete', { gap, item }))
     }
 
-    return filledCount
-  }
-
-  private hasAdjacentProgramBeforeGap(gap: GapInfo): boolean {
-    const items = this.atomicCapabilities.getAllItems()
-    return items.some((item) => item.endTime === gap.startTime && item.programType !== 'ad')
+    return insertedCount
   }
 
   private buildPlanningPrompt(gapCount: number): ChatMessage[] {
@@ -839,3 +880,7 @@ export function getOrchestrator(
 export function resetOrchestrator(): void {
   globalOrchestrator = null
 }
+
+
+
+

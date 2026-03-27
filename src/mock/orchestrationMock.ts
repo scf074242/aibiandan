@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   ColumnDefinition,
   FixedItem,
   LayoutReference,
@@ -10,7 +10,6 @@ import type {
 } from '@/types/orchestration'
 
 const baseDate = '2026-03-25'
-const yearCode = '26'
 
 const getCurrentShanghaiDate = () => {
   const formatter = new Intl.DateTimeFormat('en-US', {
@@ -27,7 +26,51 @@ const getCurrentShanghaiDate = () => {
 }
 
 const iso = (date: string, time: string) => `${date}T${time}+08:00`
-const pad = (value: number | string, size: number) => `${value}`.padStart(size, '0')
+
+const buildInternalAdBreaks = (duration: number, programType: string) => {
+  if (!['drama', 'movie'].includes(programType)) {
+    return undefined
+  }
+
+  let adCount = 0
+  if (duration >= 30 * 60 && duration < 60 * 60) {
+    adCount = 1
+  } else if (duration >= 60 * 60 && duration < 120 * 60) {
+    adCount = 2
+  } else if (duration >= 120 * 60) {
+    adCount = 3
+  }
+
+  if (adCount === 0) {
+    return undefined
+  }
+
+  const adDurationSeconds = 300
+  const totalAdDuration = adCount * adDurationSeconds
+  const totalContentDuration = duration - totalAdDuration
+  const contentSegmentCount = adCount + 1
+  const contentSegmentDuration = Math.floor(totalContentDuration / contentSegmentCount)
+  if (contentSegmentDuration <= 0) {
+    return undefined
+  }
+
+  const breaks: Array<{ offsetSeconds: number; durationSeconds: number }> = []
+  let scheduledOffset = contentSegmentDuration
+  for (let index = 0; index < adCount; index += 1) {
+    breaks.push({
+      offsetSeconds: scheduledOffset,
+      durationSeconds: adDurationSeconds,
+    })
+    scheduledOffset += adDurationSeconds + contentSegmentDuration
+  }
+
+  const lastBreak = breaks[breaks.length - 1]
+  const remainingDuration = lastBreak
+    ? duration - lastBreak.offsetSeconds - lastBreak.durationSeconds
+    : duration
+
+  return remainingDuration > 0 ? breaks : undefined
+}
 
 export const orchestrationDemoBaseDate = baseDate
 export const orchestrationDemoRuntimeDate = getCurrentShanghaiDate()
@@ -61,68 +104,68 @@ export const orchestrationDemoColumns: ColumnDefinition[] = [
   { columnId: '120', columnName: '东方看大剧', channelId: 'dragon', defaultProgramType: 'drama' },
   { columnId: '121', columnName: '品质东方微短剧', channelId: 'dragon', defaultProgramType: 'drama' },
   { columnId: '122', columnName: '今晚', channelId: 'dragon', defaultProgramType: 'commentary' },
-  { columnId: '109', columnName: '锚点', channelId: 'dragon', defaultProgramType: 'commentary' },
+  { columnId: '109', columnName: '锵点', channelId: 'dragon', defaultProgramType: 'commentary' },
   { columnId: '123', columnName: '两说', channelId: 'dragon', defaultProgramType: 'commentary' },
   { columnId: '124', columnName: '梦想剧场', channelId: 'dragon', defaultProgramType: 'drama' },
 ]
 
 export const orchestrationDemoProgramDefinitions: ProgramDefinition[] = [
-  { programId: 'P115001', programName: '东方快报', columnId: '115', channelId: 'dragon', programType: 'news' },
-  { programId: 'P101001', programName: '看东方', columnId: '101', channelId: 'dragon', programType: 'news_magazine' },
-  { programId: 'P107001', programName: '潮童天下', columnId: '107', channelId: 'dragon', programType: 'kids' },
-  { programId: 'P112001', programName: '纵有疾风起', columnId: '112', channelId: 'dragon', programType: 'drama', seriesGroup: '纵有疾风起' },
-  { programId: 'P112002', programName: '边关烽火情', columnId: '112', channelId: 'dragon', programType: 'drama', seriesGroup: '边关烽火情' },
-  { programId: 'P102001', programName: '午间30分', columnId: '102', channelId: 'dragon', programType: 'news' },
-  { programId: 'P104001', programName: 'ShanghaiEye', columnId: '104', channelId: 'dragon', programType: 'news_magazine' },
-  { programId: 'P105001', programName: '名医话养生', columnId: '105', channelId: 'dragon', programType: 'health' },
-  { programId: 'P113001', programName: '烟火人家', columnId: '113', channelId: 'dragon', programType: 'drama', seriesGroup: '烟火人家' },
-  { programId: 'P113002', programName: '城中之城', columnId: '113', channelId: 'dragon', programType: 'drama', seriesGroup: '城中之城' },
-  { programId: 'P106001', programName: '东方新娱乐', columnId: '106', channelId: 'dragon', programType: 'entertainment' },
-  { programId: 'P103001', programName: '东方新闻', columnId: '103', channelId: 'dragon', programType: 'news' },
-  { programId: 'P118001', programName: '新闻联播', columnId: '118', channelId: 'dragon', programType: 'news' },
-  { programId: 'P119001', programName: '玫瑰的故事', columnId: '119', channelId: 'dragon', programType: 'drama', seriesGroup: '玫瑰的故事' },
-  { programId: 'P120001', programName: '东方看大剧', columnId: '120', channelId: 'dragon', programType: 'drama' },
-  { programId: 'P121001', programName: '夜色正浓', columnId: '121', channelId: 'dragon', programType: 'drama', seriesGroup: '夜色正浓' },
-  { programId: 'P122001', programName: '今晚', columnId: '122', channelId: 'dragon', programType: 'commentary' },
-  { programId: 'P109001', programName: '锚点', columnId: '109', channelId: 'dragon', programType: 'commentary' },
-  { programId: 'P123001', programName: '两说', columnId: '123', channelId: 'dragon', programType: 'commentary' },
-  { programId: 'P124001', programName: '归路', columnId: '124', channelId: 'dragon', programType: 'drama', seriesGroup: '归路' },
+  { programId: 'P115001', programName: '东方快报', columnId: '115', programType: 'news' },
+  { programId: 'P101001', programName: '看东方', columnId: '101', programType: 'news_magazine' },
+  { programId: 'P107001', programName: '潮童天下', columnId: '107', programType: 'kids' },
+  { programId: 'P112001', programName: '纵有疾风起', columnId: '112', programType: 'drama' },
+  { programId: 'P112002', programName: '边关烽火情', columnId: '112', programType: 'drama' },
+  { programId: 'P102001', programName: '午间30分', columnId: '102', programType: 'news' },
+  { programId: 'P104001', programName: 'ShanghaiEye', columnId: '104', programType: 'news_magazine' },
+  { programId: 'P105001', programName: '名医话养生', columnId: '105', programType: 'health' },
+  { programId: 'P113001', programName: '烟火人家', columnId: '113', programType: 'drama' },
+  { programId: 'P113002', programName: '城中之城', columnId: '113', programType: 'drama' },
+  { programId: 'P106001', programName: '东方新娱乐', columnId: '106', programType: 'entertainment' },
+  { programId: 'P103001', programName: '东方新闻', columnId: '103', programType: 'news' },
+  { programId: 'P118001', programName: '新闻联播', columnId: '118', programType: 'news' },
+  { programId: 'P119001', programName: '玫瑰的故事', columnId: '119', programType: 'drama' },
+  { programId: 'P120001', programName: '东方看大剧', columnId: '120', programType: 'drama' },
+  { programId: 'P121001', programName: '夜色正浓', columnId: '121', programType: 'drama' },
+  { programId: 'P122001', programName: '今晚', columnId: '122', programType: 'commentary' },
+  { programId: 'P109001', programName: '锵点', columnId: '109', programType: 'commentary' },
+  { programId: 'P123001', programName: '两说', columnId: '123', programType: 'commentary' },
+  { programId: 'P124001', programName: '归路', columnId: '124', programType: 'drama' },
 ]
 
 export const orchestrationDemoProgramInstances: ProgramInstance[] = [
-  { instanceId: 'I115001-0001', programId: 'P115001', episodeName: '东方快报 06时整点', duration: 900, issueNo: '0001' },
-  { instanceId: 'I115001-0002', programId: 'P115001', episodeName: '东方快报 06时15分', duration: 900, issueNo: '0002' },
-  { instanceId: 'I115001-0003', programId: 'P115001', episodeName: '东方快报 06时30分', duration: 900, issueNo: '0003' },
-  { instanceId: 'I115001-0004', programId: 'P115001', episodeName: '东方快报 06时45分', duration: 900, issueNo: '0004' },
-  { instanceId: 'I101001-0001', programId: 'P101001', episodeName: '看东方 早高峰版', duration: 3600, issueNo: '0001' },
-  { instanceId: 'I101001-0002', programId: 'P101001', episodeName: '看东方 城市观察', duration: 2700, issueNo: '0002' },
-  { instanceId: 'I101001-0003', programId: 'P101001', episodeName: '看东方 民生第一线', duration: 2700, issueNo: '0003' },
-  { instanceId: 'I101001-0004', programId: 'P101001', episodeName: '看东方 特别策划：申城更新', duration: 1800, issueNo: '0004' },
-  { instanceId: 'I107001-0001', programId: 'P107001', episodeName: '潮童天下', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I112001-0001', programId: 'P112001', episodeName: '品质剧场：纵有疾风起 第1集', duration: 2700, issueNo: '0001' },
-  { instanceId: 'I112001-0002', programId: 'P112001', episodeName: '品质剧场：纵有疾风起 第2集', duration: 2700, issueNo: '0002' },
-  { instanceId: 'I112001-0003', programId: 'P112001', episodeName: '品质剧场：纵有疾风起 第3集', duration: 2700, issueNo: '0003' },
-  { instanceId: 'I112002-0001', programId: 'P112002', episodeName: '品质剧场：边关烽火情 第1集', duration: 2700, issueNo: '0001' },
-  { instanceId: 'I102001-0001', programId: 'P102001', episodeName: '午间30分', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I104001-0001', programId: 'P104001', episodeName: 'ShanghaiEye 午间国际快讯', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I104001-0002', programId: 'P104001', episodeName: 'ShanghaiEye 夜线观察', duration: 1800, issueNo: '0002' },
-  { instanceId: 'I105001-0001', programId: 'P105001', episodeName: '名医话养生·午后调养篇', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I105001-0002', programId: 'P105001', episodeName: '名医话养生·春季护肝篇', duration: 1800, issueNo: '0002' },
-  { instanceId: 'I105001-0003', programId: 'P105001', episodeName: '名医话养生·傍晚轻养篇', duration: 900, issueNo: '0003' },
-  { instanceId: 'I113001-0001', programId: 'P113001', episodeName: '经典剧场：烟火人家 第1集', duration: 2700, issueNo: '0001' },
-  { instanceId: 'I113001-0002', programId: 'P113001', episodeName: '经典剧场：烟火人家 第2集', duration: 2700, issueNo: '0002' },
-  { instanceId: 'I113002-0001', programId: 'P113002', episodeName: '经典剧场：城中之城 第1集', duration: 2700, issueNo: '0001' },
-  { instanceId: 'I106001-0001', programId: 'P106001', episodeName: '东方新娱乐·当日热搜', duration: 900, issueNo: '0001' },
-  { instanceId: 'I103001-0001', programId: 'P103001', episodeName: '东方新闻', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I118001-0001', programId: 'P118001', episodeName: '新闻联播', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I119001-0001', programId: 'P119001', episodeName: '东方剧场：玫瑰的故事 第1集', duration: 2700, issueNo: '0001' },
-  { instanceId: 'I119001-0002', programId: 'P119001', episodeName: '东方剧场：玫瑰的故事 第2集', duration: 2700, issueNo: '0002' },
-  { instanceId: 'I120001-0001', programId: 'P120001', episodeName: '东方看大剧', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I121001-0001', programId: 'P121001', episodeName: '品质东方微短剧：夜色正浓 上集', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I122001-0001', programId: 'P122001', episodeName: '今晚', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I109001-0001', programId: 'P109001', episodeName: '锚点·当日观察', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I123001-0001', programId: 'P123001', episodeName: '两说', duration: 1800, issueNo: '0001' },
-  { instanceId: 'I124001-0001', programId: 'P124001', episodeName: '梦想剧场：归路 第1集', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I115001-0001', programId: 'P115001', programCode: '002601150001', instanceName: '东方快报 06时整点', duration: 900, issueNo: '0001' },
+  { instanceId: 'I115001-0002', programId: 'P115001', programCode: '002601150002', instanceName: '东方快报 06时15分', duration: 900, issueNo: '0002' },
+  { instanceId: 'I115001-0003', programId: 'P115001', programCode: '002601150003', instanceName: '东方快报 06时30分', duration: 900, issueNo: '0003' },
+  { instanceId: 'I115001-0004', programId: 'P115001', programCode: '002601150004', instanceName: '东方快报 06时45分', duration: 900, issueNo: '0004' },
+  { instanceId: 'I101001-0001', programId: 'P101001', programCode: '002601010001', instanceName: '看东方 早高峰版', duration: 3600, issueNo: '0001' },
+  { instanceId: 'I101001-0002', programId: 'P101001', programCode: '002601010002', instanceName: '看东方 城市观察', duration: 2700, issueNo: '0002' },
+  { instanceId: 'I101001-0003', programId: 'P101001', programCode: '002601010003', instanceName: '看东方 民生第一线', duration: 2700, issueNo: '0003' },
+  { instanceId: 'I101001-0004', programId: 'P101001', programCode: '002601010004', instanceName: '看东方 特别策划：申城更新', duration: 1800, issueNo: '0004' },
+  { instanceId: 'I107001-0001', programId: 'P107001', programCode: '002601070001', instanceName: '潮童天下', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I112001-0001', programId: 'P112001', programCode: '002601120001', instanceName: '品质剧场：纵有疾风起 第1集', duration: 2700, adBreaks: buildInternalAdBreaks(2700, 'drama'), issueNo: '0001' },
+  { instanceId: 'I112001-0002', programId: 'P112001', programCode: '002601120002', instanceName: '品质剧场：纵有疾风起 第2集', duration: 2700, adBreaks: buildInternalAdBreaks(2700, 'drama'), issueNo: '0002' },
+  { instanceId: 'I112001-0003', programId: 'P112001', programCode: '002601120003', instanceName: '品质剧场：纵有疾风起 第3集', duration: 2700, adBreaks: buildInternalAdBreaks(2700, 'drama'), issueNo: '0003' },
+  { instanceId: 'I112002-0001', programId: 'P112002', programCode: '002601120004', instanceName: '品质剧场：边关烽火情 第1集', duration: 2700, adBreaks: buildInternalAdBreaks(2700, 'drama'), issueNo: '0001' },
+  { instanceId: 'I102001-0001', programId: 'P102001', programCode: '002601020001', instanceName: '午间30分', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I104001-0001', programId: 'P104001', programCode: '002601040001', instanceName: 'ShanghaiEye 午间国际快讯', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I104001-0002', programId: 'P104001', programCode: '002601040002', instanceName: 'ShanghaiEye 夜线观察', duration: 1800, issueNo: '0002' },
+  { instanceId: 'I105001-0001', programId: 'P105001', programCode: '002601050001', instanceName: '名医话养生·午后调养篇', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I105001-0002', programId: 'P105001', programCode: '002601050002', instanceName: '名医话养生·春季护肝篇', duration: 1800, issueNo: '0002' },
+  { instanceId: 'I105001-0003', programId: 'P105001', programCode: '002601050003', instanceName: '名医话养生·傍晚轻养篇', duration: 900, issueNo: '0003' },
+  { instanceId: 'I113001-0001', programId: 'P113001', programCode: '002601130001', instanceName: '经典剧场：烟火人家 第1集', duration: 2700, adBreaks: buildInternalAdBreaks(2700, 'drama'), issueNo: '0001' },
+  { instanceId: 'I113001-0002', programId: 'P113001', programCode: '002601130002', instanceName: '经典剧场：烟火人家 第2集', duration: 2700, adBreaks: buildInternalAdBreaks(2700, 'drama'), issueNo: '0002' },
+  { instanceId: 'I113002-0001', programId: 'P113002', programCode: '002601130003', instanceName: '经典剧场：城中之城 第1集', duration: 2700, adBreaks: buildInternalAdBreaks(2700, 'drama'), issueNo: '0001' },
+  { instanceId: 'I106001-0001', programId: 'P106001', programCode: '002601060001', instanceName: '东方新娱乐·当日热搜', duration: 900, issueNo: '0001' },
+  { instanceId: 'I103001-0001', programId: 'P103001', programCode: '002601030001', instanceName: '东方新闻', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I118001-0001', programId: 'P118001', programCode: '002601180001', instanceName: '新闻联播', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I119001-0001', programId: 'P119001', programCode: '002601190001', instanceName: '东方剧场：玫瑰的故事 第1集', duration: 2700, adBreaks: buildInternalAdBreaks(2700, 'drama'), issueNo: '0001' },
+  { instanceId: 'I119001-0002', programId: 'P119001', programCode: '002601190002', instanceName: '东方剧场：玫瑰的故事 第2集', duration: 2700, adBreaks: buildInternalAdBreaks(2700, 'drama'), issueNo: '0002' },
+  { instanceId: 'I120001-0001', programId: 'P120001', programCode: '002601200001', instanceName: '东方看大剧', duration: 1800, adBreaks: buildInternalAdBreaks(1800, 'drama'), issueNo: '0001' },
+  { instanceId: 'I121001-0001', programId: 'P121001', programCode: '002601210001', instanceName: '品质东方微短剧：夜色正浓 上集', duration: 1800, adBreaks: buildInternalAdBreaks(1800, 'drama'), issueNo: '0001' },
+  { instanceId: 'I122001-0001', programId: 'P122001', programCode: '002601220001', instanceName: '今晚', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I109001-0001', programId: 'P109001', programCode: '002601090001', instanceName: '锵点·当日观察', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I123001-0001', programId: 'P123001', programCode: '002601230001', instanceName: '两说', duration: 1800, issueNo: '0001' },
+  { instanceId: 'I124001-0001', programId: 'P124001', programCode: '002601240001', instanceName: '梦想剧场：归路 第1集', duration: 1800, adBreaks: buildInternalAdBreaks(1800, 'drama'), issueNo: '0001' },
 ]
 
 const layoutSeeds: Array<Omit<LayoutSlot, 'startTime' | 'endTime'> & { startClock: string; endClock: string }> = [
@@ -173,8 +216,6 @@ export const orchestrationDemoHistorySchedules: Record<string, ScheduleSummary[]
   demoDateAliases.map((date) => [`dragon_${date}`, baseHistorySchedules]),
 )
 
-const buildProgramCode = (programId: string, issueNo?: string) => `01${yearCode}${programId.slice(-3)}${pad(issueNo ?? '1', 4)}`
-
 const programDefinitionMap = new Map(orchestrationDemoProgramDefinitions.map((item) => [item.programId, item]))
 const columnMap = new Map(orchestrationDemoColumns.map((item) => [item.columnId, item]))
 
@@ -184,17 +225,22 @@ export const orchestrationDemoCandidates: ProgramCandidate[] = orchestrationDemo
     throw new Error(`Unknown programId: ${instance.programId}`)
   }
 
+  const column = columnMap.get(definition.columnId)
+  if (!column) {
+    throw new Error(`Unknown columnId: ${definition.columnId}`)
+  }
+
   return {
     id: instance.instanceId,
     programId: definition.programId,
-    programCode: buildProgramCode(definition.programId, instance.issueNo),
-    programName: instance.episodeName || definition.programName,
-    channelId: definition.channelId,
+    programCode: instance.programCode,
+    programName: instance.instanceName,
+    channelId: column.channelId,
     duration: instance.duration,
     programType: definition.programType,
     issueNo: instance.issueNo,
-    seriesGroup: definition.seriesGroup,
-    episodeName: instance.episodeName,
+    instanceName: instance.instanceName,
+    adBreaks: instance.adBreaks,
   }
 })
 
@@ -259,7 +305,18 @@ export function getOrchestrationDemoProgramDefinition(programId: string): Progra
 }
 
 export function getOrchestrationDemoProgramsByColumn(channelId: string, columnId: string): ProgramDefinition[] {
-  return orchestrationDemoProgramDefinitions.filter(
-    (item) => item.channelId === channelId && item.columnId === columnId,
+  const column = columnMap.get(columnId)
+  if (!column || column.channelId !== channelId) {
+    return []
+  }
+
+  return orchestrationDemoProgramDefinitions.filter((item) => item.columnId === columnId)
+}
+
+export function getOrchestrationDemoInstancesByColumn(channelId: string, columnId: string): ProgramInstance[] {
+  const allowedProgramIds = new Set(
+    getOrchestrationDemoProgramsByColumn(channelId, columnId).map((item) => item.programId),
   )
+
+  return orchestrationDemoProgramInstances.filter((item) => allowedProgramIds.has(item.programId))
 }

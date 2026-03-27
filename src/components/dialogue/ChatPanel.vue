@@ -450,6 +450,43 @@ const buildMicroEditCommand = async (
     }
   }
 
+  if (intent.type === 'delete') {
+    const params = await paramExtractor.extractDeleteParams(context)
+    if (!params) {
+      return {
+        command: null,
+        message: '已识别为删除节目，但还不能稳定提取目标时间。建议使用“删除12点的午间30”。',
+      }
+    }
+
+    const targetItem = findScheduleItemForDelete(props.currentSchedule, params.targetTime, params.programName)
+    if (!targetItem) {
+      return {
+        command: null,
+        message: `没有找到 ${params.targetTime} 附近可删除的节目，请确认时间点或节目名。`,
+      }
+    }
+
+    const command: OrchestrationCommand = {
+      action: 'delete',
+      reasoning: `删除 ${params.targetTime} 对应节目《${targetItem.programName || targetItem.programCode || targetItem.id}》。`,
+      data: {
+        itemId: targetItem.id,
+      },
+    }
+
+    return {
+      command,
+      message: `已定位到 ${params.targetTime} 对应节目《${targetItem.programName || targetItem.programCode || targetItem.id}》，准备删除。`,
+      explanation: `${classificationReasoning} ${intent.reasoning}`,
+      details: {
+        targetTime: params.targetTime,
+        programName: params.programName,
+        matchedItem: targetItem,
+      },
+    }
+  }
+
   if (intent.type === 'move') {
     const params = await paramExtractor.extractMoveParams(context)
     if (!params) {
@@ -576,6 +613,32 @@ const findScheduleItemForMove = (
   if (sameHour) return sameHour
 
   return null
+}
+
+const findScheduleItemForDelete = (
+  items: SchedulePreviewItem[],
+  targetTime: string,
+  programName?: string,
+): SchedulePreviewItem | null => {
+  const byTime = findScheduleItemForMove(items, targetTime)
+  if (!programName) {
+    return byTime
+  }
+
+  const normalizedProgramName = programName.replace(/\s+/g, '').toLowerCase()
+  const matchedByName = items.find((item) => {
+    const itemName = (item.programName || item.programCode || '').replace(/\s+/g, '').toLowerCase()
+    const sameTime = normalizeClockText(item.startTime) === targetTime
+      || (() => {
+        const targetSeconds = timeToSeconds(targetTime)
+        const start = timeToSeconds(normalizeClockText(item.startTime))
+        const end = timeToSeconds(normalizeClockText(item.endTime))
+        return start <= targetSeconds && targetSeconds < end
+      })()
+    return sameTime && itemName.includes(normalizedProgramName)
+  })
+
+  return matchedByName || null
 }
 
 const normalizeClockText = (timeText: string): string => {

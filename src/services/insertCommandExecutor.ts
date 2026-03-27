@@ -1,6 +1,7 @@
-import type { InsertCommand, ScheduleItemSnapshot, ValidationReport } from '@/types/orchestration'
+﻿import type { InsertCommand, MaterializeInput, ValidationReport } from '@/types/orchestration'
 import { getAtomicCapabilities } from './atomicCapabilities'
 import { getCandidateService } from './candidateService'
+import { getMaterializer } from './materializer'
 import { getScheduleValidationService } from './scheduleValidationService'
 
 export interface InsertExecutionResult {
@@ -29,8 +30,9 @@ export class InsertCommandExecutor {
     }
 
     const atomicCapabilities = getAtomicCapabilities()
+    const materializer = getMaterializer()
     const startTime = this.normalizeDateTime(scheduleDate, insertTime)
-    const endTime = this.calculateEndTime(startTime, candidate.duration)
+    const endTime = materializer.calculateEndTime(startTime, candidate.duration)
 
     if (!atomicCapabilities.isTimeRangeAvailable(startTime, endTime)) {
       return {
@@ -39,18 +41,50 @@ export class InsertCommandExecutor {
       }
     }
 
-    const newItem: ScheduleItemSnapshot = {
-      id: `insert_${candidate.id}_${Date.now()}`,
-      programCode: candidate.programCode,
-      programName: candidate.programName,
-      startTime,
-      endTime,
-      duration: candidate.duration,
-      programType: candidate.programType,
-      sequence: atomicCapabilities.getAllItems().length + 1,
+    const materializeInput: MaterializeInput = {
+      gap: {
+        id: `insert_gap_${Date.now()}`,
+        startTime,
+        endTime,
+        duration: candidate.duration,
+        constraints: {},
+        metadata: {
+          source: 'manual',
+          priority: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      },
+      selectedCandidate: candidate,
+      channelContext: {
+        channelId,
+        channelName: channelId,
+        date: scheduleDate,
+        timeZone: 'Asia/Shanghai',
+        broadcastRules: {
+          defaultStartTime: '06:00:00',
+          defaultEndTime: '26:00:00',
+          minProgramDuration: 60,
+          maxProgramDuration: 7200,
+          allowedTransitions: {},
+        },
+      },
     }
 
-    const result = await atomicCapabilities.appendItems([newItem])
+    const materializeResult = materializer.materialize(materializeInput, {
+      forceStartTime: startTime,
+      forceEndTime: endTime,
+      customSequence: atomicCapabilities.getAllItems().length + 1,
+    })
+
+    if (!materializeResult.success || !materializeResult.items?.length || !materializeResult.item) {
+      return {
+        success: false,
+        message: `物化失败: ${materializeResult.error}`,
+      }
+    }
+
+    const result = await atomicCapabilities.appendItems(materializeResult.items)
     if (!result.success) {
       return {
         success: false,
@@ -91,8 +125,9 @@ export class InsertCommandExecutor {
       }
     }
 
+    const materializer = getMaterializer()
     const startTime = this.normalizeDateTime(scheduleDate, insertTime)
-    const endTime = this.calculateEndTime(startTime, candidate.duration)
+    const endTime = materializer.calculateEndTime(startTime, candidate.duration)
     const canExecute = getAtomicCapabilities().isTimeRangeAvailable(startTime, endTime)
 
     return {
@@ -108,22 +143,6 @@ export class InsertCommandExecutor {
     }
     const normalizedTime = timeText.length === 5 ? `${timeText}:00` : timeText
     return `${scheduleDate}T${normalizedTime}+08:00`
-  }
-
-  private calculateEndTime(startTime: string, durationSeconds: number): string {
-    const start = new Date(startTime).getTime()
-    return this.formatLocalDateTime(start + durationSeconds * 1000)
-  }
-
-  private formatLocalDateTime(timestampMs: number): string {
-    const date = new Date(timestampMs)
-    const year = date.getFullYear()
-    const month = `${date.getMonth() + 1}`.padStart(2, '0')
-    const day = `${date.getDate()}`.padStart(2, '0')
-    const hours = `${date.getHours()}`.padStart(2, '0')
-    const minutes = `${date.getMinutes()}`.padStart(2, '0')
-    const seconds = `${date.getSeconds()}`.padStart(2, '0')
-    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
   }
 }
 

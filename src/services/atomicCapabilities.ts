@@ -534,6 +534,41 @@ export class AtomicCapabilities {
     }
   }
 
+  async replaceAllItems(
+    items: ScheduleItemSnapshot[],
+    options?: { skipValidation?: boolean },
+  ): Promise<AtomicOperationResult<{ items: ScheduleItemSnapshot[] }>> {
+    try {
+      if (this.config.enableSnapshot) {
+        for (const [itemId] of this.items) {
+          this.createSnapshot(itemId, 'replace_all')
+        }
+      }
+
+      this.items.clear()
+      for (const item of items) {
+        this.items.set(item.id, { ...item })
+      }
+      this.normalizeSequences()
+
+      if (this.config.enableAutoValidation && !options?.skipValidation) {
+        await this.triggerValidation('full')
+      }
+
+      return {
+        success: true,
+        data: { items: this.getAllItems() },
+        affectedItems: items.map((item) => item.id),
+        affectedTimeRanges: items.map((item) => ({ start: item.startTime, end: item.endTime })),
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: `整体替换失败: ${(error as Error).message}`,
+      }
+    }
+  }
+
   // ==================== 辅助方法 ====================
 
   /**

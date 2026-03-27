@@ -322,16 +322,21 @@ export interface ProgramDefinition {
   programId: string
   programName: string
   columnId: string
-  channelId: string
   programType: string
-  seriesGroup?: string
+}
+
+export interface ProgramAdBreak {
+  offsetSeconds: number
+  durationSeconds: number
 }
 
 export interface ProgramInstance {
   instanceId: string
   programId: string
-  episodeName?: string
+  programCode: string
+  instanceName: string
   duration: number
+  adBreaks?: ProgramAdBreak[]
   issueNo?: string
 }
 
@@ -344,8 +349,8 @@ export interface ProgramCandidate {
   duration: number
   programType: string
   issueNo?: string
-  seriesGroup?: string
-  episodeName?: string
+  instanceName: string
+  adBreaks?: ProgramAdBreak[]
 }
 
 /** 候选检索结果 */
@@ -456,14 +461,38 @@ export interface ScheduleItemSnapshot {
   duration: number
   programType: string
   sequence: number
+  relativeStartSeconds?: number
 }
 
 /** 物化结果 */
 export interface MaterializeResult {
   success: boolean
   item?: ScheduleItemSnapshot
+  items?: ScheduleItemSnapshot[]
   error?: string
   warnings?: string[]
+}
+
+export type AdOpportunityPosition = 'before_first' | 'between_items' | 'after_last'
+
+export interface AdInsertionOpportunity {
+  slotId: string
+  slotStartTime: string
+  slotEndTime: string
+  insertAt: string
+  availableSeconds: number
+  position: AdOpportunityPosition
+  previousItemId?: string
+  nextItemId?: string
+}
+
+export interface AdInsertionPlan {
+  slotId: string
+  opportunity: AdInsertionOpportunity
+  adItem: ScheduleItemSnapshot
+  shiftedItems: ScheduleItemSnapshot[]
+  affectedItemIds: string[]
+  durationSeconds: number
 }
 
 // ==================== 回退相关 ====================

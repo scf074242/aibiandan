@@ -6,15 +6,13 @@
         空窗时间轴
       </h3>
       <div class="visualizer-stats">
-        <el-tag size="small" type="info">总空窗: {{ gaps.length }}</el-tag>
-        <el-tag size="small" type="warning">待处理: {{ pendingCount }}</el-tag>
-        <el-tag size="small" type="success">已完成: {{ completedCount }}</el-tag>
+        <el-tag size="small" type="info">总空窗 {{ gaps.length }}</el-tag>
+        <el-tag size="small" type="warning">待处理 {{ pendingCount }}</el-tag>
+        <el-tag size="small" type="success">已完成 {{ completedCount }}</el-tag>
       </div>
     </div>
 
-    <!-- 时间轴主体 -->
     <div class="timeline-container">
-      <!-- 时间刻度 -->
       <div class="timeline-scale">
         <div
           v-for="hour in timeScaleHours"
@@ -27,9 +25,7 @@
         </div>
       </div>
 
-      <!-- 时间轴轨道 -->
       <div class="timeline-track">
-        <!-- 已编排节目块 -->
         <div
           v-for="item in scheduleItems"
           :key="item.id"
@@ -39,12 +35,11 @@
           @click="$emit('item-click', item)"
         >
           <div class="item-content">
-            <span class="item-name">{{ item.programName || item.episodeName || '未命名' }}</span>
+            <span class="item-name">{{ item.programName || item.instanceName || '未命名' }}</span>
             <span class="item-time">{{ formatTimeRange(item.startTime, item.endTime) }}</span>
           </div>
         </div>
 
-        <!-- 空窗块 -->
         <div
           v-for="gap in displayGaps"
           :key="gap.id"
@@ -68,7 +63,6 @@
       </div>
     </div>
 
-    <!-- 图例 -->
     <div class="timeline-legend">
       <div class="legend-item">
         <div class="legend-color is-program"></div>
@@ -96,7 +90,6 @@
       </div>
     </div>
 
-    <!-- 空窗列表详情 -->
     <div class="gap-list-section">
       <div class="section-title">空窗列表</div>
       <div class="gap-list">
@@ -144,13 +137,7 @@
 import { computed } from 'vue'
 import type { GapInfo } from '@/types/orchestration'
 import type { ScheduleItem } from '@/views/broadcast-plan/scheduleData'
-import {
-  Timer,
-  Loading,
-  CircleCheck,
-  CircleClose,
-  Plus
-} from '@element-plus/icons-vue'
+import { Timer, Loading, CircleCheck, CircleClose, Plus } from '@element-plus/icons-vue'
 
 interface DisplayGap extends GapInfo {
   status?: 'pending' | 'processing' | 'completed' | 'failed'
@@ -170,16 +157,15 @@ const props = withDefaults(defineProps<Props>(), {
   scheduleItems: () => [],
   startHour: 6,
   endHour: 24,
-  currentDate: () => '2026-03-25'
+  currentDate: () => '2026-03-25',
 })
 
-const emit = defineEmits<{
+defineEmits<{
   'gap-click': [gap: DisplayGap]
   'gap-fill': [gap: DisplayGap]
   'item-click': [item: ScheduleItem]
 }>()
 
-// 计算属性
 const timeScaleHours = computed(() => {
   const hours: number[] = []
   for (let h = props.startHour; h <= props.endHour; h++) {
@@ -188,21 +174,17 @@ const timeScaleHours = computed(() => {
   return hours
 })
 
-const totalDuration = computed(() => {
-  return (props.endHour - props.startHour) * 3600 // 秒
-})
+const totalDuration = computed(() => (props.endHour - props.startHour) * 3600)
+const pendingCount = computed(() => props.gaps.filter((g) => g.status === 'pending' || !g.status).length)
+const completedCount = computed(() => props.gaps.filter((g) => g.status === 'completed').length)
 
-const pendingCount = computed(() => props.gaps.filter(g => g.status === 'pending' || !g.status).length)
-const completedCount = computed(() => props.gaps.filter(g => g.status === 'completed').length)
-
-const displayGaps = computed(() => {
-  return props.gaps.map(gap => ({
+const displayGaps = computed(() =>
+  props.gaps.map((gap) => ({
     ...gap,
-    status: gap.status || 'pending'
-  }))
-})
+    status: gap.status || 'pending',
+  })),
+)
 
-// 方法
 const getHourPosition = (hour: number) => {
   const offset = (hour - props.startHour) * 3600
   return (offset / totalDuration.value) * 100
@@ -219,14 +201,14 @@ const getItemStyle = (item: ScheduleItem) => {
 
   return {
     left: `${Math.max(0, left)}%`,
-    width: `${Math.max(0.5, width)}%`
+    width: `${Math.max(0.5, width)}%`,
   }
 }
 
 const getGapStyle = (gap: DisplayGap) => {
-  const startSeconds = new Date(gap.startTime).getTime() / 1000 - new Date(props.currentDate + 'T00:00:00').getTime() / 1000
-  const endSeconds = new Date(gap.endTime).getTime() / 1000 - new Date(props.currentDate + 'T00:00:00').getTime() / 1000
-
+  const dayStart = new Date(`${props.currentDate}T00:00:00`).getTime() / 1000
+  const startSeconds = new Date(gap.startTime).getTime() / 1000 - dayStart
+  const endSeconds = new Date(gap.endTime).getTime() / 1000 - dayStart
   const startOffset = startSeconds - props.startHour * 3600
   const duration = endSeconds - startSeconds
 
@@ -235,37 +217,31 @@ const getGapStyle = (gap: DisplayGap) => {
 
   return {
     left: `${Math.max(0, left)}%`,
-    width: `${Math.max(2, width)}%`
+    width: `${Math.max(2, width)}%`,
   }
 }
 
-const getItemClass = (item: ScheduleItem) => {
-  return {
-    'is-program': item.businessType === 'program',
-    'is-ad': item.businessType === 'ad',
-    'is-live': item.sourceType === 'live',
-    'is-reference': item.isReference
-  }
-}
+const getItemClass = (item: ScheduleItem) => ({
+  'is-program': item.businessType === 'program',
+  'is-ad': item.businessType === 'ad',
+  'is-live': item.sourceType === 'live',
+  'is-reference': item.isReference,
+})
 
-const getGapClass = (gap: DisplayGap) => {
-  return {
-    'is-pending': gap.status === 'pending',
-    'is-processing': gap.status === 'processing',
-    'is-completed': gap.status === 'completed',
-    'is-failed': gap.status === 'failed',
-    'is-disabled': gap.disabled
-  }
-}
+const getGapClass = (gap: DisplayGap) => ({
+  'is-pending': gap.status === 'pending',
+  'is-processing': gap.status === 'processing',
+  'is-completed': gap.status === 'completed',
+  'is-failed': gap.status === 'failed',
+  'is-disabled': gap.disabled,
+})
 
-const getGapListItemClass = (gap: DisplayGap) => {
-  return {
-    'is-pending': gap.status === 'pending' || !gap.status,
-    'is-processing': gap.status === 'processing',
-    'is-completed': gap.status === 'completed',
-    'is-failed': gap.status === 'failed'
-  }
-}
+const getGapListItemClass = (gap: DisplayGap) => ({
+  'is-pending': gap.status === 'pending' || !gap.status,
+  'is-processing': gap.status === 'processing',
+  'is-completed': gap.status === 'completed',
+  'is-failed': gap.status === 'failed',
+})
 
 const getGapLabel = (gap: DisplayGap) => {
   switch (gap.status) {
@@ -280,9 +256,7 @@ const getGapLabel = (gap: DisplayGap) => {
   }
 }
 
-const formatHour = (hour: number) => {
-  return `${String(hour).padStart(2, '0')}:00`
-}
+const formatHour = (hour: number) => `${String(hour).padStart(2, '0')}:00`
 
 const formatTime = (time: string) => {
   if (!time) return '--:--'
@@ -290,9 +264,7 @@ const formatTime = (time: string) => {
   return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
-const formatTimeRange = (start: string, end: string) => {
-  return `${formatTime(start)}-${formatTime(end)}`
-}
+const formatTimeRange = (start: string, end: string) => `${formatTime(start)}-${formatTime(end)}`
 
 const formatDuration = (seconds: number) => {
   if (!seconds || seconds <= 0) return '0分钟'
@@ -341,14 +313,12 @@ const timeToSeconds = (time: string) => {
   gap: 8px;
 }
 
-// 时间轴容器
 .timeline-container {
   position: relative;
   padding: 40px 0 20px;
   margin-bottom: 16px;
 }
 
-// 时间刻度
 .timeline-scale {
   position: absolute;
   top: 0;
@@ -378,7 +348,6 @@ const timeToSeconds = (time: string) => {
   background: var(--el-border-color);
 }
 
-// 时间轴轨道
 .timeline-track {
   position: relative;
   height: 80px;
@@ -387,7 +356,6 @@ const timeToSeconds = (time: string) => {
   overflow: hidden;
 }
 
-// 节目块
 .timeline-item {
   position: absolute;
   top: 8px;
@@ -446,7 +414,6 @@ const timeToSeconds = (time: string) => {
   }
 }
 
-// 空窗块
 .timeline-gap {
   position: absolute;
   top: 8px;
@@ -539,7 +506,6 @@ const timeToSeconds = (time: string) => {
   }
 }
 
-// 图例
 .timeline-legend {
   display: flex;
   flex-wrap: wrap;
@@ -591,7 +557,6 @@ const timeToSeconds = (time: string) => {
   }
 }
 
-// 空窗列表
 .gap-list-section {
   border-top: 1px solid var(--el-border-color-lighter);
   padding-top: 16px;
@@ -683,6 +648,7 @@ const timeToSeconds = (time: string) => {
   from {
     transform: rotate(0deg);
   }
+
   to {
     transform: rotate(360deg);
   }

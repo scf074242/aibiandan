@@ -51,7 +51,7 @@ export function buildGapCandidateSelectionPrompt(
   const candidateList = input.candidates
     .map(
       (candidate, index) =>
-        `${index + 1}. id=${candidate.id}; name=${candidate.programName}; code=${candidate.programCode}; type=${candidate.programType}; duration=${candidate.duration}; group=${candidate.seriesGroup ?? '-'}`,
+        `${index + 1}. id=${candidate.id}; name=${candidate.programName}; code=${candidate.programCode}; type=${candidate.programType}; duration=${candidate.duration}; instance=${candidate.instanceName}`,
     )
     .join('\n')
 
@@ -82,7 +82,7 @@ export function buildInsertCandidateSelectionPrompt(
   const candidateList = candidates
     .map(
       (candidate, index) =>
-        `${index + 1}. id=${candidate.id}; name=${candidate.programName}; code=${candidate.programCode}; type=${candidate.programType}; duration=${candidate.duration}; group=${candidate.seriesGroup ?? '-'}`,
+        `${index + 1}. id=${candidate.id}; name=${candidate.programName}; code=${candidate.programCode}; type=${candidate.programType}; duration=${candidate.duration}; instance=${candidate.instanceName}`,
     )
     .join('\n')
 
