@@ -1,8 +1,8 @@
 import {
-  getOrchestrationDemoColumn,
-  getOrchestrationDemoInstancesByColumn,
-  getOrchestrationDemoProgramsByColumn,
-} from '@/mock/orchestrationMock'
+  getEffectiveColumnDefinition,
+  getEffectiveInstancesByColumn,
+  getEffectiveProgramsByColumn,
+} from './orchestration/runtimeLayoutRegistry'
 import type {
   CandidateQueryCriteria,
   GapInfo,
@@ -27,10 +27,10 @@ export class QueryIntentService {
     const layoutMatch = this.findLayoutMatch(gap, context)
     const columnId = layoutMatch?.columnId
     const columnInstances = columnId
-      ? getOrchestrationDemoInstancesByColumn(context.channel.channelId, columnId)
+      ? getEffectiveInstancesByColumn(context.channel.channelId, columnId)
       : []
     const columnPrograms = columnId
-      ? getOrchestrationDemoProgramsByColumn(context.channel.channelId, columnId)
+      ? getEffectiveProgramsByColumn(context.channel.channelId, columnId)
       : []
 
     return {
@@ -56,7 +56,7 @@ export class QueryIntentService {
   ): CandidateQueryCriteria['expectedDuration'] {
     const columnInstances =
       columnId && channelId
-        ? getOrchestrationDemoInstancesByColumn(channelId, columnId)
+        ? getEffectiveInstancesByColumn(channelId, columnId)
         : []
 
     if (columnInstances.length > 0) {

@@ -40,6 +40,10 @@
           />
         </el-form-item>
       </el-form>
+      <div class="broadcast-window-chip">
+        <span class="broadcast-window-label">播出时段</span>
+        <span class="broadcast-window-value">{{ currentBroadcastWindowText }}</span>
+      </div>
     </div>
 
     <!-- 主内容区：左侧表格 + 右侧 AI 侧边栏 -->
@@ -63,21 +67,6 @@
                   @click="handleAddItem"
                 >
                   添加节目
-                </el-button>
-                <el-button
-                  v-if="!isViewMode && !scheduleForm.isLocked"
-                  :icon="CopyDocument"
-                  @click="handleImportFromPlan"
-                >
-                  从播出计划导入
-                </el-button>
-                <el-button
-                  type="success"
-                  :icon="MagicStick"
-                  @click="toggleAISidebar"
-                  class="ai-orchestration-btn"
-                >
-                  {{ aiSidebarVisible ? '隐藏 AI' : 'AI 助手' }}
                 </el-button>
                 <el-button
                   v-if="orchestratorRuntime.canCancel.value"
@@ -391,13 +380,6 @@
             </h3>
             <p class="ai-sidebar-subtitle">围绕当前频道、日期和时间空窗，直接补齐、调整或校验编单。</p>
           </div>
-          <div class="ai-sidebar-status">
-            <span class="ai-sidebar-pill">{{ currentChannelName }}</span>
-            <span class="ai-sidebar-pill">{{ displayGapCount }} 个空窗</span>
-            <span class="ai-sidebar-pill" :class="{ 'is-live': orchestratorRuntime.isRunning.value }">
-              {{ orchestratorRuntime.isRunning.value ? '编排进行中' : '待命中' }}
-            </span>
-          </div>
           <el-button link @click="aiSidebarVisible = false">
             <el-icon><Close /></el-icon>
           </el-button>
@@ -409,7 +391,8 @@
             :channel-name="currentChannelName"
             :date="scheduleDate"
             :gap-count="displayGapCount"
-            :orchestration-logs="orchestratorRuntime.recentLogs.value"
+            :orchestration-logs="orchestratorRuntime.logs.value"
+            :orchestration-session="orchestratorRuntime.session.value"
             :is-orchestrating="orchestratorRuntime.isRunning.value"
             :can-interrupt="orchestratorRuntime.canCancel.value"
             @command-executed="handleChatCommandExecuted"
@@ -454,11 +437,9 @@ import {
   Unlock,
   VideoCamera,
   VideoPlay,
-  CopyDocument,
   View,
   Document,
   WarningFilled,
-  MagicStick,
   ChatDotRound,
   Close
 } from '@element-plus/icons-vue'
@@ -487,6 +468,7 @@ import { getAtomicCapabilities } from '@/services/atomicCapabilities'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
 import { getManualCommandAdapter } from '@/services/manualCommandAdapter'
 import { getCandidateService } from '@/services/candidateService'
+import { getDataService } from '@/services/orchestration/dataService'
 import type { GapProcessingStatus } from '@/types/orchestration'
 import ChatPanel from '@/components/dialogue/ChatPanel.vue'
 
@@ -669,6 +651,17 @@ const handleResize = () => {
   })
 }
 
+const syncCurrentBroadcastWindow = async () => {
+  const channelId = currentChannelId.value
+  if (!channelId) return
+  const channelInfo = await dataService.getChannelInfo(channelId)
+  if (!channelInfo) return
+  currentBroadcastWindow.value = {
+    startTime: channelInfo.broadcastRules.defaultStartTime,
+    endTime: channelInfo.broadcastRules.defaultEndTime,
+  }
+}
+
 // 版面参考显示状态
 const showLayoutReference = ref(false)
 
@@ -687,26 +680,80 @@ const atomicCapabilities = getAtomicCapabilities()
 const scheduleCommandBus = getScheduleCommandBus()
 const manualCommandAdapter = getManualCommandAdapter()
 const candidateService = getCandidateService()
+const dataService = getDataService()
 let syncAtomicItemsRaf = 0
+
+const currentBroadcastWindow = ref({
+  startTime: '06:00:00',
+  endTime: '23:59:59',
+})
+
+const currentBroadcastWindowText = computed(
+  () => `${formatTime4(currentBroadcastWindow.value.startTime)} - ${formatTime4(currentBroadcastWindow.value.endTime)}`,
+)
+
+const formatAtomicDateTime = (value: Date) => {
+  const year = value.getFullYear()
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  const hours = String(value.getHours()).padStart(2, '0')
+  const minutes = String(value.getMinutes()).padStart(2, '0')
+  const seconds = String(value.getSeconds()).padStart(2, '0')
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
+}
+
+const normalizeAtomicDateTime = (value: string, fallbackDate: string, dayOffset = 0) => {
+  if (value.includes('T')) {
+    return /([zZ]|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}+08:00`
+  }
+
+  const normalizedClock = value.length === 5 ? `${value}:00` : value
+  const baseDate = new Date(`${fallbackDate}T00:00:00+08:00`)
+  baseDate.setDate(baseDate.getDate() + dayOffset)
+  const [hours = 0, minutes = 0, seconds = 0] = normalizedClock
+    .split(':')
+    .map((part) => parseInt(part || '0', 10) || 0)
+  baseDate.setHours(hours, minutes, seconds, 0)
+  return formatAtomicDateTime(baseDate)
+}
+
+const buildAtomicTimeRange = (date: string, startTime: string, endTime: string) => {
+  const startClock = normalizeClockText(startTime)
+  const endClock = normalizeClockText(endTime)
+  const startSeconds = timeToSeconds(startClock)
+  const endSeconds = timeToSeconds(endClock)
+  const endDayOffset = endSeconds <= startSeconds ? 1 : 0
+  const normalizedStartTime = normalizeAtomicDateTime(startTime, date)
+  const normalizedEndTime = normalizeAtomicDateTime(endTime, date, endDayOffset)
+  const duration = Math.max(
+    60,
+    Math.floor((new Date(normalizedEndTime).getTime() - new Date(normalizedStartTime).getTime()) / 1000),
+  )
+
+  return {
+    normalizedStartTime,
+    normalizedEndTime,
+    duration,
+  }
+}
 
 const syncPageItemsToAtomic = () => {
   const date = scheduleForm.value.date || demoBaseDate
   atomicCapabilities.loadItems(
-    scheduleItems.value.map((item, index) => ({
-      id: item.id,
-      programCode: item.programCode || item.code18 || item.id,
-      programName: item.programName || item.instanceName || '未命名节目',
-      startTime: item.startTime.includes('T')
-        ? item.startTime
-        : `${date}T${item.startTime.length === 5 ? `${item.startTime}:00` : item.startTime}`,
-      endTime: item.endTime.includes('T')
-        ? item.endTime
-        : `${date}T${item.endTime.length === 5 ? `${item.endTime}:00` : item.endTime}`,
-      duration: Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime)),
-      programType: resolveScheduleItemProgramType(item),
-      sequence: index + 1,
-      relativeStartSeconds: timeToSeconds(item.relativeStart || '00:00:00'),
-    })),
+    scheduleItems.value.map((item, index) => {
+      const timeRange = buildAtomicTimeRange(date, item.startTime, item.endTime)
+      return {
+        id: item.id,
+        programCode: item.programCode || item.code18 || item.id,
+        programName: item.programName || item.instanceName || '未命名节目',
+        startTime: timeRange.normalizedStartTime,
+        endTime: timeRange.normalizedEndTime,
+        duration: timeRange.duration,
+        programType: resolveScheduleItemProgramType(item),
+        sequence: index + 1,
+        relativeStartSeconds: timeToSeconds(item.relativeStart || '00:00:00'),
+      }
+    }),
   )
 }
 
@@ -736,7 +783,7 @@ const syncAtomicItemsToPage = () => {
 
 const syncAtomicItemsToPageDeferred = () => {
   if (syncAtomicItemsRaf) {
-    cancelAnimationFrame(syncAtomicItemsRaf)
+    return
   }
   syncAtomicItemsRaf = requestAnimationFrame(() => {
     syncAtomicItemsRaf = 0
@@ -772,8 +819,12 @@ const handleChatOrchestrateRequested = async (payload: { userInput: string }) =>
 }
 
 const orchestratorRuntime = useOrchestrator({
-  onComplete: () => {
+  onComplete: (session) => {
     syncAtomicItemsToPage()
+    if (session.status === 'manual_review') {
+      ElMessage.warning('自动编排阶段已结束，仍有空窗待人工确认')
+      return
+    }
     ElMessage.success('AI 编排完成')
   },
   onError: (error: Error) => {
@@ -840,11 +891,6 @@ const handleAICommand = async () => {
   }
 
   await startOrchestrationRuntime()
-}
-
-// 显示/隐藏 AI 侧边栏
-const toggleAISidebar = () => {
-  aiSidebarVisible.value = !aiSidebarVisible.value
 }
 
 const handleCancelOrchestration = async () => {
@@ -1110,6 +1156,7 @@ const handleChannelChange = (channelId: string) => {
     scheduleForm.value.channelName = channel.name
   }
   fillLiveStudios()
+  void syncCurrentBroadcastWindow()
 }
 
 /**
@@ -1389,13 +1436,6 @@ const handleSaveItem = async (item: Partial<ScheduleItem>) => {
 }
 
 /**
- * 处理从播出计划导入
- */
-const handleImportFromPlan = () => {
-  ElMessage.info('导入功能开发中')
-}
-
-/**
  * 处理查看素材
  * @param item - 编单项
  */
@@ -1622,6 +1662,7 @@ onMounted(async () => {
 
   window.addEventListener('resize', handleResize, { passive: true })
   syncPageItemsToAtomic()
+  await syncCurrentBroadcastWindow()
   updateScrollMetrics()
 })
 
@@ -2482,6 +2523,31 @@ onBeforeUnmount(() => {
   color: #9ca3af;
 }
 
+.broadcast-window-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+  white-space: nowrap;
+}
+
+.broadcast-window-label {
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.broadcast-window-value {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
 .content-wrapper {
   gap: 16px;
   padding: 0 16px 16px;
@@ -2769,33 +2835,6 @@ onBeforeUnmount(() => {
   line-height: 1.6;
 }
 
-.ai-sidebar-status {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.ai-sidebar-pill {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid rgba(251, 146, 60, 0.14);
-  color: #57534e;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.ai-sidebar-pill.is-live {
-  background: rgba(220, 252, 231, 0.96);
-  border-color: rgba(34, 197, 94, 0.16);
-  color: #166534;
-}
-
 .ai-sidebar .ai-sidebar-header {
   background: rgba(255, 250, 245, 0.86);
 }
@@ -2821,6 +2860,11 @@ onBeforeUnmount(() => {
     flex-wrap: wrap;
   }
 
+  .broadcast-window-chip {
+    width: 100%;
+    justify-content: space-between;
+  }
+
   .content-wrapper {
     padding: 0 12px 12px;
   }
@@ -2836,12 +2880,9 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 768px) {
-  .page-header .page-title {
-    font-size: 28px;
-  }
-
   .schedule-info-form {
-    padding: 8px 8px 0;
+    width: 100%;
+    flex-wrap: wrap;
   }
 
   .timeline-header,
@@ -2857,11 +2898,6 @@ onBeforeUnmount(() => {
 
   .ai-sidebar-header {
     grid-template-columns: 1fr auto;
-  }
-
-  .ai-sidebar-status {
-    grid-column: 1 / -1;
-    justify-content: flex-start;
   }
 
   .timeline-body {

@@ -27,7 +27,9 @@ export class ParamExtractor {
 
   async extractInsertParams(context: DialogueContext): Promise<InsertParams | null> {
     const ruleBased = this.ruleBasedExtractInsert(context.userInput)
-    if (ruleBased) return ruleBased
+    if (ruleBased && !this.shouldRefineWithContext(context, 'insert', ruleBased.programName)) {
+      return ruleBased
+    }
 
     try {
       const response = await this.llmClient.chat(
@@ -35,12 +37,13 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请从用户输入中提取 targetTime 和 programName，并且只返回 JSON。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和 programName，并且只返回 JSON。',
           },
           {
             role: 'user',
             content:
               `用户指令: ${context.userInput}\n` +
+              this.buildContextPrompt(context) +
               '输出格式: {"targetTime":"09:00:00","programName":"看东方"}',
           },
         ],
@@ -51,18 +54,21 @@ export class ParamExtractor {
       if (!match) return null
       const parsed = JSON.parse(match[0]) as Partial<InsertParams>
       if (!parsed.targetTime || !parsed.programName) return null
-      return {
+      const extracted = {
         targetTime: this.normalizeTime(parsed.targetTime),
         programName: parsed.programName.trim(),
       }
+      return extracted
     } catch {
-      return null
+      return ruleBased ?? null
     }
   }
 
   async extractMoveParams(context: DialogueContext): Promise<MoveParams | null> {
     const ruleBased = this.ruleBasedExtractMove(context.userInput)
-    if (ruleBased) return ruleBased
+    if (ruleBased && !this.shouldRefineWithContext(context, 'move')) {
+      return ruleBased
+    }
 
     try {
       const response = await this.llmClient.chat(
@@ -70,12 +76,13 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请从用户输入中提取 targetTime、direction 和 offsetSeconds，并且只返回 JSON。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime、direction 和 offsetSeconds，并且只返回 JSON。',
           },
           {
             role: 'user',
             content:
               `用户指令: ${context.userInput}\n` +
+              this.buildContextPrompt(context) +
               '输出格式: {"targetTime":"22:00:00","direction":"forward","offsetSeconds":3600}',
           },
         ],
@@ -86,19 +93,22 @@ export class ParamExtractor {
       if (!match) return null
       const parsed = JSON.parse(match[0]) as Partial<MoveParams>
       if (!parsed.targetTime || !parsed.direction || !parsed.offsetSeconds) return null
-      return {
+      const extracted: MoveParams = {
         targetTime: this.normalizeTime(parsed.targetTime),
         direction: parsed.direction === 'backward' ? 'backward' : 'forward',
         offsetSeconds: Math.max(60, Number(parsed.offsetSeconds)),
       }
+      return extracted
     } catch {
-      return null
+      return ruleBased ?? null
     }
   }
 
   async extractDeleteParams(context: DialogueContext): Promise<DeleteParams | null> {
     const ruleBased = this.ruleBasedExtractDelete(context.userInput)
-    if (ruleBased) return ruleBased
+    if (ruleBased && !this.shouldRefineWithContext(context, 'delete', ruleBased.programName)) {
+      return ruleBased
+    }
 
     try {
       const response = await this.llmClient.chat(
@@ -106,12 +116,13 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请从用户输入中提取 targetTime 和可选 programName，并且只返回 JSON。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和可选 programName，并且只返回 JSON。',
           },
           {
             role: 'user',
             content:
               `用户指令: ${context.userInput}\n` +
+              this.buildContextPrompt(context) +
               '输出格式: {"targetTime":"12:00:00","programName":"午间30"}',
           },
         ],
@@ -122,18 +133,21 @@ export class ParamExtractor {
       if (!match) return null
       const parsed = JSON.parse(match[0]) as Partial<DeleteParams>
       if (!parsed.targetTime) return null
-      return {
+      const extracted = {
         targetTime: this.normalizeTime(parsed.targetTime),
         programName: parsed.programName?.trim(),
       }
+      return extracted
     } catch {
-      return null
+      return ruleBased ?? null
     }
   }
 
   async extractReplaceParams(context: DialogueContext): Promise<ReplaceParams | null> {
     const ruleBased = this.ruleBasedExtractReplace(context.userInput)
-    if (ruleBased) return ruleBased
+    if (ruleBased && !this.shouldRefineWithContext(context, 'replace', ruleBased.programName)) {
+      return ruleBased
+    }
 
     try {
       const response = await this.llmClient.chat(
@@ -141,12 +155,13 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请从用户输入中提取 targetTime 和 replacementProgramName，并且只返回 JSON。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和 replacementProgramName，并且只返回 JSON。',
           },
           {
             role: 'user',
             content:
               `用户指令: ${context.userInput}\n` +
+              this.buildContextPrompt(context) +
               '输出格式: {"targetTime":"10:00:00","replacementProgramName":"中国考古报道"}',
           },
         ],
@@ -162,12 +177,13 @@ export class ParamExtractor {
       }
       const programName = parsed.replacementProgramName ?? parsed.programName
       if (!parsed.targetTime || !programName) return null
-      return {
+      const extracted = {
         targetTime: this.normalizeTime(parsed.targetTime),
         programName: programName.trim(),
       }
+      return extracted
     } catch {
-      return null
+      return ruleBased ?? null
     }
   }
 
@@ -268,6 +284,42 @@ export class ParamExtractor {
       targetTime: this.normalizeTime(`${timeMatch[1]}:${timeMatch[2] ?? '00'}`),
       programName: timeMatch[3].replace(/[，。？?]/g, '').trim(),
     }
+  }
+
+  private buildContextPrompt(context: DialogueContext): string {
+    return (
+      `频道: ${context.scheduleState.channelName}\n` +
+      `日期: ${context.scheduleState.date}\n` +
+      `当前节目名候选: ${context.scheduleNameCandidates}\n` +
+      `目标时间提示: ${context.targetTimeHints.join('、') || '未识别到明确时间'}\n` +
+      `目标时间附近节目:\n${context.nearbyScheduleSummary}\n`
+    )
+  }
+
+  private shouldRefineWithContext(
+    context: DialogueContext,
+    intentType: 'insert' | 'move' | 'delete' | 'replace',
+    programName?: string,
+  ): boolean {
+    if (context.currentSchedule.length === 0) {
+      return false
+    }
+
+    const hasTimeHints = context.targetTimeHints.length > 0
+    const hasNearbyItems =
+      context.nearbyScheduleSummary !== '当前节目单为空，没有可参考的附近节目。'
+      && context.nearbyScheduleSummary !== '未从用户输入中识别到明确时间点。'
+    const hasProgramHint = typeof programName === 'string' && programName.trim().length > 0
+
+    if (intentType === 'delete' || intentType === 'replace') {
+      return hasTimeHints || hasNearbyItems || hasProgramHint
+    }
+
+    if (intentType === 'insert') {
+      return hasProgramHint || hasTimeHints
+    }
+
+    return hasTimeHints && hasNearbyItems
   }
 
   private normalizeTime(timeText: string): string {

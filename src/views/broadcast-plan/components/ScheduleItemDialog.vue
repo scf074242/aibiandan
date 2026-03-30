@@ -113,8 +113,12 @@
 import { computed, ref, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage } from 'element-plus'
-import { getOrchestrationDemoColumn, getOrchestrationDemoLayout, orchestrationDemoBaseDate } from '@/mock/orchestrationMock'
+import { orchestrationDemoBaseDate } from '@/mock/orchestrationMock'
 import { getCandidateService } from '@/services/candidateService'
+import {
+  getEffectiveColumnDefinition,
+  getEffectiveLayoutReference,
+} from '@/services/orchestration/runtimeLayoutRegistry'
 import type { ProgramCandidate } from '@/types/orchestration'
 import type { ScheduleItem } from '../scheduleData'
 
@@ -167,11 +171,11 @@ const dialogVisible = computed({
 })
 
 const allReferences = computed<ReferenceOption[]>(() => {
-  const slots = getOrchestrationDemoLayout(props.channelId || 'dragon', props.scheduleDate || orchestrationDemoBaseDate)?.slots ?? []
+  const slots = getEffectiveLayoutReference(props.channelId || 'dragon', props.scheduleDate || orchestrationDemoBaseDate)?.slots ?? []
   const map = new Map<string, ReferenceOption>()
   slots.forEach((slot) => {
     if (map.has(slot.columnId)) return
-    const column = getOrchestrationDemoColumn(slot.columnId)
+    const column = getEffectiveColumnDefinition(slot.columnId)
     map.set(slot.columnId, {
       columnId: slot.columnId,
       columnName: column?.columnName ?? slot.columnId,
@@ -210,7 +214,7 @@ const selectedCandidate = computed(() =>
 )
 
 const selectedColumnName = computed(() => {
-  const column = getOrchestrationDemoColumn(formData.value.columnId)
+  const column = getEffectiveColumnDefinition(formData.value.columnId)
   return column?.columnName ?? '-'
 })
 

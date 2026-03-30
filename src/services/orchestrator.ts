@@ -33,7 +33,7 @@ import {
 import { LLMClient } from './llm/llmClient'
 import { TaskClassifier } from './llm/taskClassifier'
 import { getValidationEngine } from './validators/validationEngine'
-import { getOrchestrationDemoColumn } from '@/mock/orchestrationMock'
+import { getEffectiveColumnDefinition } from './orchestration/runtimeLayoutRegistry'
 
 type EventPayloadMap = {
   'status-change': { status: PlanningSessionStatus; previousStatus: PlanningSessionStatus }
@@ -56,6 +56,11 @@ interface PreparedGapPlan {
   candidates: ProgramCandidate[]
   fillCommand: FillItemCommand
   selectedCandidate: ProgramCandidate
+}
+
+interface ExecutedGapPlanResult {
+  item: ScheduleItemSnapshot
+  insertedItems: ScheduleItemSnapshot[]
 }
 
 class EventEmitter {
@@ -186,7 +191,7 @@ export class Orchestrator extends EventEmitter {
       const layoutSlots = generationContext.layoutReference?.slots ?? []
       const typedLayoutSlots = layoutSlots
         .map((slot) => {
-          const column = getOrchestrationDemoColumn(slot.columnId)
+          const column = getEffectiveColumnDefinition(slot.columnId)
           if (!column) return null
           return {
             startTime: slot.startTime,
@@ -239,12 +244,12 @@ export class Orchestrator extends EventEmitter {
 
       await this.phase1Planning()
       if (this.isCancelled) return
-      await this.phase2Filling()
+      await this.phase2Filling({ allowAdFill: true })
       if (this.isCancelled) return
       await this.phase3Repair()
 
       if (!this.isCancelled) {
-        this.updateStatus('completed')
+        this.updateStatus(this.gapManager?.hasRemainingGaps() ? 'manual_review' : 'completed')
         this.emit('complete', { session: this.session! })
       }
     } catch (error) {
@@ -275,7 +280,7 @@ export class Orchestrator extends EventEmitter {
       )
       const typedLayoutSlots = (context.layoutReference?.slots ?? [])
         .map((slot) => {
-          const column = getOrchestrationDemoColumn(slot.columnId)
+          const column = getEffectiveColumnDefinition(slot.columnId)
           if (!column) return null
           return {
             startTime: slot.startTime,
@@ -289,13 +294,23 @@ export class Orchestrator extends EventEmitter {
 
       const gaps = this.gapManager!.queryRemainingGaps()
       this.session!.gaps.pending = targetGapIds?.length ? gaps.filter((gap) => targetGapIds.includes(gap.id)) : gaps
+      const partialTargetSlotIds = this.resolveRelevantLayoutSlotIds(
+        this.session!.gaps.pending,
+        context.layoutReference,
+      )
+      this.log('info', 'planning', '局部补排已锁定版面范围，后续广告补位仅作用于相关版面时段', {
+        pendingGapCount: this.session!.gaps.pending.length,
+        targetGapIds: this.session!.gaps.pending.map((gap) => gap.id),
+        targetSlotIds: partialTargetSlotIds,
+        layoutSource: context.layoutReference?.name,
+      })
 
-      await this.phase2Filling()
+      await this.phase2Filling({ allowAdFill: true, targetSlotIds: partialTargetSlotIds })
       if (this.isCancelled) return
       await this.phase3Repair()
 
       if (!this.isCancelled) {
-        this.updateStatus('completed')
+        this.updateStatus(this.gapManager?.hasRemainingGaps() ? 'manual_review' : 'completed')
         this.emit('complete', { session: this.session! })
       }
     } catch (error) {
@@ -374,13 +389,14 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
-  private async phase2Filling(): Promise<void> {
+  private async phase2Filling(options?: { allowAdFill?: boolean; targetSlotIds?: string[] }): Promise<void> {
     this.updateStatus('filling')
     let processed = 0
     const generationContext = await this.dataService.getGenerationContext(this.session!.channelId, this.session!.date)
+    const allowAdFill = options?.allowAdFill ?? true
 
-    while (!this.isCancelled && this.gapManager && processed < this.config.maxGapItems) {
-      const batch = this.collectPlanningBatch(this.config.maxGapItems - processed)
+    while (!this.isCancelled && this.gapManager?.hasRemainingGaps()) {
+      const batch = this.collectPlanningBatch()
       if (batch.length === 0) break
 
       this.log('info', 'planning', `已启动 ${batch.length} 个空窗的并行规划任务`, {
@@ -404,12 +420,12 @@ export class Orchestrator extends EventEmitter {
         this.currentGap = plan.gap
 
         try {
-          const item = await this.executePreparedPlan(plan)
-          this.gapManager.onGapFilled(plan.gap.id, item)
+          const executionResult = await this.executePreparedPlan(plan)
+          this.gapManager.onGapFilled(plan.gap.id, executionResult.insertedItems)
           this.session!.gaps.completed.push(plan.gap.id)
           this.session!.execution.totalCommands += 1
           this.session!.execution.successfulCommands += 1
-          this.emit('gap-complete', { gap: plan.gap, item })
+          this.emit('gap-complete', { gap: plan.gap, item: executionResult.item })
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error'
           this.gapManager.markFailed(plan.gap.id, message)
@@ -430,12 +446,28 @@ export class Orchestrator extends EventEmitter {
       }
     }
 
-    if (!this.isCancelled && this.gapManager) {
-      const filledCount = await this.fillRemainingGapsWithAds(generationContext)
+    if (!this.isCancelled && this.gapManager && allowAdFill) {
+      const filledCount = await this.fillRemainingGapsWithAds(generationContext, options?.targetSlotIds)
       processed += filledCount
       if (filledCount > 0) {
         this.session!.gaps.pending = this.gapManager.queryRemainingGaps()
       }
+    }
+
+    if (!this.isCancelled && this.gapManager?.hasRemainingGaps()) {
+      const remainingGaps = this.gapManager.queryRemainingGaps()
+      this.log('warn', 'planning', '自动编排已结束，但仍有未完成空窗待人工确认', {
+        remainingGapCount: remainingGaps.length,
+        remainingGaps: remainingGaps.slice(0, 10).map((gap) => ({
+          gapId: gap.id,
+          startTime: gap.startTime,
+          endTime: gap.endTime,
+          allowedTypes: gap.constraints.allowedTypes,
+          source: gap.metadata.source,
+        })),
+        processedCount: processed,
+      })
+      this.session!.gaps.pending = remainingGaps
     }
 
     this.currentGap = null
@@ -580,8 +612,8 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
-  private collectPlanningBatch(remainingBudget: number): GapInfo[] {
-    const batchSize = Math.max(1, Math.min(this.config.planningConcurrency, remainingBudget))
+  private collectPlanningBatch(): GapInfo[] {
+    const batchSize = Math.max(1, this.config.planningConcurrency)
     const batch: GapInfo[] = []
 
     while (batch.length < batchSize) {
@@ -648,6 +680,10 @@ export class Orchestrator extends EventEmitter {
         programName: item.programName,
         duration: item.duration,
         programType: item.programType,
+        issueNo: item.issueNo,
+        sequenceNo: (item as ProgramCandidate & { sequenceNo?: number }).sequenceNo,
+        selectionMode: (item as ProgramCandidate & { selectionMode?: string }).selectionMode,
+        selectionNote: (item as ProgramCandidate & { selectionNote?: string }).selectionNote,
       })),
     })
 
@@ -667,6 +703,9 @@ export class Orchestrator extends EventEmitter {
       selectedCandidateId: selectedCandidate.id,
       selectedCandidateName: selectedCandidate.programName,
       selectionReason: fillCommand.data.selectionReason,
+      sequenceNo: (selectedCandidate as ProgramCandidate & { sequenceNo?: number }).sequenceNo,
+      selectionMode: (selectedCandidate as ProgramCandidate & { selectionMode?: string }).selectionMode,
+      selectionNote: (selectedCandidate as ProgramCandidate & { selectionNote?: string }).selectionNote,
     })
 
     return {
@@ -679,7 +718,7 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
-  private async executePreparedPlan(plan: PreparedGapPlan): Promise<ScheduleItemSnapshot> {
+  private async executePreparedPlan(plan: PreparedGapPlan): Promise<ExecutedGapPlanResult> {
     const context = await this.dataService.getGenerationContext(this.session!.channelId, this.session!.date)
     if (!context) {
       throw new Error('Missing generation context')
@@ -693,6 +732,26 @@ export class Orchestrator extends EventEmitter {
 
     if (!materialized.success || !materialized.item || !materialized.items?.length) {
       throw new Error(materialized.error || 'Materialize failed')
+    }
+
+    const existingItems = this.atomicCapabilities.getAllItems()
+    const conflictError = this.detectAppendConflict(materialized.items, existingItems, plan.gap)
+    if (conflictError) {
+      this.log('warn', 'execution', `空窗 ${plan.gap.id} 命中时间冲突，已阻止写入`, {
+        gapId: plan.gap.id,
+        startTime: plan.gap.startTime,
+        endTime: plan.gap.endTime,
+        conflictError,
+        insertedItems: materialized.items.map((entry) => ({
+          itemId: entry.id,
+          programName: entry.programName,
+          startTime: entry.startTime,
+          endTime: entry.endTime,
+          duration: entry.duration,
+          programType: entry.programType,
+        })),
+      })
+      throw new Error(conflictError)
     }
 
     const appendResult = await this.atomicCapabilities.appendItems(materialized.items, { skipValidation: true })
@@ -718,20 +777,32 @@ export class Orchestrator extends EventEmitter {
       selectionReason: plan.fillCommand.data.selectionReason,
       selectedCandidateId: plan.selectedCandidate.id,
       selectedCandidateName: plan.selectedCandidate.programName,
+      sequenceNo: (plan.selectedCandidate as ProgramCandidate & { sequenceNo?: number }).sequenceNo,
+      selectionMode: (plan.selectedCandidate as ProgramCandidate & { selectionMode?: string }).selectionMode,
+      selectionNote: (plan.selectedCandidate as ProgramCandidate & { selectionNote?: string }).selectionNote,
     })
 
-    return materialized.item
+    return {
+      item: materialized.item,
+      insertedItems: materialized.items,
+    }
   }
 
-  private async fillRemainingGapsWithAds(generationContext?: Awaited<ReturnType<ReturnType<typeof getDataService>['getGenerationContext']>> | null): Promise<number> {
+  private async fillRemainingGapsWithAds(
+    generationContext?: Awaited<ReturnType<ReturnType<typeof getDataService>['getGenerationContext']>> | null,
+    targetSlotIds?: string[],
+  ): Promise<number> {
     const layoutReference = generationContext?.layoutReference
     if (!layoutReference) return 0
+    const slotIdFilter = Array.isArray(targetSlotIds) ? new Set(targetSlotIds) : null
+    if (slotIdFilter && slotIdFilter.size === 0) return 0
 
     let insertedCount = 0
     let currentItems = this.atomicCapabilities.getAllItems()
 
     for (const slot of layoutReference.slots) {
       if (this.isCancelled) break
+      if (slotIdFilter && !slotIdFilter.has(slot.id)) continue
 
       let slotChanged = true
       while (!this.isCancelled && slotChanged) {
@@ -761,6 +832,16 @@ export class Orchestrator extends EventEmitter {
           }
 
           const replacedItems = applyAdInsertionPlan(plan, currentItems)
+          const overlapError = this.detectScheduleConflicts(replacedItems)
+          if (overlapError) {
+            this.log('warn', 'execution', '版面 ' + slot.id + ' 广告插播命中时间冲突，已阻止写入', {
+              slotId: slot.id,
+              position: opportunity.position,
+              insertAt: opportunity.insertAt,
+              conflictError: overlapError,
+            })
+            continue
+          }
           const replaceResult = await this.atomicCapabilities.replaceAllItems(replacedItems, { skipValidation: true })
           if (!replaceResult.success) {
             this.log('warn', 'execution', '版面 ' + slot.id + ' 广告插播写入失败', {
@@ -796,6 +877,8 @@ export class Orchestrator extends EventEmitter {
               programType: item.programType,
             })),
           })
+
+          await this.yieldToBrowser()
 
           break
         }
@@ -858,6 +941,90 @@ export class Orchestrator extends EventEmitter {
 
   private combineDateTime(date: string, time: string): string {
     return time.includes('T') ? time : `${date}T${time}+08:00`
+  }
+
+  private resolveRelevantLayoutSlotIds(gaps: GapInfo[], layoutReference?: LayoutReference | null): string[] {
+    if (!layoutReference?.slots?.length || !gaps.length) {
+      return []
+    }
+
+    const resolvedSlotIds = new Set<string>()
+    for (const gap of gaps) {
+      const gapStart = new Date(gap.startTime).getTime()
+      const gapEnd = new Date(gap.endTime).getTime()
+      layoutReference.slots.forEach((slot) => {
+        const slotStart = new Date(slot.startTime).getTime()
+        const slotEnd = new Date(slot.endTime).getTime()
+        if (slotStart < gapEnd && slotEnd > gapStart) {
+          resolvedSlotIds.add(slot.id)
+        }
+      })
+    }
+
+    return Array.from(resolvedSlotIds)
+  }
+
+  private detectAppendConflict(
+    incomingItems: ScheduleItemSnapshot[],
+    existingItems: ScheduleItemSnapshot[],
+    gap: GapInfo,
+  ): string | null {
+    const batchConflict = this.detectScheduleConflicts(incomingItems)
+    if (batchConflict) {
+      return `待写入条目内部存在时间冲突：${batchConflict}`
+    }
+
+    for (const incomingItem of incomingItems) {
+      const conflicts = existingItems.filter((item) => this.isTimeOverlapping(item, incomingItem))
+      if (!conflicts.length) continue
+
+      const conflict = conflicts[0]
+      if (!conflict) continue
+      const conflictName = conflict.programName || conflict.programCode || conflict.id
+      return [
+        `待写入节目《${incomingItem.programName}》与现有条目冲突`,
+        `冲突时段 ${incomingItem.startTime} - ${incomingItem.endTime}`,
+        `重叠条目《${conflictName}》(${conflict.startTime} - ${conflict.endTime})`,
+        `目标空窗 ${gap.startTime} - ${gap.endTime}`,
+      ].join('；')
+    }
+
+    return null
+  }
+
+  private detectScheduleConflicts(items: ScheduleItemSnapshot[]): string | null {
+    if (items.length <= 1) return null
+
+    const sortedItems = [...items].sort(
+      (left, right) => new Date(left.startTime).getTime() - new Date(right.startTime).getTime(),
+    )
+
+    for (let index = 1; index < sortedItems.length; index += 1) {
+      const previous = sortedItems[index - 1]
+      const current = sortedItems[index]
+      if (!previous || !current) continue
+      if (!this.isTimeOverlapping(previous, current)) continue
+
+      const previousName = previous.programName || previous.programCode || previous.id
+      const currentName = current.programName || current.programCode || current.id
+      return `《${previousName}》与《${currentName}》在 ${current.startTime} 附近发生重叠`
+    }
+
+    return null
+  }
+
+  private isTimeOverlapping(left: ScheduleItemSnapshot, right: ScheduleItemSnapshot): boolean {
+    const leftStart = new Date(left.startTime).getTime()
+    const leftEnd = new Date(left.endTime).getTime()
+    const rightStart = new Date(right.startTime).getTime()
+    const rightEnd = new Date(right.endTime).getTime()
+    return leftStart < rightEnd && rightStart < leftEnd
+  }
+
+  private async yieldToBrowser(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(() => resolve(), 0)
+    })
   }
 }
 

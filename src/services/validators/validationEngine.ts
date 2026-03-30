@@ -1,4 +1,4 @@
-import { getOrchestrationDemoColumn } from '@/mock/orchestrationMock'
+import { getEffectiveColumnDefinition } from '@/services/orchestration/runtimeLayoutRegistry'
 import type {
   FixedItem,
   GapInfo,
@@ -82,14 +82,6 @@ export class ValidationEngine {
         severity: 'warning',
         enabled: true,
         check: this.checkDurationConsistency.bind(this),
-      },
-      {
-        id: 'fixed-item-check',
-        name: '固定播出冲突',
-        type: 'constraint_violation',
-        severity: 'critical',
-        enabled: true,
-        check: this.checkFixedItemConflicts.bind(this),
       },
       {
         id: 'layout-check',
@@ -258,6 +250,15 @@ export class ValidationEngine {
     for (const fixedItem of context.fixedItems) {
       if (!fixedItem.isLocked) continue
       for (const item of context.items) {
+        const isSameProgram = item.programCode === fixedItem.programCode
+        const isSameTimeRange =
+          new Date(item.startTime).getTime() === new Date(fixedItem.startTime).getTime()
+          && new Date(item.endTime).getTime() === new Date(fixedItem.endTime).getTime()
+
+        if (isSameProgram && isSameTimeRange) {
+          continue
+        }
+
         if (this.timeRangesOverlap(
           { start: item.startTime, end: item.endTime },
           { start: fixedItem.startTime, end: fixedItem.endTime },
@@ -283,7 +284,7 @@ export class ValidationEngine {
     const issues: ValidationIssue[] = []
 
     for (const slot of context.layoutSlots) {
-      const column = getOrchestrationDemoColumn(slot.columnId)
+      const column = getEffectiveColumnDefinition(slot.columnId)
       if (!column) continue
 
       const itemsInSlot = context.items.filter((item) =>

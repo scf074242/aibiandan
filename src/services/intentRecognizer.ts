@@ -20,7 +20,7 @@ export class IntentRecognizer {
 
   async recognize(context: DialogueContext): Promise<MicroEditIntent> {
     const ruleBased = this.ruleBasedRecognize(context.userInput)
-    if (ruleBased.confidence >= 0.9) {
+    if (!this.shouldUseContextualReview(context, ruleBased)) {
       return ruleBased
     }
 
@@ -30,7 +30,7 @@ export class IntentRecognizer {
           {
             role: 'system',
             content:
-              '你是广播节目串联单的微调意图识别器。只识别 insert、move、delete、replace、unsupported、clarify 六类意图，并且只返回 JSON。',
+              '你是广播节目串联单的微调意图识别器。只识别 insert、move、delete、replace、unsupported、clarify 六类意图，并且只返回 JSON。请结合当前编单候选和目标时间附近节目理解用户指代，不要凭空假设不存在的节目。',
           },
           {
             role: 'user',
@@ -39,6 +39,9 @@ export class IntentRecognizer {
               `频道: ${context.scheduleState.channelName}\n` +
               `日期: ${context.scheduleState.date}\n` +
               `当前节目单摘要:\n${context.scheduleSummary}\n` +
+              `当前节目名候选:\n${context.scheduleNameCandidates}\n` +
+              `目标时间提示: ${context.targetTimeHints.join('、') || '未识别到明确时间'}\n` +
+              `目标时间附近节目:\n${context.nearbyScheduleSummary}\n` +
               '输出格式: {"type":"delete","confidence":0.95,"reasoning":"..."}',
           },
         ],
@@ -46,10 +49,36 @@ export class IntentRecognizer {
       )
 
       const parsed = this.parseIntentResponse(response.content)
-      return parsed ?? ruleBased
+      if (!parsed) {
+        return ruleBased
+      }
+
+      const ruleBasedActionable = ['insert', 'move', 'delete', 'replace'].includes(ruleBased.type)
+      const parsedActionable = ['insert', 'move', 'delete', 'replace'].includes(parsed.type)
+
+      if (ruleBasedActionable && !parsedActionable) {
+        return ruleBased
+      }
+
+      return parsed
     } catch {
       return ruleBased
     }
+  }
+
+  private shouldUseContextualReview(context: DialogueContext, ruleBased: MicroEditIntent): boolean {
+    if (ruleBased.type === 'unsupported' || ruleBased.type === 'clarify') {
+      return true
+    }
+
+    const hasSchedule = context.currentSchedule.length > 0
+    const hasTimeHints = context.targetTimeHints.length > 0
+    const hasNearbyItems =
+      context.nearbyScheduleSummary !== '当前节目单为空，没有可参考的附近节目。'
+      && context.nearbyScheduleSummary !== '未从用户输入中识别到明确时间点。'
+    const isHighRiskIntent = ruleBased.type === 'delete' || ruleBased.type === 'replace'
+
+    return hasSchedule && (isHighRiskIntent || hasTimeHints || hasNearbyItems)
   }
 
   private ruleBasedRecognize(userInput: string): MicroEditIntent {

@@ -1,13 +1,14 @@
 import {
-  getOrchestrationDemoColumn,
-  getOrchestrationDemoFixedItems,
   getOrchestrationDemoHistorySchedules,
-  getOrchestrationDemoLayout,
-  getOrchestrationDemoProgramsByColumn,
   orchestrationDemoCandidates,
   orchestrationDemoChannels,
   orchestrationDemoColumns,
 } from '@/mock/orchestrationMock'
+import {
+  getEffectiveColumnDefinition,
+  getEffectiveLayoutReference,
+  getEffectiveProgramsByColumn,
+} from './runtimeLayoutRegistry'
 import type {
   ChannelContext,
   FixedItem,
@@ -65,7 +66,7 @@ export class DataService {
   }
 
   async getLayoutReference(channelId: string, date: string): Promise<LayoutReference | null> {
-    return getOrchestrationDemoLayout(channelId, date)
+    return getEffectiveLayoutReference(channelId, date)
   }
 
   async getLayoutSlots(channelId: string, date: string) {
@@ -104,10 +105,10 @@ export class DataService {
     }
 
     if (query.columnId) {
-      const column = getOrchestrationDemoColumn(query.columnId)
+      const column = getEffectiveColumnDefinition(query.columnId)
       if (!column) return []
       const allowedProgramIds = new Set(
-        getOrchestrationDemoProgramsByColumn(column.channelId, query.columnId).map((item) => item.programId),
+        getEffectiveProgramsByColumn(column.channelId, query.columnId).map((item) => item.programId),
       )
       list = list.filter((item) => {
         const candidate = this.programs.get(item.id)
@@ -132,7 +133,9 @@ export class DataService {
   }
 
   async getFixedItems(channelId: string, date: string): Promise<FixedItem[]> {
-    return getOrchestrationDemoFixedItems(channelId, date)
+    void channelId
+    void date
+    return []
   }
 
   async getGenerationContext(channelId: string, date: string): Promise<GenerationContext | null> {
@@ -172,7 +175,9 @@ export class DataService {
   }
 
   getColumnName(columnId: string): string {
-    return orchestrationDemoColumns.find((item) => item.columnId === columnId)?.columnName ?? columnId
+    return getEffectiveColumnDefinition(columnId)?.columnName
+      ?? orchestrationDemoColumns.find((item) => item.columnId === columnId)?.columnName
+      ?? columnId
   }
 }
 

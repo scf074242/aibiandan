@@ -42,7 +42,7 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
 
     orchestrator.on('status-change', ({ status, previousStatus }) => {
       session.value = orchestrator!.getSession()
-      if (['completed', 'failed', 'cancelled'].includes(status)) {
+      if (['completed', 'manual_review', 'failed', 'cancelled'].includes(status)) {
         isRunning.value = false
         currentGap.value = null
       }
@@ -69,11 +69,13 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
     })
 
     orchestrator.on('log', ({ entry }) => {
+      session.value = orchestrator!.getSession()
       logs.value.push(entry)
       if (logs.value.length > MAX_LOG_ENTRIES) {
         logs.value.splice(0, logs.value.length - MAX_LOG_ENTRIES)
       }
       options.onLog?.(entry)
+      if (orchestrator?.getProgress()) options.onProgress?.(orchestrator.getProgress()!)
     })
 
     orchestrator.on('complete', ({ session: value }) => {
@@ -97,7 +99,7 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
     if (!value || value.gapProgress.total === 0) return 0
     return Math.round((value.gapProgress.completed / value.gapProgress.total) * 100)
   })
-  const isCompleted = computed(() => status.value === 'completed')
+  const isCompleted = computed(() => ['completed', 'manual_review'].includes(status.value))
   const isFailed = computed(() => status.value === 'failed')
   const isCancelled = computed(() => status.value === 'cancelled')
   const canStart = computed(() => !isRunning.value)

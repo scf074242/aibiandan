@@ -1,4 +1,4 @@
-import { getOrchestrationDemoColumn } from '@/mock/orchestrationMock'
+import { getEffectiveColumnDefinition } from '@/services/orchestration/runtimeLayoutRegistry'
 import type {
   AdInsertionOpportunity,
   AdInsertionPlan,
@@ -34,7 +34,7 @@ const isSameProgramType = (left: ScheduleItemSnapshot, right: ScheduleItemSnapsh
   left.programType === right.programType && !isAdItem(left) && !isAdItem(right)
 
 const findSlotType = (slot: LayoutSlot): string | undefined =>
-  slot.columnId ? getOrchestrationDemoColumn(slot.columnId)?.defaultProgramType : undefined
+  slot.columnId ? getEffectiveColumnDefinition(slot.columnId)?.defaultProgramType : undefined
 
 const isAllowedSlot = (slot: LayoutSlot) => {
   const slotType = findSlotType(slot)

@@ -330,15 +330,19 @@ export class GapManager {
    * 填充空窗后更新
    * 当空窗被节目填充后，空窗被消除
    */
-  onGapFilled(gapId: string, item: ScheduleItemSnapshot): void {
+  onGapFilled(gapId: string, items: ScheduleItemSnapshot | ScheduleItemSnapshot[]): void {
     const gap = this.gaps.get(gapId)
     if (!gap) return
+
+    const insertedItems = Array.isArray(items) ? items : [items]
+    const lastInsertedItem = insertedItems[insertedItems.length - 1]
+    if (!lastInsertedItem) return
 
     // 更新处理状态
     const state = this.processingStates.get(gapId)
     if (state) {
       state.status = 'completed'
-      state.filledItemId = item.id
+      state.filledItemId = lastInsertedItem.id
       state.completedAt = new Date().toISOString()
     }
 
@@ -346,43 +350,77 @@ export class GapManager {
     this.gaps.delete(gapId)
 
     // 检查是否需要创建新的空窗（当填充节目未完全填满原空窗时）
-    this.checkAndSplitGap(gap, item)
+    this.checkAndSplitGap(gap, insertedItems)
   }
 
   /**
    * 检查并切分空窗
    * 当填充节目未完全填满原空窗时，创建新的空窗
    */
-  private checkAndSplitGap(originalGap: GapInfo, filledItem: ScheduleItemSnapshot): void {
+  private checkAndSplitGap(
+    originalGap: GapInfo,
+    filledItems: ScheduleItemSnapshot | ScheduleItemSnapshot[],
+  ): void {
     const gapStart = new Date(originalGap.startTime).getTime()
     const gapEnd = new Date(originalGap.endTime).getTime()
-    const itemStart = new Date(filledItem.startTime).getTime()
-    const itemEnd = new Date(filledItem.endTime).getTime()
+    const insertedItems = Array.isArray(filledItems) ? filledItems : [filledItems]
+    const occupiedRanges = this.mergeTimeRanges(
+      insertedItems
+        .map((item) => {
+          const itemStart = new Date(item.startTime).getTime()
+          const itemEnd = new Date(item.endTime).getTime()
+          const clippedStart = Math.max(gapStart, itemStart)
+          const clippedEnd = Math.min(gapEnd, itemEnd)
 
-    // 检查前面是否有剩余空窗
-    if (itemStart > gapStart) {
-      const preGapDuration = (itemStart - gapStart) / 1000
-      if (preGapDuration >= this.config.minGapDuration) {
-        const preGap = this.createGap({
-          startTime: originalGap.startTime,
-          endTime: filledItem.startTime,
-          constraints: originalGap.constraints,
-          metadata: {
-            ...originalGap.metadata,
-            source: 'generated',
-            priority: originalGap.metadata.priority + 1,
-          },
+          if (clippedEnd <= clippedStart) {
+            return null
+          }
+
+          return {
+            start: this.formatLocalDateTime(clippedStart),
+            end: this.formatLocalDateTime(clippedEnd),
+          }
         })
-        this.gaps.set(preGap.id, preGap)
+        .filter((range): range is TimeRange => Boolean(range)),
+    )
+
+    if (occupiedRanges.length === 0) {
+      return
+    }
+
+    let cursor = gapStart
+
+    for (const range of occupiedRanges) {
+      const rangeStart = new Date(range.start).getTime()
+      const rangeEnd = new Date(range.end).getTime()
+
+      if (rangeStart > cursor) {
+        const gapDuration = (rangeStart - cursor) / 1000
+        if (gapDuration >= this.config.minGapDuration) {
+          const generatedGap = this.createGap({
+            startTime: this.formatLocalDateTime(cursor),
+            endTime: this.formatLocalDateTime(rangeStart),
+            constraints: originalGap.constraints,
+            metadata: {
+              ...originalGap.metadata,
+              source: 'generated',
+              priority: originalGap.metadata.priority + 1,
+            },
+          })
+          this.gaps.set(generatedGap.id, generatedGap)
+        }
+      }
+
+      if (rangeEnd > cursor) {
+        cursor = rangeEnd
       }
     }
 
-    // 检查后面是否有剩余空窗
-    if (itemEnd < gapEnd) {
-      const postGapDuration = (gapEnd - itemEnd) / 1000
-      if (postGapDuration >= this.config.minGapDuration) {
-        const postGap = this.createGap({
-          startTime: filledItem.endTime,
+    if (cursor < gapEnd) {
+      const trailingGapDuration = (gapEnd - cursor) / 1000
+      if (trailingGapDuration >= this.config.minGapDuration) {
+        const trailingGap = this.createGap({
+          startTime: this.formatLocalDateTime(cursor),
           endTime: originalGap.endTime,
           constraints: originalGap.constraints,
           metadata: {
@@ -391,7 +429,7 @@ export class GapManager {
             priority: originalGap.metadata.priority + 1,
           },
         })
-        this.gaps.set(postGap.id, postGap)
+        this.gaps.set(trailingGap.id, trailingGap)
       }
     }
   }

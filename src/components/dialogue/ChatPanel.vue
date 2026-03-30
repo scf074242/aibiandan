@@ -15,26 +15,105 @@
           ]"
         >
           <div v-if="message.role !== 'user'" class="system-summary-row">
-            <span class="process-pill" :class="message.processType ? `process-${message.processType}` : ''">
-              {{ message.processTypeLabel || '绯荤粺' }}
-            </span>
-            <div class="system-summary-text" :title="message.content">{{ message.content }}</div>
+            <div class="system-summary-main">
+              <div class="system-summary-text" :title="message.content">{{ message.content }}</div>
+              <div v-if="shouldShowReasonTags(message)" class="reason-tag-row">
+                <span
+                  v-for="tag in message.reasonTags"
+                  :key="tag"
+                  class="reason-tag"
+                >
+                  {{ tag }}
+                </span>
+              </div>
+              <div
+                v-if="shouldShowDefaultExplanation(message)"
+                class="system-thinking-text"
+                :title="message.thinking"
+              >
+                {{ message.thinking }}
+              </div>
+            </div>
             <el-button
+              v-if="hasExpandableExplanation(message)"
               link
               size="small"
               class="process-toggle"
               @click="toggleExpanded(message)"
             >
-              {{ message.expanded ? '收起' : '展开' }}
+              {{ message.expanded ? '收起依据' : '查看依据' }}
             </el-button>
           </div>
 
           <div v-if="message.role === 'user'" class="message-text">{{ message.content }}</div>
 
           <div v-if="message.role !== 'user' && (message.expanded ?? false)" class="explanation-card">
-            <div class="explanation-content">{{ message.content }}</div>
-            <div v-if="message.explanation?.explanation" class="explanation-content is-secondary">{{ message.explanation.explanation }}</div>
-            <pre v-if="message.explanation?.details" class="details-data">{{ formatDetails(message.explanation?.details) }}</pre>
+            <div
+              v-for="section in getExpandedSections(message)"
+              :key="section.title"
+              class="explanation-section"
+            >
+              <div class="explanation-title">{{ section.title }}</div>
+              <div
+                class="explanation-content"
+                :class="{
+                  'is-secondary': section.tone === 'secondary',
+                  'is-risk': section.tone === 'risk',
+                }"
+              >
+                {{ section.body }}
+              </div>
+            </div>
+
+            <div
+              v-if="getCandidateComparisonItems(message).length > 0"
+              class="candidate-comparison-panel"
+            >
+              <div class="explanation-title">候选方案对比</div>
+              <div class="candidate-comparison-list">
+                <div
+                  v-for="candidate in getCandidateComparisonItems(message)"
+                  :key="candidate.id"
+                  class="candidate-comparison-item"
+                  :class="{ 'is-selected': candidate.selected }"
+                >
+                  <div class="candidate-comparison-main">
+                    <div class="candidate-comparison-name">
+                      {{ candidate.name }}
+                      <span v-if="candidate.selected" class="candidate-comparison-badge">本次采用</span>
+                    </div>
+                    <div class="candidate-comparison-meta">{{ candidate.meta }}</div>
+                  </div>
+                  <div class="candidate-comparison-note">{{ candidate.note }}</div>
+                </div>
+              </div>
+            </div>
+
+            <div
+              v-if="getDetailsSummaryItems(message).length > 0 || message.explanation?.details"
+              class="details-panel"
+            >
+              <el-button link size="small" class="details-toggle" @click="toggleDetailExpanded(message)">
+                {{ message.detailExpanded ? '收起明细' : '查看明细' }}
+              </el-button>
+              <div v-if="message.detailExpanded" class="details-summary-list">
+                <div
+                  v-for="item in getDetailsSummaryItems(message)"
+                  :key="item.label"
+                  class="detail-summary-item"
+                >
+                  <span class="detail-summary-label">{{ item.label }}</span>
+                  <span class="detail-summary-value">{{ item.value }}</span>
+                </div>
+
+                <div v-if="message.explanation?.details" class="raw-details-block">
+                  <el-button link size="small" class="raw-details-toggle" @click="toggleRawDetails(message)">
+                    {{ message.rawDetailsExpanded ? '收起原始明细' : '查看原始明细' }}
+                  </el-button>
+                  <pre v-if="message.rawDetailsExpanded" class="details-data">{{ formatDetails(message.explanation?.details) }}</pre>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -56,12 +135,57 @@
 
       <div class="pending-command-body">
         <div class="pending-command-reasoning">{{ pendingCommand.reasoning }}</div>
-        <pre class="pending-command-data">{{ JSON.stringify(pendingCommand.command.data, null, 2) }}</pre>
+        <div v-if="getPendingCommandReasonTags().length" class="reason-tag-row is-panel">
+          <span v-for="tag in getPendingCommandReasonTags()" :key="tag" class="reason-tag">
+            {{ tag }}
+          </span>
+        </div>
+        <div v-if="getPendingCommandDetailItems().length" class="details-summary-list is-panel">
+          <div
+            v-for="item in getPendingCommandDetailItems()"
+            :key="item.label"
+            class="detail-summary-item"
+          >
+            <span class="detail-summary-label">{{ item.label }}</span>
+            <span class="detail-summary-value">{{ item.value }}</span>
+          </div>
+        </div>
       </div>
 
       <div class="pending-command-actions">
         <el-button type="primary" size="small" @click="confirmPendingCommand">确认执行</el-button>
         <el-button size="small" @click="cancelPendingCommand">取消</el-button>
+      </div>
+    </div>
+
+    <div v-if="pendingTargetSelection" class="pending-command-panel">
+      <div class="pending-command-header">
+        <div>
+          <div class="pending-command-title">待确认目标</div>
+          <div class="pending-command-summary">{{ pendingTargetSelection.summary }}</div>
+        </div>
+        <el-tag type="info" effect="light">需选择</el-tag>
+      </div>
+
+      <div class="pending-command-body">
+        <div class="pending-command-reasoning">{{ pendingTargetSelection.reasoning }}</div>
+        <el-radio-group v-model="pendingTargetSelection.selectedItemId" class="target-selection-list">
+          <el-radio
+            v-for="candidate in pendingTargetSelection.candidates"
+            :key="candidate.id"
+            :value="candidate.id"
+            class="target-selection-option"
+          >
+            {{ formatDisplayTimeRange(candidate.startTime, candidate.endTime) }} {{ candidate.programName || candidate.programCode || candidate.id }}
+          </el-radio>
+        </el-radio-group>
+      </div>
+
+      <div class="pending-command-actions">
+        <el-button type="primary" size="small" :disabled="!pendingTargetSelection.selectedItemId" @click="confirmPendingTargetSelection">
+          确认目标
+        </el-button>
+        <el-button size="small" @click="cancelPendingTargetSelection">取消</el-button>
       </div>
     </div>
 
@@ -71,7 +195,20 @@
       </el-button>
     </div>
 
+    <div v-if="activeImportedLayoutName" class="layout-upload-status">
+      <span class="layout-upload-label">当前版面参考</span>
+      <span class="layout-upload-name" :title="activeImportedLayoutName">{{ activeImportedLayoutName }}</span>
+      <el-button link size="small" class="layout-upload-clear" @click="clearImportedLayout">清除</el-button>
+    </div>
+
     <div class="input-area">
+      <input
+        ref="layoutFileInput"
+        type="file"
+        accept=".xls,.xlsx"
+        class="layout-file-input"
+        @change="handleLayoutFileChange"
+      >
       <el-input
         v-model="inputMessage"
         type="textarea"
@@ -79,6 +216,14 @@
         placeholder="例如：在9点插入节目看东方，或把22点的节目向后移动1小时"
         @keydown.enter.prevent="handlePrimaryAction"
       />
+      <el-button
+        :loading="uploadingLayout"
+        :disabled="props.isOrchestrating"
+        class="layout-upload-button"
+        @click="openLayoutUpload"
+      >
+        <el-icon><UploadFilled /></el-icon>
+      </el-button>
       <el-button
         :type="props.isOrchestrating ? 'danger' : 'primary'"
         :disabled="props.isOrchestrating ? !props.canInterrupt : !inputMessage.trim() || loading"
@@ -95,12 +240,13 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ChatDotRound, Promotion } from '@element-plus/icons-vue'
+import { ChatDotRound, Promotion, UploadFilled } from '@element-plus/icons-vue'
 import type { ChatMessage } from '@/types/llm'
 import type {
   ExplanationResult,
   OrchestrationCommand,
   PlanningLogEntry,
+  PlanningSession,
   TaskMode,
 } from '@/types/orchestration'
 import { getCommandExecutor } from '@/services/commandExecutor'
@@ -113,8 +259,17 @@ import { getEntityLinker } from '@/services/entityLinker'
 import { getCandidateService } from '@/services/candidateService'
 import { getCandidateSelectionService } from '@/services/candidateSelectionService'
 import { getInsertCommandExecutor } from '@/services/insertCommandExecutor'
+import { getReplaceCommandExecutor } from '@/services/replaceCommandExecutor'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
-import { getOrchestrationDemoColumn } from '@/mock/orchestrationMock'
+import { getScheduleTargetResolver } from '@/services/scheduleTargetResolver'
+import { getLayoutImportService } from '@/services/layoutImportService'
+import {
+  clearRuntimeLayout,
+  getEffectiveColumnDefinition,
+  getEffectiveLayoutReference,
+  getRuntimeLayoutEntry,
+  setRuntimeLayout,
+} from '@/services/orchestration/runtimeLayoutRegistry'
 
 type ProcessType =
   | 'planning'
@@ -130,6 +285,31 @@ interface Message extends ChatMessage {
   processType?: ProcessType
   processTypeLabel?: string
   expanded?: boolean
+  thinking?: string
+  reasonTags?: string[]
+  detailExpanded?: boolean
+  rawDetailsExpanded?: boolean
+  mergeKey?: string
+  mergeKind?: 'idea' | 'query_request' | 'query_result' | 'selection' | 'execution' | 'other'
+}
+
+interface DetailSummaryItem {
+  label: string
+  value: string
+}
+
+interface ExplanationSection {
+  title: string
+  body: string
+  tone?: 'default' | 'secondary' | 'risk'
+}
+
+interface CandidateComparisonItem {
+  id: string
+  name: string
+  meta: string
+  note: string
+  selected: boolean
 }
 
 interface PendingCommandState {
@@ -137,6 +317,22 @@ interface PendingCommandState {
   summary: string
   reasoning: string
   details?: Record<string, any>
+}
+
+interface PendingTargetSelectionState {
+  action: 'delete' | 'move' | 'replace'
+  summary: string
+  reasoning: string
+  targetTime: string
+  programName?: string
+  candidates: SchedulePreviewItem[]
+  selectedItemId: string | null
+  moveConfig?: {
+    direction: 'forward' | 'backward'
+    offsetSeconds: number
+  }
+  replaceProgramName?: string
+  resolutionDetails?: Record<string, any>
 }
 
 interface SchedulePreviewItem {
@@ -156,6 +352,7 @@ interface Props {
   date: string
   gapCount?: number
   orchestrationLogs?: PlanningLogEntry[]
+  orchestrationSession?: PlanningSession | null
   isOrchestrating?: boolean
   canInterrupt?: boolean
 }
@@ -172,9 +369,12 @@ const messages = ref<Message[]>([])
 const inputMessage = ref('')
 const loading = ref(false)
 const messagesContainer = ref<HTMLElement>()
+const layoutFileInput = ref<HTMLInputElement>()
 const pendingCommand = ref<PendingCommandState | null>(null)
+const pendingTargetSelection = ref<PendingTargetSelectionState | null>(null)
 const commandExecutor = getCommandExecutor()
 const insertCommandExecutor = getInsertCommandExecutor()
+const replaceCommandExecutor = getReplaceCommandExecutor()
 const scheduleCommandBus = getScheduleCommandBus()
 const llmClient = getLLMClient()
 const taskClassifier = getTaskClassifier(llmClient)
@@ -183,9 +383,15 @@ const paramExtractor = getParamExtractor(llmClient)
 const entityLinker = getEntityLinker()
 const candidateService = getCandidateService()
 const candidateSelectionService = getCandidateSelectionService(llmClient)
+const scheduleTargetResolver = getScheduleTargetResolver(llmClient)
+const layoutImportService = getLayoutImportService()
 const displayedLogIds = ref<string[]>([])
+const lastSummarySessionId = ref('')
+const uploadingLayout = ref(false)
+const activeImportedLayoutName = ref('')
 const MAX_DISPLAYED_LOG_IDS = 60
 const MAX_MESSAGE_COUNT = 40
+const MAX_RUNTIME_PROGRESS_MESSAGES = 24
 
 const quickActions = [
   { label: '全天编排', prompt: '帮我填充全天节目' },
@@ -198,6 +404,112 @@ const quickActions = [
 const applyQuickAction = (prompt: string) => {
   inputMessage.value = prompt
   void sendMessage()
+}
+
+const syncImportedLayoutState = () => {
+  activeImportedLayoutName.value = getRuntimeLayoutEntry(props.channelId, props.date)?.sourceFileName ?? ''
+}
+
+const openLayoutUpload = () => {
+  layoutFileInput.value?.click()
+}
+
+const clearImportedLayout = () => {
+  clearRuntimeLayout(props.channelId, props.date)
+  getCandidateService().clearCache()
+  syncImportedLayoutState()
+  messages.value.push(buildAssistantMessage({
+    content: '已清除当前上传版面，后续编排会回退到默认版面参考。',
+    processType: 'planning',
+    processTypeLabel: '版面参考',
+    explanation: {
+      type: 'command',
+      targetId: `layout-cleared-${Date.now()}`,
+      explanation: '已移除本轮运行时版面参考，后续会继续使用系统默认版面。',
+      details: {
+        summaryKind: 'layout_import',
+        action: 'clear',
+        channelId: props.channelId,
+        date: props.date,
+      },
+    },
+  }))
+}
+
+const handleLayoutFileChange = async (event: Event) => {
+  const target = event.target as HTMLInputElement | null
+  const file = target?.files?.[0]
+  if (!file || uploadingLayout.value) {
+    if (target) target.value = ''
+    return
+  }
+
+  uploadingLayout.value = true
+  try {
+    const imported = await layoutImportService.importFile(file, props.channelId, props.date)
+    setRuntimeLayout(imported)
+    getCandidateService().clearCache()
+    syncImportedLayoutState()
+    const importTargetLabel = imported.matchedColumnLabel || imported.matchedWeekdayLabel || imported.matchedSheetName
+    const importScopeText = imported.matchedWeekdayLabel && importTargetLabel
+      ? `当前编排单为${imported.matchedWeekdayLabel}，已自动采用“${importTargetLabel}”数据。`
+      : imported.matchedSheetName
+        ? `已按工作表“${imported.matchedSheetName}”导入当前日期版面。`
+        : '后续编排将优先参考该版面。'
+    const importExplanation = imported.templateMode === 'weekday_columns'
+      ? `已按当前编排单日期命中 ${imported.matchedWeekdayLabel || '对应星期'}，并采用“${importTargetLabel || '当前星期列'}”生成当天版面。`
+      : imported.templateMode === 'visual_weekday_grid'
+        ? `已按当前编排单日期命中 ${imported.matchedWeekdayLabel || '对应星期'}，并从该星期列的可视化版面块中提取出当天版面。`
+      : imported.templateMode === 'weekday_sheet'
+        ? `已按当前编排单日期命中对应星期工作表“${imported.matchedSheetName || importTargetLabel || '当前工作表'}”，并将其注册为当天版面。`
+        : '未识别到对应星期列，已按单表版面导入当前日期数据。'
+
+    messages.value.push(buildAssistantMessage({
+      content: `已导入版面《${imported.sourceFileName}》，${importScopeText}`,
+      processType: 'planning',
+      processTypeLabel: '版面参考',
+      explanation: {
+        type: 'command',
+        targetId: `layout-import-${Date.now()}`,
+        explanation: importExplanation,
+        details: {
+          summaryKind: 'layout_import',
+          fileName: imported.sourceFileName,
+          templateMode: imported.templateMode,
+          matchedSheetName: imported.matchedSheetName,
+          matchedWeekdayLabel: imported.matchedWeekdayLabel,
+          matchedColumnLabel: imported.matchedColumnLabel,
+          slotCount: imported.layoutReference.slots.length,
+          columnCount: imported.columns.length,
+          sequentialColumnCount: imported.columns.filter((column) => column.isSequential).length,
+          warnings: imported.warnings,
+        },
+      },
+    }))
+
+    ElMessage.success(`版面文件已导入${imported.matchedWeekdayLabel ? `，已命中${imported.matchedWeekdayLabel}` : ''}`)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '版面文件导入失败'
+    messages.value.push(buildAssistantMessage({
+      content: `版面导入失败：${message}`,
+      processType: 'error',
+      processTypeLabel: '版面导入',
+      explanation: {
+        type: 'command',
+        targetId: `layout-import-error-${Date.now()}`,
+        explanation: '文件未能成功解析为版面参考，请检查表头、时间列和工作表内容。',
+        details: {
+          summaryKind: 'layout_import',
+          fileName: file.name,
+          error: message,
+        },
+      },
+    }))
+    ElMessage.error(message)
+  } finally {
+    uploadingLayout.value = false
+    if (target) target.value = ''
+  }
 }
 
 const handlePrimaryAction = async () => {
@@ -214,6 +526,10 @@ const handlePrimaryAction = async () => {
 const sendMessage = async () => {
   const content = inputMessage.value.trim()
   if (!content || loading.value) return
+
+  // 新用户命令到来时，先清理上一次遗留的确认态，避免旧面板和新执行结果叠在一起
+  pendingCommand.value = null
+  pendingTargetSelection.value = null
 
   messages.value.push({ role: 'user', content })
   inputMessage.value = ''
@@ -236,40 +552,59 @@ const sendMessage = async () => {
 
     if (classification.mode === 'micro_edit') {
       const result = await buildMicroEditCommand(content, classification.reasoning)
+      if (result.pendingTargetSelection) {
+        messages.value.push(buildAssistantMessage({
+          content: result.message || '我找到了多个可能的目标，请先确认具体要操作的节目。',
+          thinking: result.thinking,
+          explanation: result.explanation
+            ? {
+                type: 'command',
+                targetId: 'pending-target-selection',
+                explanation: result.explanation,
+                details: result.details,
+              }
+            : undefined,
+          processType: 'selection',
+          processTypeLabel: '待确认',
+        }))
+        pendingTargetSelection.value = result.pendingTargetSelection
+        return
+      }
       if (!result.command) {
-        messages.value.push({
-          role: 'assistant',
+        messages.value.push(buildAssistantMessage({
           content: result.message || '已识别为局部修改，但暂时无法稳定生成命令。',
+          thinking: result.thinking,
           processType: 'general',
-          processTypeLabel: '任务识别',
-          expanded: false,
-        })
+          processTypeLabel: '未执行',
+        }))
         return
       }
 
       if (requiresConfirmation(result.command)) {
+        messages.value.push(buildAssistantMessage({
+          content: result.message || '请确认后执行本次修改。',
+          thinking: result.thinking,
+          explanation: result.explanation
+            ? {
+                type: 'command',
+                targetId: 'pending-command',
+                explanation: result.explanation,
+                details: result.details,
+              }
+            : undefined,
+          processType: 'execution',
+          processTypeLabel: '待确认',
+        }))
         pendingCommand.value = {
           command: result.command,
           summary: summarizeCommand(result.command),
           reasoning: result.explanation || classification.reasoning,
           details: result.details,
         }
-        messages.value.push({
-          role: 'assistant',
-          content: result.message || '已生成高风险修改，请在下方确认区确认后执行。',
-          explanation: {
-            type: 'command',
-            targetId: 'preview',
-            explanation: result.explanation || classification.reasoning,
-            details: result.details,
-          },
-          processType: 'execution',
-          processTypeLabel: '待确认',
-          expanded: false,
-        })
       } else {
         await executeCommand(result.command, {
           successMessage: result.message || `${summarizeCommand(result.command)}，已直接执行。`,
+          thinking: result.thinking,
           explanation: result.explanation || classification.reasoning,
           details: result.details,
         })
@@ -278,8 +613,7 @@ const sendMessage = async () => {
     }
 
     if (classification.mode === 'full_generate' || classification.mode === 'partial_generate') {
-      messages.value.push({
-        role: 'assistant',
+      messages.value.push(buildAssistantMessage({
         content:
           classification.mode === 'full_generate'
             ? '已识别为全天编排需求，正在准备启动编排流程。'
@@ -292,8 +626,7 @@ const sendMessage = async () => {
         processType: 'planning',
         processTypeLabel:
           classification.mode === 'full_generate' ? '任务识别' : '任务识别',
-        expanded: false,
-      })
+      }))
       const latestMessage = messages.value[messages.value.length - 1]
       if (latestMessage) {
         latestMessage.content =
@@ -326,8 +659,7 @@ const sendMessage = async () => {
         channelId: props.channelId,
       })
 
-      messages.value.push({
-        role: 'assistant',
+      messages.value.push(buildAssistantMessage({
         content: report.isValid
           ? '当前节目单校验通过，未发现严重问题。'
           : `校验完成，发现 ${report.summary.totalIssues} 个问题，其中严重问题 ${report.summary.criticalCount} 个。`,
@@ -342,13 +674,11 @@ const sendMessage = async () => {
         },
         processType: 'validation',
         processTypeLabel: '校验结果',
-        expanded: false,
-      })
+      }))
       return
     }
 
-      messages.value.push({
-        role: 'assistant',
+      messages.value.push(buildAssistantMessage({
         content:
           classification.mode === 'clarify'
             ? '我还不能完全确定你的目标。你可以直接说“全天编排”“补齐空窗”或“在9点插入节目看东方”。'
@@ -360,16 +690,13 @@ const sendMessage = async () => {
       },
       processType: 'general',
       processTypeLabel: '任务识别',
-      expanded: false,
-    })
+    }))
   } catch (error) {
-    messages.value.push({
-      role: 'assistant',
+    messages.value.push(buildAssistantMessage({
       content: error instanceof Error ? error.message : 'AI 请求失败，请稍后重试。',
       processType: 'error',
       processTypeLabel: '执行异常',
-      expanded: false,
-    })
+    }))
   } finally {
     loading.value = false
     await scrollToBottom()
@@ -382,8 +709,10 @@ const buildMicroEditCommand = async (
 ): Promise<{
   command: OrchestrationCommand | null
   message?: string
+  thinking?: string
   explanation?: string
   details?: Record<string, any>
+  pendingTargetSelection?: PendingTargetSelectionState
 }> => {
   const context = buildDialogueContext({
     scheduleState: {
@@ -406,6 +735,7 @@ const buildMicroEditCommand = async (
       return {
         command: null,
         message: '已识别为插入节目，但还不能稳定提取时间和节目名。建议使用“在9点插入节目看东方”。',
+        thinking: '我把你的要求理解为插入节目，但当前还不能稳定定位目标时间和节目名称。',
       }
     }
 
@@ -413,6 +743,7 @@ const buildMicroEditCommand = async (
     const candidates = await candidateService.searchPrograms({
       channelId: query.searchParams.channelId,
       programName: query.searchParams.programName,
+      columnId: resolveColumnIdByTime(params.targetTime),
       limit: 5,
     })
 
@@ -420,6 +751,7 @@ const buildMicroEditCommand = async (
       return {
         command: null,
         message: `没有检索到“${params.programName}”的可用节目，请确认节目名或频道。`,
+        thinking: `我把你的要求理解为“在 ${params.targetTime} 插入《${params.programName}》”，并按当前频道检索了候选节目。`,
       }
     }
 
@@ -435,9 +767,29 @@ const buildMicroEditCommand = async (
     const warningText =
       preview.warnings.length > 0 ? ` 风险提示：${preview.warnings.join('；')}` : ''
 
+    if (!preview.canExecute) {
+      return {
+        command: null,
+        message: `目标时间 ${params.targetTime} 已有节目占用，请先删除、替换，或换一个空闲时间点。`,
+        thinking: `我把你的要求理解为“在 ${params.targetTime} 插入《${selection.selectedCandidate.programName}》”，并先检查了当前时段占用情况。`,
+        explanation:
+          `${classificationReasoning} ${intent.reasoning} ` +
+          `已定位到候选节目《${selection.selectedCandidate.programName}》，但当前时段存在节目冲突，因此本次不直接执行插入。` +
+          `${warningText}`,
+        details: {
+          queryCommand: query.queryCommand,
+          selectedCandidate: selection.selectedCandidate,
+          candidateOptions: candidates.slice(0, 3),
+          selectionReason: selection.reasoning,
+          preview,
+        },
+      }
+    }
+
     return {
       command,
-      message: `已定位到候选节目《${selection.selectedCandidate.programName}》，准备插入到 ${params.targetTime}。`,
+      message: `已在 ${params.targetTime} 插入《${selection.selectedCandidate.programName}》。`,
+      thinking: `我把你的要求理解为“在 ${params.targetTime} 插入《${params.programName}》”，并在当前频道候选中找到了最匹配的节目。`,
       explanation:
         `${classificationReasoning} ${intent.reasoning} ` +
         `检索条件为频道=${props.channelName}、节目名=${params.programName}。` +
@@ -445,6 +797,8 @@ const buildMicroEditCommand = async (
       details: {
         queryCommand: query.queryCommand,
         selectedCandidate: selection.selectedCandidate,
+        candidateOptions: candidates.slice(0, 3),
+        selectionReason: selection.reasoning,
         preview,
       },
     }
@@ -456,16 +810,57 @@ const buildMicroEditCommand = async (
       return {
         command: null,
         message: '已识别为删除节目，但还不能稳定提取目标时间。建议使用“删除12点的午间30”。',
+        thinking: '我把你的要求理解为删除已编排节目，但当前还不能稳定定位目标时间。',
       }
     }
 
-    const targetItem = findScheduleItemForDelete(props.currentSchedule, params.targetTime, params.programName)
-    if (!targetItem) {
+    const resolution = await scheduleTargetResolver.resolve({
+      userInput,
+      action: 'delete',
+      channelName: props.channelName,
+      date: props.date,
+      targetTime: params.targetTime,
+      programName: params.programName,
+      items: props.currentSchedule,
+    })
+    if (resolution.status !== 'unique' || !resolution.selectedItem) {
+      if (resolution.status === 'multiple') {
+        return {
+          command: null,
+          message: `在 ${params.targetTime} 附近找到了多个可能的节目，请在下方选择具体目标。`,
+          thinking: `我把你的要求理解为“删除 ${params.targetTime} 的${params.programName || '节目'}”，但当前时间附近存在多个候选目标。`,
+          explanation: `${classificationReasoning} ${intent.reasoning}`,
+          details: {
+            targetTime: params.targetTime,
+            programName: params.programName,
+            targetResolution: {
+              status: resolution.status,
+              reasoning: resolution.reasoning,
+              matchedBy: resolution.matchedBy,
+              candidates: resolution.candidates,
+            },
+          },
+          pendingTargetSelection: {
+            action: 'delete',
+            summary: `请选择 ${params.targetTime} 要删除的节目`,
+            reasoning: resolution.reasoning,
+            targetTime: params.targetTime,
+            programName: params.programName,
+            candidates: resolution.candidates,
+            selectedItemId: null,
+            resolutionDetails: {
+              matchedBy: resolution.matchedBy,
+            },
+          },
+        }
+      }
       return {
         command: null,
         message: `没有找到 ${params.targetTime} 附近可删除的节目，请确认时间点或节目名。`,
+        thinking: `我把你的要求理解为“删除 ${params.targetTime} 的${params.programName || '节目'}”，并在当前编排单中尝试定位目标。`,
       }
     }
+    const targetItem = resolution.selectedItem
 
     const command: OrchestrationCommand = {
       action: 'delete',
@@ -477,12 +872,19 @@ const buildMicroEditCommand = async (
 
     return {
       command,
-      message: `已定位到 ${params.targetTime} 对应节目《${targetItem.programName || targetItem.programCode || targetItem.id}》，准备删除。`,
+      message: `将删除 ${params.targetTime} 的《${targetItem.programName || targetItem.programCode || targetItem.id}》。`,
+      thinking: `我把你的要求理解为“删除 ${params.targetTime} 的${params.programName || '节目'}”，并在当前编排单里定位到了唯一目标。`,
       explanation: `${classificationReasoning} ${intent.reasoning}`,
       details: {
         targetTime: params.targetTime,
         programName: params.programName,
         matchedItem: targetItem,
+        targetResolution: {
+          status: resolution.status,
+          reasoning: resolution.reasoning,
+          matchedBy: resolution.matchedBy,
+          candidates: resolution.candidates,
+        },
       },
     }
   }
@@ -493,16 +895,60 @@ const buildMicroEditCommand = async (
       return {
         command: null,
         message: '已识别为移动节目，但还不能稳定提取目标时间和移动时长。建议使用“把22点的节目向后移动1小时”。',
+        thinking: '我把你的要求理解为移动已编排节目，但当前还不能稳定提取目标时间或移动幅度。',
       }
     }
 
-    const targetItem = findScheduleItemForMove(props.currentSchedule, params.targetTime)
-    if (!targetItem) {
+    const resolution = await scheduleTargetResolver.resolve({
+      userInput,
+      action: 'move',
+      channelName: props.channelName,
+      date: props.date,
+      targetTime: params.targetTime,
+      items: props.currentSchedule,
+    })
+    if (resolution.status !== 'unique' || !resolution.selectedItem) {
+      if (resolution.status === 'multiple') {
+        return {
+          command: null,
+          message: `在 ${params.targetTime} 附近找到了多个可能的节目，请在下方选择具体目标。`,
+          thinking: `我把你的要求理解为“移动 ${params.targetTime} 的节目”，但当前时间附近存在多个候选目标。`,
+          explanation: `${classificationReasoning} ${intent.reasoning}`,
+          details: {
+            targetTime: params.targetTime,
+            direction: params.direction,
+            offsetSeconds: params.offsetSeconds,
+            targetResolution: {
+              status: resolution.status,
+              reasoning: resolution.reasoning,
+              matchedBy: resolution.matchedBy,
+              candidates: resolution.candidates,
+            },
+          },
+          pendingTargetSelection: {
+            action: 'move',
+            summary: `请选择 ${params.targetTime} 要移动的节目`,
+            reasoning: resolution.reasoning,
+            targetTime: params.targetTime,
+            candidates: resolution.candidates,
+            selectedItemId: null,
+            moveConfig: {
+              direction: params.direction,
+              offsetSeconds: params.offsetSeconds,
+            },
+            resolutionDetails: {
+              matchedBy: resolution.matchedBy,
+            },
+          },
+        }
+      }
       return {
         command: null,
         message: `没有找到 ${params.targetTime} 附近可移动的节目，请确认目标时间点。`,
+        thinking: `我把你的要求理解为“移动 ${params.targetTime} 的节目”，并在当前编排单中尝试定位目标。`,
       }
     }
+    const targetItem = resolution.selectedItem
 
     const originalStart = normalizeDateTime(props.date, targetItem.startTime)
     const delta = params.direction === 'forward' ? params.offsetSeconds : -params.offsetSeconds
@@ -518,11 +964,18 @@ const buildMicroEditCommand = async (
 
     return {
       command,
-      message: `已定位到节目《${targetItem.programName || targetItem.programCode || targetItem.id}》，准备调整开始时间。`,
+      message: `已将《${targetItem.programName || targetItem.programCode || targetItem.id}》${params.direction === 'forward' ? '向后' : '向前'}移动 ${formatOffset(params.offsetSeconds)}。`,
+      thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目${params.direction === 'forward' ? '向后' : '向前'}移动 ${formatOffset(params.offsetSeconds)}”，并定位到了唯一目标。`,
       explanation: `${classificationReasoning} ${intent.reasoning}`,
       details: {
         targetTime: params.targetTime,
         matchedItem: targetItem,
+        targetResolution: {
+          status: resolution.status,
+          reasoning: resolution.reasoning,
+          matchedBy: resolution.matchedBy,
+          candidates: resolution.candidates,
+        },
         direction: params.direction,
         offsetSeconds: params.offsetSeconds,
         newStartTime,
@@ -537,20 +990,61 @@ const buildMicroEditCommand = async (
         command: null,
         message:
           '已识别为替换节目，但还不能稳定提取目标时间和替换节目名。建议使用“把10点的节目换成中国考古报道”。',
+        thinking: '我把你的要求理解为替换已编排节目，但当前还不能稳定提取目标时间或替换目标。',
       }
     }
 
-    const targetItem = findScheduleItemForMove(props.currentSchedule, params.targetTime)
-    if (!targetItem) {
+    const resolution = await scheduleTargetResolver.resolve({
+      userInput,
+      action: 'replace',
+      channelName: props.channelName,
+      date: props.date,
+      targetTime: params.targetTime,
+      items: props.currentSchedule,
+    })
+    if (resolution.status !== 'unique' || !resolution.selectedItem) {
+      if (resolution.status === 'multiple') {
+        return {
+          command: null,
+          message: `在 ${params.targetTime} 附近找到了多个可能的节目，请在下方选择具体目标。`,
+          thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，但当前时间附近存在多个候选目标。`,
+          explanation: `${classificationReasoning} ${intent.reasoning}`,
+          details: {
+            targetTime: params.targetTime,
+            replacementProgramName: params.programName,
+            targetResolution: {
+              status: resolution.status,
+              reasoning: resolution.reasoning,
+              matchedBy: resolution.matchedBy,
+              candidates: resolution.candidates,
+            },
+          },
+          pendingTargetSelection: {
+            action: 'replace',
+            summary: `请选择 ${params.targetTime} 要替换的节目`,
+            reasoning: resolution.reasoning,
+            targetTime: params.targetTime,
+            candidates: resolution.candidates,
+            selectedItemId: null,
+            replaceProgramName: params.programName,
+            resolutionDetails: {
+              matchedBy: resolution.matchedBy,
+            },
+          },
+        }
+      }
       return {
         command: null,
         message: `没有找到 ${params.targetTime} 附近可替换的节目，请确认目标时间点。`,
+        thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，并在当前编排单中尝试定位目标。`,
       }
     }
+    const targetItem = resolution.selectedItem
 
     const candidates = await candidateService.searchPrograms({
       channelId: props.channelId,
       programName: params.programName,
+      columnId: resolveItemColumnId(targetItem),
       limit: 5,
     })
 
@@ -558,6 +1052,7 @@ const buildMicroEditCommand = async (
       return {
         command: null,
         message: `没有检索到“${params.programName}”的可用节目，请确认节目名。`,
+        thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，并先检索了可替换候选。`,
       }
     }
 
@@ -571,74 +1066,55 @@ const buildMicroEditCommand = async (
       },
     }
 
+    const preview = replaceCommandExecutor.preview(command)
+    const warningText =
+      preview.warnings.length > 0 ? ` 风险提示：${preview.warnings.join('；')}` : ''
+
+    if (!preview.canExecute) {
+      return {
+        command: null,
+        message: `替换后的节目时段会与现有编排冲突，当前无法执行替换。`,
+        thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，并先检查了替换后的时间占用情况。`,
+        explanation:
+          `${classificationReasoning} ${intent.reasoning} 已根据频道=${props.channelName}、节目名=${params.programName} 检索候选，但替换后时段会与现有节目重叠。` +
+          `${warningText}`,
+        details: {
+          targetTime: params.targetTime,
+          matchedItem: targetItem,
+          selectedCandidate,
+          candidateOptions: candidates.slice(0, 3),
+          preview,
+        },
+      }
+    }
+
     return {
       command,
-      message: `已定位到 ${params.targetTime} 对应节目，准备替换为《${selectedCandidate.programName}》。`,
+      message: `将把 ${params.targetTime} 的节目替换为《${selectedCandidate.programName}》。`,
+      thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，并完成了目标定位和替换候选检索。`,
       explanation:
-        `${classificationReasoning} ${intent.reasoning} 已根据频道=${props.channelName}、节目名=${params.programName} 检索候选并选中最匹配节目。`,
+        `${classificationReasoning} ${intent.reasoning} 已根据频道=${props.channelName}、节目名=${params.programName} 检索候选并选中最匹配节目。${warningText}`,
       details: {
         targetTime: params.targetTime,
         matchedItem: targetItem,
+        targetResolution: {
+          status: resolution.status,
+          reasoning: resolution.reasoning,
+          matchedBy: resolution.matchedBy,
+          candidates: resolution.candidates,
+        },
         selectedCandidate,
+        candidateOptions: candidates.slice(0, 3),
       },
     }
   }
 
-  const command = await buildFallbackCommandWithLLM(userInput)
   return {
-    command,
-    message: command ? '已根据你的要求生成修改命令。' : undefined,
+    command: null,
+    message: '我还不能稳定理解这条修改指令，请尽量明确时间点、节目名称和操作类型。',
+    thinking: '我先按当前编排单和你的自然语言要求进行了理解，但这条指令还不足以安全落成原子操作。',
     explanation: classificationReasoning,
   }
-}
-
-const findScheduleItemForMove = (
-  items: SchedulePreviewItem[],
-  targetTime: string,
-): SchedulePreviewItem | null => {
-  const exactStart = items.find((item) => normalizeClockText(item.startTime) === targetTime)
-  if (exactStart) return exactStart
-
-  const targetSeconds = timeToSeconds(targetTime)
-  const covering = items.find((item) => {
-    const start = timeToSeconds(normalizeClockText(item.startTime))
-    const end = timeToSeconds(normalizeClockText(item.endTime))
-    return start <= targetSeconds && targetSeconds < end
-  })
-  if (covering) return covering
-
-  const sameHour = items.find(
-    (item) => normalizeClockText(item.startTime).slice(0, 2) === targetTime.slice(0, 2),
-  )
-  if (sameHour) return sameHour
-
-  return null
-}
-
-const findScheduleItemForDelete = (
-  items: SchedulePreviewItem[],
-  targetTime: string,
-  programName?: string,
-): SchedulePreviewItem | null => {
-  const byTime = findScheduleItemForMove(items, targetTime)
-  if (!programName) {
-    return byTime
-  }
-
-  const normalizedProgramName = programName.replace(/\s+/g, '').toLowerCase()
-  const matchedByName = items.find((item) => {
-    const itemName = (item.programName || item.programCode || '').replace(/\s+/g, '').toLowerCase()
-    const sameTime = normalizeClockText(item.startTime) === targetTime
-      || (() => {
-        const targetSeconds = timeToSeconds(targetTime)
-        const start = timeToSeconds(normalizeClockText(item.startTime))
-        const end = timeToSeconds(normalizeClockText(item.endTime))
-        return start <= targetSeconds && targetSeconds < end
-      })()
-    return sameTime && itemName.includes(normalizedProgramName)
-  })
-
-  return matchedByName || null
 }
 
 const normalizeClockText = (timeText: string): string => {
@@ -657,6 +1133,45 @@ const formatDisplayTimeRange = (startTime: string, endTime?: string): string => 
   const start = formatDisplayTime(startTime)
   if (!endTime) return start
   return `${start}到${formatDisplayTime(endTime)}`
+}
+
+const timeToSeconds = (value?: string): number | null => {
+  if (!value) return null
+  const normalized = normalizeClockText(value)
+  const [hours = 0, minutes = 0, seconds = 0] = normalized.split(':').map(Number)
+  if ([hours, minutes, seconds].some((part) => Number.isNaN(part))) {
+    return null
+  }
+  return hours * 3600 + minutes * 60 + seconds
+}
+
+const resolveColumnIdByTime = (targetTime?: string): string | undefined => {
+  const targetSeconds = timeToSeconds(targetTime)
+  if (targetSeconds === null) return undefined
+
+  const layout = getEffectiveLayoutReference(props.channelId, props.date)
+  const matchedSlot = layout?.slots.find((slot) => {
+    const startSeconds = timeToSeconds(slot.startTime)
+    const endSeconds = timeToSeconds(slot.endTime)
+    if (startSeconds === null || endSeconds === null) return false
+    return targetSeconds >= startSeconds && targetSeconds < endSeconds
+  })
+
+  return matchedSlot?.columnId
+}
+
+const resolveItemColumnId = (item?: SchedulePreviewItem | null): string | undefined => {
+  if (!item) return undefined
+  const record = item as Record<string, any>
+
+  if (typeof record.keySlot === 'string' && record.keySlot.trim()) {
+    return record.keySlot
+  }
+  if (typeof record.columnId === 'string' && record.columnId.trim()) {
+    return record.columnId
+  }
+
+  return typeof record.startTime === 'string' ? resolveColumnIdByTime(record.startTime) : undefined
 }
 
 const sanitizeDetails = (value: unknown): unknown => {
@@ -687,6 +1202,904 @@ const sanitizeDetails = (value: unknown): unknown => {
 
 const formatDetails = (details: Record<string, any>) => JSON.stringify(sanitizeDetails(details), null, 2)
 
+const getMessageDetails = (message: Message): Record<string, any> | undefined =>
+  message.explanation?.details as Record<string, any> | undefined
+
+const normalizeDecisionExplanation = (text?: string): string | undefined => {
+  if (!text) return undefined
+
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/^我把你的要求理解为/, '已理解为')
+    .replace(/^我已根据你确认的目标节目继续/, '已根据你确认的目标继续')
+    .replace(/^我已根据你确认的修改目标和风险提示继续执行本次操作。$/, '已根据你的确认结果继续执行本次操作。')
+    .replace(/^我已根据你的选择停止/, '已按你的选择停止')
+    .replace(/^我已停止这次目标选择，不会继续执行后续修改。$/, '已停止这次目标选择，不会继续执行后续修改。')
+    .replace(/^我尝试根据/, '已尝试根据')
+    .replace(/^我先按/, '已先按')
+    .replace(/^我已根据你选择的目标节目继续完成移动操作。$/, '已根据你确认的目标完成这次移动操作。')
+    .trim()
+}
+
+const formatProgramLabel = (value: unknown): string => {
+  if (!value || typeof value !== 'object') return ''
+  const item = value as Record<string, any>
+  const name = item.programName || item.instanceName || item.programCode || item.id
+  if (!name) return ''
+  if (typeof item.startTime === 'string') {
+    return `${name}（${formatDisplayTimeRange(item.startTime, typeof item.endTime === 'string' ? item.endTime : undefined)}）`
+  }
+  return String(name)
+}
+
+const formatProgramTypeLabel = (value?: string): string => {
+  const mapping: Record<string, string> = {
+    news: '新闻',
+    news_magazine: '新闻杂志',
+    current_affairs: '时政',
+    drama: '剧场',
+    kids: '少儿',
+    health: '健康',
+    entertainment: '娱乐',
+    commentary: '评论',
+    lifestyle: '生活',
+    movie: '电影',
+  }
+
+  return value ? (mapping[value] ?? value) : ''
+}
+
+const formatCandidateDuration = (duration?: number): string => {
+  if (typeof duration !== 'number' || duration <= 0) return ''
+  if (duration % 3600 === 0) return `${duration / 3600}小时`
+  if (duration % 60 === 0) return `${duration / 60}分钟`
+  return `${duration}秒`
+}
+
+const formatSequenceLabel = (candidate: Record<string, any>): string => {
+  const sequenceNo = typeof candidate.sequenceNo === 'number'
+    ? candidate.sequenceNo
+    : typeof candidate.issueNo === 'string' && Number.isFinite(Number(candidate.issueNo))
+      ? Number(candidate.issueNo)
+      : null
+  if (sequenceNo === null) return ''
+
+  if (typeof candidate.programType === 'string' && candidate.programType.includes('drama')) {
+    return `第${sequenceNo}集`
+  }
+
+  return `第${sequenceNo}期`
+}
+
+const formatSelectionModeLabel = (value?: string): string => {
+  if (value === 'sequential') return '顺播推荐'
+  if (value === 'rerun') return '重播候选'
+  return '匹配候选'
+}
+
+const buildCandidateComparisonNote = (
+  candidate: Record<string, any>,
+  selected: boolean,
+  fallbackSelectionReason: string,
+): string => {
+  const selectionMode = typeof candidate.selectionMode === 'string' ? candidate.selectionMode : 'default'
+  const explicitNote = normalizeDecisionExplanation(
+    typeof candidate.selectionNote === 'string' ? candidate.selectionNote : undefined,
+  )
+
+  if (selected) {
+    return truncateText(explicitNote || fallbackSelectionReason, 40)
+  }
+
+  if (explicitNote) {
+    return truncateText(explicitNote, 36)
+  }
+
+  if (selectionMode === 'sequential') {
+    return '按当前已播进度继续顺播，可作为后续候选。'
+  }
+
+  if (selectionMode === 'rerun') {
+    return '当前栏目不按顺播推进，可作为重播备选。'
+  }
+
+  return '可作为备选方案继续比较'
+}
+
+const formatMatchedBy = (value: unknown): string => {
+  if (!Array.isArray(value)) return ''
+  const labels: Record<string, string> = {
+    time_window: '时间窗口',
+    name_match: '节目名称',
+    llm_nomination: '语义理解',
+    local_safety: '本地校验',
+  }
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => labels[item] ?? item)
+    .join('、')
+}
+
+const formatValidationSummaryText = (value: unknown): string => {
+  if (!value || typeof value !== 'object') return ''
+  const summary = value as {
+    totalIssues?: number
+    criticalCount?: number
+    warningCount?: number
+    infoCount?: number
+  }
+  const total = summary.totalIssues ?? 0
+  if (total <= 0) return '未发现明显问题'
+
+  const parts = [`共 ${total} 个问题`]
+  if ((summary.criticalCount ?? 0) > 0) {
+    parts.push(`严重 ${summary.criticalCount} 个`)
+  }
+  if ((summary.warningCount ?? 0) > 0) {
+    parts.push(`提示 ${summary.warningCount} 个`)
+  }
+  return parts.join('，')
+}
+
+const extractWarnings = (details?: Record<string, any>): string[] => {
+  if (!details) return []
+  const warnings: string[] = []
+  const previewWarnings = Array.isArray(details.preview?.warnings)
+    ? (details.preview.warnings as unknown[]).filter((item): item is string => typeof item === 'string')
+    : []
+  warnings.push(...previewWarnings)
+
+  if (details.preview?.canExecute === false) {
+    warnings.push('预演显示当前方案会与现有编排冲突')
+  }
+
+  if (isNoCandidateCase(details)) {
+    warnings.push('当前条件下没有命中可直接使用的候选节目')
+  }
+
+  if (typeof details.error === 'string' && details.error !== 'No candidates found') {
+    warnings.push(details.error)
+  }
+
+  const validationSummary = details.validationSummary ?? details.summary
+  if (validationSummary?.totalIssues > 0) {
+    warnings.push(`校验仍发现 ${validationSummary.totalIssues} 个问题`)
+  }
+
+  return Array.from(new Set(warnings.filter(Boolean))).slice(0, 3)
+}
+
+const getCandidateComparisonItems = (message: Message): CandidateComparisonItem[] => {
+  const details = getMessageDetails(message)
+  if (!details) return []
+
+  const selectedId = details.selectedCandidate?.id ?? details.selectedCandidateId
+  const selectedName = details.selectedCandidate?.programName ?? details.selectedCandidateName
+  const selectionReason =
+    normalizeDecisionExplanation(
+      typeof details.selectionReason === 'string'
+        ? details.selectionReason
+        : typeof details.targetResolution?.reasoning === 'string'
+          ? details.targetResolution.reasoning
+          : undefined,
+    ) || '更贴合当前时间、类型和约束条件。'
+
+  const rawCandidates = Array.isArray(details.candidateOptions)
+    ? details.candidateOptions
+    : Array.isArray(details.topCandidates)
+      ? details.topCandidates
+      : []
+
+  return rawCandidates
+    .slice(0, 3)
+    .map((candidate, index) => {
+      const item = candidate as Record<string, any>
+      const id = String(item.id ?? item.programCode ?? `candidate-${index}`)
+      const name = String(item.programName ?? item.instanceName ?? item.programCode ?? id)
+      const selected =
+        (typeof selectedId === 'string' && selectedId === id)
+        || (typeof selectedName === 'string' && selectedName === name)
+        || (index === 0 && !selectedId && !selectedName)
+      const sequenceLabel = formatSequenceLabel(item)
+      const selectionModeLabel = formatSelectionModeLabel(
+        typeof item.selectionMode === 'string' ? item.selectionMode : undefined,
+      )
+      const metaParts = [
+        sequenceLabel,
+        formatProgramTypeLabel(typeof item.programType === 'string' ? item.programType : undefined),
+        formatCandidateDuration(typeof item.duration === 'number' ? item.duration : undefined),
+        selectionModeLabel,
+      ].filter(Boolean)
+
+      return {
+        id,
+        name,
+        meta: metaParts.join(' · ') || '可作为当前时段候选',
+        note: buildCandidateComparisonNote(item, selected, selectionReason),
+        selected,
+      }
+    })
+}
+
+const buildDetailsSummary = (
+  details?: Record<string, any>,
+  _processType?: ProcessType,
+): DetailSummaryItem[] => {
+  if (!details) return []
+
+  if (isOrchestrationOverviewDetails(details)) {
+    const items: DetailSummaryItem[] = []
+    const pushItem = (label: string, value?: string) => {
+      const normalized = value?.trim()
+      if (!normalized) return
+      items.push({ label, value: normalized })
+    }
+
+    pushItem('版面来源', typeof details.layoutSourceFileName === 'string' ? details.layoutSourceFileName : '')
+    pushItem('版面时段', typeof details.layoutSlotCount === 'number' ? `${details.layoutSlotCount} 个` : '')
+    pushItem('补排轮次', typeof details.completedGapCount === 'number' ? `${details.completedGapCount} 轮` : '')
+    pushItem('选中节目', typeof details.insertedItemCount === 'number' ? `${details.insertedItemCount} 次` : '')
+    pushItem('实际写入', typeof details.writtenItemCount === 'number' ? `${details.writtenItemCount} 条` : '')
+    pushItem('顺播推进', typeof details.sequentialFillCount === 'number' && details.sequentialFillCount > 0 ? `${details.sequentialFillCount} 次` : '')
+    pushItem('重播补位', typeof details.rerunFillCount === 'number' && details.rerunFillCount > 0 ? `${details.rerunFillCount} 次` : '')
+    pushItem('校验结果', formatValidationSummaryText(details.validationSummary))
+    return items.slice(0, 6)
+  }
+
+  if (isLayoutImportDetails(details)) {
+    const items: DetailSummaryItem[] = []
+    const pushItem = (label: string, value?: string) => {
+      const normalized = value?.trim()
+      if (!normalized) return
+      items.push({ label, value: normalized })
+    }
+
+    pushItem('版面文件', typeof details.fileName === 'string' ? details.fileName : '')
+    pushItem('命中星期', typeof details.matchedWeekdayLabel === 'string' ? details.matchedWeekdayLabel : '')
+    pushItem('命中列', typeof details.matchedColumnLabel === 'string' ? details.matchedColumnLabel : '')
+    pushItem('工作表', typeof details.matchedSheetName === 'string' ? details.matchedSheetName : '')
+    pushItem('版面时段', typeof details.slotCount === 'number' ? `${details.slotCount} 个` : '')
+    pushItem('栏目数量', typeof details.columnCount === 'number' ? `${details.columnCount} 个` : '')
+    pushItem('顺播栏目', typeof details.sequentialColumnCount === 'number' ? `${details.sequentialColumnCount} 个` : '')
+    pushItem(
+      '导入提醒',
+      Array.isArray(details.warnings)
+        ? details.warnings.filter((item: unknown): item is string => typeof item === 'string').join('；')
+        : '',
+    )
+    return items.slice(0, 6)
+  }
+
+  const items: DetailSummaryItem[] = []
+  const pushItem = (label: string, value?: string) => {
+    const normalized = value?.trim()
+    if (!normalized) return
+    if (items.some((item) => item.label === label && item.value === normalized)) return
+    items.push({ label, value: normalized })
+  }
+
+  if (typeof details.targetTime === 'string') {
+    pushItem('目标时间', formatDisplayTime(details.targetTime))
+  }
+
+  pushItem('目标节目', formatProgramLabel(details.matchedItem))
+  pushItem('选中节目', formatProgramLabel(details.selectedCandidate))
+
+  if (!details.selectedCandidate && typeof details.selectedCandidateName === 'string') {
+    pushItem('选中节目', details.selectedCandidateName)
+  }
+
+  const matchedColumn = resolveMatchedColumnInfo(details)
+  pushItem('命中栏目', matchedColumn.columnName)
+  pushItem('栏目ID', matchedColumn.columnId)
+
+  const criteria = details.criteria ?? details.queryCommand?.data?.criteria
+  if (criteria && typeof criteria === 'object') {
+    pushItem('检索条件', buildQueryCriteriaSummary(criteria as Record<string, any>).replace(/^查询：/, ''))
+  }
+
+  if (typeof details.candidateCount === 'number') {
+    pushItem('候选结果', `${details.candidateCount} 个`)
+  }
+
+  const candidateStrategy = (() => {
+    const source = details.selectedCandidate ?? details.candidateOptions?.[0] ?? details.topCandidates?.[0]
+    if (!source || typeof source !== 'object') return ''
+    const item = source as Record<string, any>
+    return formatSelectionModeLabel(typeof item.selectionMode === 'string' ? item.selectionMode : undefined)
+  })()
+  pushItem('候选策略', candidateStrategy)
+
+  if (typeof details.replacementProgramName === 'string') {
+    pushItem('替换目标', details.replacementProgramName)
+  }
+
+  const matchedBy = formatMatchedBy(details.targetResolution?.matchedBy)
+  pushItem('定位依据', matchedBy)
+
+  if (typeof details.targetResolution?.reasoning === 'string') {
+    pushItem('定位结论', truncateText(normalizeDecisionExplanation(details.targetResolution.reasoning) || '', 48))
+  }
+
+  if (typeof details.direction === 'string') {
+    pushItem('调整方向', details.direction === 'forward' ? '向后' : '向前')
+  }
+
+  if (typeof details.offsetSeconds === 'number') {
+    pushItem('调整幅度', formatOffset(details.offsetSeconds))
+  }
+
+  if (typeof details.newStartTime === 'string') {
+    pushItem('新的开始时间', formatDisplayTime(details.newStartTime))
+  }
+
+  const validationSummary = details.validationSummary ?? details.summary
+  pushItem('校验结果', formatValidationSummaryText(validationSummary))
+
+  if (Array.isArray(details.issues) && details.issues.length > 0) {
+    const issueText = (details.issues as Array<{ message?: string }>)
+      .slice(0, 3)
+      .map((item) => item?.message)
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .join('；')
+    pushItem('主要问题', issueText)
+  }
+
+  const warnings = extractWarnings(details)
+  pushItem('风险提示', warnings.join('；'))
+
+  return items.slice(0, 6)
+}
+
+const isOrchestrationOverviewDetails = (details?: Record<string, any>): boolean =>
+  details?.summaryKind === 'orchestration_overview'
+
+const isLayoutImportDetails = (details?: Record<string, any>): boolean =>
+  details?.summaryKind === 'layout_import'
+
+const buildOrchestrationOverviewMessage = (session: PlanningSession): Message => {
+  const logs = session.logs ?? []
+  const runtimeLayoutEntry = getRuntimeLayoutEntry(props.channelId, props.date)
+  const layoutSlotCount = logs.find((log) => typeof log.details?.layoutSlotCount === 'number')?.details?.layoutSlotCount
+  const existingItemCount = logs.find((log) => typeof log.details?.existingItemCount === 'number')?.details?.existingItemCount
+  const fillExecutionLogs = logs.filter((log) => (
+    log.phase === 'execution'
+    && typeof log.details?.gapId === 'string'
+    && typeof log.details?.selectedCandidateId === 'string'
+  ))
+  const adExecutionLogs = logs.filter((log) => {
+    if (log.phase !== 'execution' || typeof log.details?.slotId !== 'string') {
+      return false
+    }
+    const insertedItems = Array.isArray(log.details?.insertedItems) ? log.details.insertedItems : []
+    return insertedItems.some((item: any) => item?.programType === 'ad')
+  })
+  const validationEntry = [...logs].reverse().find(
+    (log) => log.phase === 'validation' && typeof log.details?.summary === 'object',
+  )
+  const validationSummary = validationEntry?.details?.summary as Record<string, any> | undefined
+  const validationIssueCount =
+    typeof validationSummary?.totalIssues === 'number' ? validationSummary.totalIssues : 0
+  const failedGapCount = session.gaps.failed.length
+  const pendingGapCount = session.gaps.pending.length
+  const unresolvedGapCount = pendingGapCount + failedGapCount
+  const completedGapCount = fillExecutionLogs.length
+  const adInsertionCount = adExecutionLogs.length
+  const writtenItemCount = logs.reduce((count, log) => {
+    const inserted = Array.isArray(log.details?.insertedItems) ? log.details.insertedItems.length : 0
+    return count + inserted
+  }, 0)
+  const insertedItemCount = completedGapCount
+  const sequentialFillCount = fillExecutionLogs.filter((log) => log.details?.selectionMode === 'sequential').length
+  const rerunFillCount = fillExecutionLogs.filter((log) => log.details?.selectionMode === 'rerun').length
+  const fixedOrLockedCount = props.currentSchedule.filter((item) => {
+    const record = item as Record<string, any>
+    return Boolean(record.isLocked)
+  }).length
+  const unresolvedRisks: string[] = []
+
+  if (unresolvedGapCount > 0) {
+    unresolvedRisks.push(`仍有 ${unresolvedGapCount} 个空窗待人工确认`)
+  }
+  if (validationIssueCount > 0) {
+    unresolvedRisks.push(`校验仍提示 ${validationIssueCount} 个问题`)
+  }
+  if (adInsertionCount > 0) {
+    unresolvedRisks.push(`版面内插播广告 ${adInsertionCount} 次，建议复核衔接节奏`)
+  }
+
+  const summaryLine = [
+    pendingGapCount > 0 ? '自动编排阶段已结束' : '全天编排已完成',
+    '本次优先遵循版面信息',
+    completedGapCount > 0 ? `已处理 ${completedGapCount} 个空窗` : '已完成整体版面整理',
+    pendingGapCount > 0 ? `仍有 ${pendingGapCount} 个空窗待人工确认` : '',
+  ].filter(Boolean).join('，')
+
+  const explanation = pendingGapCount > 0
+    ? '本轮自动编排已先完成可命中的版面补排，剩余空窗由于候选不足或约束未满足，建议人工继续确认。'
+    : existingItemCount && existingItemCount > 0
+      ? '本次在保留现有编单结构的前提下，优先对齐版面栏目和时段要求，再对剩余空窗做补排与修补。'
+      : '本次先按版面栏目和时段要求搭建全天骨架，再在对应版面约束内完成节目填充和修补。'
+  const normalizedExplanation = runtimeLayoutEntry
+    ? `${explanation} 当前优先参考的是上传版面《${runtimeLayoutEntry.sourceFileName}》。`
+    : explanation
+
+  return buildAssistantMessage({
+    content: summaryLine,
+    processType: 'planning',
+    processTypeLabel: '编排总结',
+    expanded: true,
+    reasonTags: [
+      '版面优先',
+      validationIssueCount > 0 ? '需人工确认' : '校验通过',
+      sequentialFillCount > 0 ? '顺播推进' : rerunFillCount > 0 ? '重播补位' : '结构稳定',
+    ],
+      explanation: {
+        type: 'command',
+        targetId: `orchestration-summary-${session.id}`,
+        explanation: normalizedExplanation,
+        details: {
+          summaryKind: 'orchestration_overview',
+          sessionId: session.id,
+          layoutSourceFileName: runtimeLayoutEntry?.sourceFileName,
+          target: session.strategy.target,
+        layoutSlotCount,
+        existingItemCount,
+        fixedOrLockedCount,
+        completedGapCount,
+        pendingGapCount,
+        failedGapCount,
+        insertedItemCount,
+        writtenItemCount,
+        adInsertionCount,
+        sequentialFillCount,
+        rerunFillCount,
+        validationSummary,
+        unresolvedRisks,
+      },
+    },
+  })
+}
+
+const buildReasonTagsForMessage = (message: Message): string[] => {
+  const details = getMessageDetails(message)
+  const tags: string[] = []
+  const addTag = (tag?: string) => {
+    const normalized = tag?.trim()
+    if (!normalized || tags.includes(normalized) || tags.length >= 3) return
+    tags.push(normalized)
+  }
+
+  if (isOrchestrationOverviewDetails(details)) {
+    addTag('版面优先')
+    if ((details?.validationSummary?.totalIssues ?? 0) > 0 || (details?.failedGapCount ?? 0) > 0) {
+      addTag('需人工确认')
+    } else {
+      addTag('校验通过')
+    }
+    if ((details?.sequentialFillCount ?? 0) > 0) {
+      addTag('顺播推进')
+    } else if ((details?.rerunFillCount ?? 0) > 0) {
+      addTag('重播补位')
+    } else {
+      addTag('结构稳定')
+    }
+    return tags
+  }
+
+  if (isLayoutImportDetails(details)) {
+    addTag('版面已导入')
+    if (
+      details?.templateMode === 'weekday_columns'
+      || details?.templateMode === 'weekday_sheet'
+      || details?.templateMode === 'visual_weekday_grid'
+    ) {
+      addTag('按星期匹配')
+    }
+    if ((details?.sequentialColumnCount ?? 0) > 0) {
+      addTag('含顺播栏目')
+    }
+    if (Array.isArray(details?.warnings) && details.warnings.length > 0) {
+      addTag('需人工确认')
+    }
+    return tags
+  }
+
+  if (message.processType === 'validation') {
+    const summary = details?.summary ?? details?.validationSummary
+    addTag('已完成校验')
+    if (summary?.totalIssues > 0) {
+      addTag('存在风险')
+      if ((summary.criticalCount ?? 0) > 0) {
+        addTag('需人工确认')
+      }
+    } else {
+      addTag('校验通过')
+    }
+    return tags
+  }
+
+  if (/多个可能|请选择/.test(message.content)) {
+    addTag('目标待确认')
+    addTag('暂不自动执行')
+  }
+
+  if (/请确认后执行|将删除|将把/.test(message.content)) {
+    addTag('需人工确认')
+  }
+
+  if (details?.matchedItem || details?.targetResolution?.matchedBy?.length) {
+    addTag('目标已定位')
+  }
+
+  if (details?.selectedCandidate || typeof details?.selectedCandidateName === 'string') {
+    addTag('已选候选')
+  }
+
+  const strategySource = details?.selectedCandidate ?? details?.candidateOptions?.[0] ?? details?.topCandidates?.[0]
+  if (strategySource && typeof strategySource === 'object') {
+    const strategy = (strategySource as Record<string, any>).selectionMode
+    if (strategy === 'sequential') {
+      addTag('顺播推进')
+    } else if (strategy === 'rerun') {
+      addTag('重播候选')
+    }
+  }
+
+  const criteria = details?.criteria ?? details?.queryCommand?.data?.criteria
+  if (criteria) {
+    if (criteria.columnId || (Array.isArray(criteria.programTypePreference) && criteria.programTypePreference.length > 0)) {
+      addTag('栏目匹配')
+    }
+    if (criteria.expectedDuration) {
+      addTag('时长合适')
+    }
+  }
+
+  if (details?.direction || details?.offsetSeconds) {
+    addTag('局部调整')
+  }
+
+  if (Array.isArray(details?.preview?.warnings) && details.preview.warnings.length > 0) {
+    addTag('存在风险提示')
+  }
+
+  if (details?.preview?.canExecute === false || /冲突|占用/.test(message.content)) {
+    addTag('时段冲突')
+  }
+
+  if (isNoCandidateCase(details ?? {}) || /没有检索到|未找到合适节目|没有找到|未找到/.test(message.content)) {
+    addTag('当前无候选')
+  }
+
+  if (message.processType === 'execution' && /执行成功|已在|已将|已排入|已按确认执行/.test(message.content)) {
+    addTag('已完成执行')
+  }
+
+  if (message.processType === 'selection' && /已选中/.test(message.content)) {
+    addTag('已完成选择')
+  }
+
+  const validationSummary = details?.validationSummary
+  if (validationSummary?.totalIssues === 0) {
+    addTag('校验通过')
+  } else if (validationSummary?.totalIssues > 0) {
+    addTag('仍有风险')
+  }
+
+  if ((message.processType === 'error' || /无法执行|失败/.test(message.content)) && tags.length === 0) {
+    addTag('需人工处理')
+  }
+
+  return tags
+}
+
+const buildDecisionShortExplanation = (message: Message): string | undefined => {
+  if (message.thinking) {
+    return normalizeDecisionExplanation(message.thinking)
+  }
+
+  const details = getMessageDetails(message)
+
+  if (isOrchestrationOverviewDetails(details)) {
+    return '先按版面结构落位，再在可编辑区间内完成补排、顺播和收口校验。'
+  }
+
+  if (isLayoutImportDetails(details)) {
+    if (details?.templateMode === 'weekday_columns' && typeof details?.matchedWeekdayLabel === 'string') {
+      const columnLabel =
+        typeof details?.matchedColumnLabel === 'string' ? `“${details.matchedColumnLabel}”` : `“${details.matchedWeekdayLabel}”`
+      return `已按当前编排单日期命中 ${details.matchedWeekdayLabel}，并采用 ${columnLabel} 这一列生成当天版面。`
+    }
+    if (details?.templateMode === 'visual_weekday_grid' && typeof details?.matchedWeekdayLabel === 'string') {
+      const columnLabel =
+        typeof details?.matchedColumnLabel === 'string' ? `“${details.matchedColumnLabel}”` : `“${details.matchedWeekdayLabel}”`
+      return `已按当前编排单日期命中 ${details.matchedWeekdayLabel}，并从 ${columnLabel} 这一列的版面块提取出当天时段。`
+    }
+    if (details?.templateMode === 'weekday_sheet' && typeof details?.matchedSheetName === 'string') {
+      return `已按当前编排单日期命中工作表“${details.matchedSheetName}”，并将其转换为当天版面。`
+    }
+    return '已把上传文件转成当前日期版面，后续编排会先对齐这份版面结构。'
+  }
+
+  if (message.processType === 'validation') {
+    const summary = details?.summary ?? details?.validationSummary
+    if (summary?.totalIssues > 0) {
+      return '已按当前节目单完成校验，并提炼出需要优先关注的问题。'
+    }
+    return '已按当前节目单完成校验，当前未发现明显风险。'
+  }
+
+  if (/多个可能|请选择/.test(message.content)) {
+    return '当前时间附近存在多个可执行目标，先确认具体节目再继续修改。'
+  }
+
+  const strategySource = details?.selectedCandidate ?? details?.candidateOptions?.[0] ?? details?.topCandidates?.[0]
+  if (strategySource && typeof strategySource === 'object') {
+    const strategy = (strategySource as Record<string, any>).selectionMode
+    if (strategy === 'sequential') {
+      return '已结合当前栏目顺播进度和已排记录，优先选择下一可播集/期。'
+    }
+    if (strategy === 'rerun') {
+      return '当前栏目不强调顺播，已按时段匹配度筛选更稳妥的重播候选。'
+    }
+  }
+
+  if (details?.matchedItem && (details?.selectedCandidate || typeof details?.selectedCandidateName === 'string')) {
+    return '已结合目标节目、候选匹配度和当前编排约束完成判断。'
+  }
+
+  if (details?.matchedItem) {
+    return '已结合目标时间和当前编排记录完成目标定位。'
+  }
+
+  if (details?.preview?.canExecute === false || /冲突|无法执行/.test(message.content)) {
+    return '已先检查主要约束，当前方案仍会影响现有编排。'
+  }
+
+  if (isNoCandidateCase(details ?? {}) || /没有检索到|未找到/.test(message.content)) {
+    return '已按当前条件尝试检索，但暂时没有更合适的可用节目。'
+  }
+
+  if (message.processType === 'execution') {
+    return '已根据当前时段、节目匹配度和风险提示完成这次处理。'
+  }
+
+  if (message.processType === 'selection') {
+    return '已结合当前空窗、候选匹配度和约束条件做出选择。'
+  }
+
+  if (message.processType === 'error') {
+    return '已按当前条件尝试处理，但仍有约束未满足。'
+  }
+
+  return undefined
+}
+
+const decorateAssistantMessage = (message: Message): Message => {
+  const next: Message = { ...message }
+  const reasonTags = (next.reasonTags?.length ? next.reasonTags : buildReasonTagsForMessage(next)).slice(0, 3)
+
+  if (reasonTags.length > 0) {
+    next.reasonTags = reasonTags
+    next.thinking = buildDecisionShortExplanation(next)
+  }
+
+  return next
+}
+
+const buildAssistantMessage = (input: Omit<Message, 'role'>): Message =>
+  decorateAssistantMessage({
+    role: 'assistant',
+    expanded: false,
+    ...input,
+  })
+
+const isDecisionMessage = (message: Message) => (message.reasonTags?.length ?? 0) > 0
+
+const shouldShowReasonTags = (message: Message) => isDecisionMessage(message)
+
+const shouldShowDefaultExplanation = (message: Message) =>
+  isDecisionMessage(message) && Boolean(message.thinking)
+
+const buildExpandedWhy = (message: Message): string => {
+  const explanation = normalizeDecisionExplanation(message.explanation?.explanation)
+  return explanation || buildDecisionShortExplanation(message) || message.content
+}
+
+const buildExpandedBasis = (message: Message): string | undefined => {
+  const details = getMessageDetails(message)
+  if (isOrchestrationOverviewDetails(details)) {
+    const parts = [
+      typeof details?.layoutSourceFileName === 'string' ? `版面来源 ${details.layoutSourceFileName}` : '',
+      typeof details?.layoutSlotCount === 'number' ? `已对齐版面时段 ${details.layoutSlotCount} 个` : '',
+      typeof details?.fixedOrLockedCount === 'number' && details.fixedOrLockedCount > 0 ? `保留固定或锁定条目 ${details.fixedOrLockedCount} 处` : '',
+      typeof details?.completedGapCount === 'number' ? `已执行自动补排 ${details.completedGapCount} 轮` : '',
+      typeof details?.sequentialFillCount === 'number' && details.sequentialFillCount > 0 ? `顺播推进 ${details.sequentialFillCount} 次` : '',
+      typeof details?.rerunFillCount === 'number' && details.rerunFillCount > 0 ? `重播补位 ${details.rerunFillCount} 次` : '',
+    ].filter(Boolean)
+
+    return parts.length > 0 ? parts.join('；') : undefined
+  }
+
+  const summaryItems = buildDetailsSummary(details, message.processType)
+    .filter((item) => !['风险提示', '主要问题', '校验结果'].includes(item.label))
+    .slice(0, 3)
+
+  if (summaryItems.length > 0) {
+    return summaryItems.map((item) => `${item.label}：${item.value}`).join('；')
+  }
+
+  if (typeof details?.selectionReason === 'string') {
+    return normalizeDecisionExplanation(details.selectionReason)
+  }
+
+  return undefined
+}
+
+const buildExpandedRisk = (message: Message): string | undefined => {
+  const details = getMessageDetails(message)
+  if (isOrchestrationOverviewDetails(details)) {
+    const risks = Array.isArray(details?.unresolvedRisks)
+      ? details.unresolvedRisks.filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 0)
+      : []
+    if (risks.length > 0) {
+      return risks.join('；')
+    }
+    return '本轮编排已完成收口校验，当前未发现需要优先处理的明显风险。'
+  }
+
+  if (isLayoutImportDetails(details)) {
+    const warnings = Array.isArray(details?.warnings)
+      ? details.warnings.filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 0)
+      : []
+    return warnings.length > 0 ? warnings.join('；') : '已完成版面结构校验，当前未发现明显导入异常。'
+  }
+
+  const warnings = extractWarnings(details)
+  if (warnings.length > 0) {
+    return warnings.join('；')
+  }
+
+  if (Array.isArray(details?.issues) && details.issues.length > 0) {
+    return (details.issues as Array<{ message?: string }>)
+      .slice(0, 2)
+      .map((item) => item?.message)
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .join('；')
+  }
+
+  return undefined
+}
+
+const getExpandedSections = (message: Message): ExplanationSection[] => {
+  const details = getMessageDetails(message)
+  if (isOrchestrationOverviewDetails(details)) {
+    const sections: ExplanationSection[] = [
+      {
+        title: '编排原则',
+        body: buildExpandedWhy(message),
+      },
+    ]
+
+    const resultParts = [
+      typeof details?.layoutSlotCount === 'number' ? `本次共按版面处理 ${details.layoutSlotCount} 个时段` : '',
+      typeof details?.completedGapCount === 'number' ? `执行自动补排 ${details.completedGapCount} 轮` : '',
+      typeof details?.insertedItemCount === 'number' ? `累计选中节目 ${details.insertedItemCount} 次` : '',
+      typeof details?.writtenItemCount === 'number' ? `实际写入条目 ${details.writtenItemCount} 条` : '',
+      typeof details?.sequentialFillCount === 'number' && details.sequentialFillCount > 0 ? `其中顺播推进 ${details.sequentialFillCount} 次` : '',
+      typeof details?.rerunFillCount === 'number' && details.rerunFillCount > 0 ? `非顺播栏目重播补位 ${details.rerunFillCount} 次` : '',
+      typeof details?.adInsertionCount === 'number' && details.adInsertionCount > 0 ? `版面内广告补位 ${details.adInsertionCount} 次` : '',
+    ].filter(Boolean)
+    if (resultParts.length > 0) {
+      sections.push({
+        title: '主要处理结果',
+        body: resultParts.join('；'),
+        tone: 'secondary',
+      })
+    }
+
+    const risk = buildExpandedRisk(message)
+    if (risk) {
+      sections.push({
+        title: '风险与提醒',
+        body: risk,
+        tone: 'risk',
+      })
+    }
+
+    return sections
+  }
+
+  if (isLayoutImportDetails(details)) {
+    const sections: ExplanationSection[] = [
+      {
+        title: '导入结果',
+        body: buildExpandedWhy(message),
+      },
+    ]
+
+    const basis = [
+      typeof details?.matchedWeekdayLabel === 'string' ? `当前编排单命中 ${details.matchedWeekdayLabel}` : '',
+      typeof details?.matchedColumnLabel === 'string' ? `采用列 ${details.matchedColumnLabel}` : '',
+      typeof details?.matchedSheetName === 'string' ? `来源工作表 ${details.matchedSheetName}` : '',
+      typeof details?.slotCount === 'number' ? `识别版面时段 ${details.slotCount} 个` : '',
+      typeof details?.columnCount === 'number' ? `识别栏目 ${details.columnCount} 个` : '',
+      typeof details?.sequentialColumnCount === 'number' && details.sequentialColumnCount > 0 ? `其中顺播栏目 ${details.sequentialColumnCount} 个` : '',
+    ].filter(Boolean)
+
+    if (basis.length > 0) {
+      sections.push({
+        title: '将如何参与编排',
+        body: `后续会优先按这份版面落位，再在对应栏目约束内完成候选选择。${basis.join('；')}`,
+        tone: 'secondary',
+      })
+    }
+
+    const risk = buildExpandedRisk(message)
+    if (risk) {
+      sections.push({
+        title: '风险与提醒',
+        body: risk,
+        tone: 'risk',
+      })
+    }
+
+    return sections
+  }
+
+  const sections: ExplanationSection[] = []
+  const why = buildExpandedWhy(message)
+  const basis = buildExpandedBasis(message)
+  const risk = buildExpandedRisk(message)
+
+  if (why) {
+    sections.push({ title: '为什么这样做', body: why })
+  }
+  if (basis) {
+    sections.push({ title: '参考了什么', body: basis, tone: 'secondary' })
+  }
+  if (risk) {
+    sections.push({ title: '风险与提醒', body: risk, tone: 'risk' })
+  }
+
+  return sections
+}
+
+const getDetailsSummaryItems = (message: Message) =>
+  buildDetailsSummary(getMessageDetails(message), message.processType)
+
+const hasExpandableExplanation = (message: Message) =>
+  isDecisionMessage(message)
+  && (getExpandedSections(message).length > 0 || Boolean(message.explanation?.details))
+
+const toggleDetailExpanded = (message: Message) => {
+  message.detailExpanded = !(message.detailExpanded ?? false)
+}
+
+const toggleRawDetails = (message: Message) => {
+  message.rawDetailsExpanded = !(message.rawDetailsExpanded ?? false)
+}
+
+const getPendingCommandReasonTags = () => {
+  if (!pendingCommand.value) return []
+  return buildReasonTagsForMessage(
+    buildAssistantMessage({
+      content: pendingCommand.value.summary,
+      processType: 'execution',
+      explanation: {
+        type: 'command',
+        targetId: 'pending-command-panel',
+        explanation: pendingCommand.value.reasoning,
+        details: pendingCommand.value.details,
+      },
+    }),
+  )
+}
+
+const getPendingCommandDetailItems = () =>
+  pendingCommand.value ? buildDetailsSummary(pendingCommand.value.details, 'execution') : []
+
 const formatProgramTypes = (types: unknown): string => {
   if (!Array.isArray(types)) return ''
   return types.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).join('、')
@@ -695,6 +2108,32 @@ const formatProgramTypes = (types: unknown): string => {
 const formatKeywords = (keywords: unknown): string => {
   if (!Array.isArray(keywords)) return ''
   return keywords.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).join('、')
+}
+
+const resolveMatchedColumnInfo = (details?: Record<string, any>) => {
+  const criteria = details?.criteria ?? details?.queryCommand?.data?.criteria
+  const columnId =
+    typeof criteria?.columnId === 'string' && criteria.columnId.trim()
+      ? criteria.columnId.trim()
+      : typeof details?.columnId === 'string' && details.columnId.trim()
+        ? details.columnId.trim()
+        : ''
+  const columnNameFromId = columnId ? getEffectiveColumnDefinition(columnId)?.columnName ?? '' : ''
+  const targetSlotLabel =
+    typeof details?.targetSlotLabel === 'string' && details.targetSlotLabel.trim()
+      ? details.targetSlotLabel.trim()
+      : ''
+
+  return {
+    columnId,
+    columnName: columnNameFromId || targetSlotLabel,
+  }
+}
+
+const formatMatchedColumnText = (details?: Record<string, any>) => {
+  const { columnId, columnName } = resolveMatchedColumnInfo(details)
+  if (columnName && columnId) return `${columnName}（${columnId}）`
+  return columnName || columnId
 }
 
 const formatExpectedDuration = (expectedDuration: unknown): string => {
@@ -707,7 +2146,7 @@ const formatExpectedDuration = (expectedDuration: unknown): string => {
 const buildQueryCriteriaSummary = (criteria: Record<string, any>): string => {
   const columnName =
     typeof criteria.columnId === 'string' && criteria.columnId.trim()
-      ? getOrchestrationDemoColumn(criteria.columnId)?.columnName ?? criteria.columnId
+      ? getEffectiveColumnDefinition(criteria.columnId)?.columnName ?? criteria.columnId
       : ''
   const duration = formatExpectedDuration(criteria.expectedDuration)
   const result = [columnName, duration].filter(Boolean).join('，')
@@ -756,6 +2195,9 @@ const shouldDisplayLog = (log: PlanningLogEntry): boolean => {
 const isNoCandidateCase = (details: Record<string, any>) => details.error === 'No candidates found'
 
 const buildFriendlyLogExplanation = (log: PlanningLogEntry, details: Record<string, any>) => {
+  const insertedItems = Array.isArray(details?.insertedItems) ? details.insertedItems : []
+  const containsAdInsert = insertedItems.some((item: any) => item?.programType === 'ad')
+
   if (typeof details.layoutSlotCount === 'number') {
     return `已命中版面参考，并初始化 ${details.layoutSlotCount} 个待处理时段。`
   }
@@ -780,14 +2222,104 @@ const buildFriendlyLogExplanation = (log: PlanningLogEntry, details: Record<stri
     return truncateText(details.reasoning, 60)
   }
 
+  if (typeof details.slotId === 'string' && containsAdInsert) {
+    const slotRange =
+      typeof details.slotStartTime === 'string'
+        ? formatDisplayTimeRange(details.slotStartTime, typeof details.slotEndTime === 'string' ? details.slotEndTime : undefined)
+        : ''
+    const shiftedCount = typeof details.shiftedItemCount === 'number' ? details.shiftedItemCount : 0
+    return slotRange
+      ? `${slotRange} 已按版面广告位补入广告，并顺延 ${shiftedCount} 条后续节目。`
+      : `已按版面广告位补入广告，并顺延 ${shiftedCount} 条后续节目。`
+  }
+
   return `${formatPhaseLabel(log.phase)}阶段已更新`
 }
 
-const timeToSeconds = (timeText: string): number => {
-  const [hours = 0, minutes = 0, seconds = 0] = normalizeClockText(timeText)
-    .split(':')
-    .map(Number)
-  return hours * 3600 + minutes * 60 + seconds
+const buildRuntimeThinking = (log: PlanningLogEntry, details: Record<string, any>): string | undefined => {
+  const timeRange =
+    typeof details.startTime === 'string'
+      ? formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)
+      : ''
+  const matchedColumnText = formatMatchedColumnText(details)
+  const columnName = matchedColumnText
+    || (typeof details.criteria === 'object' && details.criteria
+      ? buildQueryCriteriaSummary(details.criteria as Record<string, any>).replace(/^查询：/, '')
+      : typeof details.preferredProgramGroup === 'string'
+        ? details.preferredProgramGroup
+        : typeof details.targetSlotLabel === 'string'
+          ? details.targetSlotLabel
+          : '')
+
+  if (isNoCandidateCase(details)) {
+    return `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已按${columnName || '当前栏目约束'}做了候选检索，但没有命中合适节目。`
+  }
+
+  if (typeof details.programName === 'string' && typeof details.itemId === 'string') {
+    return `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已完成候选判断和落表执行。`
+  }
+
+  if (typeof details.selectedCandidateName === 'string') {
+    return `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已在候选结果中选中《${details.selectedCandidateName}》。`
+  }
+
+  if (typeof details.candidateCount === 'number') {
+    return `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已按${columnName || '当前栏目约束'}完成候选检索。`
+  }
+
+  if (typeof details.summary === 'string') {
+    return `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已命中${columnName || '当前栏目'}，准备继续检索候选节目。`
+  }
+
+  return log.phase === 'planning' ? '我正在结合当前空窗、栏目和前后衔接关系继续处理。' : undefined
+}
+
+const buildRuntimeResult = (log: PlanningLogEntry, details: Record<string, any>): string => {
+  const timeRange =
+    typeof details.startTime === 'string'
+      ? formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)
+      : ''
+  const insertedItems = Array.isArray(details?.insertedItems) ? details.insertedItems : []
+  const containsAdInsert = insertedItems.some((item: any) => item?.programType === 'ad')
+
+  if (typeof details.programName === 'string' && typeof details.itemId === 'string') {
+    return timeRange ? `${timeRange} 已排入《${details.programName}》。` : `已排入《${details.programName}》。`
+  }
+
+  if (typeof details.slotId === 'string' && containsAdInsert) {
+    const slotRange =
+      typeof details.slotStartTime === 'string'
+        ? formatDisplayTimeRange(details.slotStartTime, typeof details.slotEndTime === 'string' ? details.slotEndTime : undefined)
+        : ''
+    const shiftedCount = typeof details.shiftedItemCount === 'number' ? details.shiftedItemCount : 0
+    return slotRange
+      ? `${slotRange} 已插入广告，并顺延 ${shiftedCount} 条后续节目。`
+      : `已插入广告，并顺延 ${shiftedCount} 条后续节目。`
+  }
+
+  if (isNoCandidateCase(details)) {
+    return timeRange ? `${timeRange} 未找到合适节目。` : '当前空窗未找到合适节目。'
+  }
+
+  if (typeof details.candidateCount === 'number') {
+    const matchedColumnText = formatMatchedColumnText(details)
+    return timeRange
+      ? `${timeRange} 已按${matchedColumnText || '当前栏目约束'}检索到 ${details.candidateCount} 个候选。`
+      : `已按${matchedColumnText || '当前栏目约束'}检索到 ${details.candidateCount} 个候选。`
+  }
+
+  if (typeof details.selectedCandidateName === 'string') {
+    return timeRange ? `${timeRange} 已选中《${details.selectedCandidateName}》。` : `已选中《${details.selectedCandidateName}》。`
+  }
+
+  if (typeof details.summary === 'string') {
+    const matchedColumnText = formatMatchedColumnText(details)
+    return timeRange
+      ? `正在处理 ${timeRange}${matchedColumnText ? `，命中栏目 ${matchedColumnText}` : ''}。`
+      : `正在处理当前空窗${matchedColumnText ? `，命中栏目 ${matchedColumnText}` : ''}。`
+  }
+
+  return summarizeRuntimeLog(log)
 }
 
 const normalizeDateTime = (date: string, timeText: string): string => {
@@ -867,6 +2399,7 @@ const executeCommand = async (
   command: OrchestrationCommand,
   options?: {
     successMessage?: string
+    thinking?: string
     explanation?: string
     details?: Record<string, any>
   },
@@ -880,9 +2413,9 @@ const executeCommand = async (
   if (result.success) {
     ElMessage.success(result.message)
     emit('scheduleUpdated', commandExecutor.getScheduleItems())
-    messages.value.push({
-      role: 'assistant',
+    messages.value.push(buildAssistantMessage({
       content: options?.successMessage || `${summarizeCommand(command)}，执行成功。`,
+      thinking: options?.thinking,
       explanation: options?.explanation
         ? {
             type: 'command',
@@ -896,13 +2429,12 @@ const executeCommand = async (
         : undefined,
       processType: 'execution',
       processTypeLabel: '执行完成',
-      expanded: false,
-    })
+    }))
   } else {
     ElMessage.error(result.error || result.message)
-    messages.value.push({
-      role: 'assistant',
+    messages.value.push(buildAssistantMessage({
       content: result.error || result.message,
+      thinking: options?.thinking,
       explanation: options?.explanation
         ? {
             type: 'command',
@@ -913,8 +2445,7 @@ const executeCommand = async (
         : undefined,
       processType: 'error',
       processTypeLabel: '执行失败',
-      expanded: false,
-    })
+    }))
   }
 }
 
@@ -924,21 +2455,169 @@ const confirmPendingCommand = async () => {
   pendingCommand.value = null
   await executeCommand(current.command, {
     successMessage: `${current.summary}，已按确认执行。`,
+    thinking: '我已根据你确认的修改目标和风险提示继续执行本次操作。',
     explanation: current.reasoning,
     details: current.details,
   })
 }
 
+const confirmPendingTargetSelection = async () => {
+  if (!pendingTargetSelection.value?.selectedItemId) return
+  const current = pendingTargetSelection.value
+  pendingTargetSelection.value = null
+
+  const selectedItem = current.candidates.find((item) => item.id === current.selectedItemId)
+  if (!selectedItem) {
+    messages.value.push(buildAssistantMessage({
+      content: '未找到你选择的目标节目，请重新发起操作。',
+      thinking: '我尝试根据你刚才确认的候选目标继续执行，但当前找不到对应记录。',
+      processType: 'error',
+      processTypeLabel: '执行异常',
+    }))
+    return
+  }
+
+  if (current.action === 'delete') {
+    const command: OrchestrationCommand = {
+      action: 'delete',
+      reasoning: `删除 ${current.targetTime} 对应节目《${selectedItem.programName || selectedItem.programCode || selectedItem.id}》。`,
+      data: {
+        itemId: selectedItem.id,
+      },
+    }
+
+    pendingCommand.value = {
+      command,
+      summary: summarizeCommand(command),
+      reasoning: current.reasoning,
+      details: {
+        matchedItem: selectedItem,
+        targetTime: current.targetTime,
+        programName: current.programName,
+        targetResolution: current.resolutionDetails,
+      },
+    }
+    return
+  }
+
+  if (current.action === 'move' && current.moveConfig) {
+    const originalStart = normalizeDateTime(props.date, selectedItem.startTime)
+    const delta = current.moveConfig.direction === 'forward' ? current.moveConfig.offsetSeconds : -current.moveConfig.offsetSeconds
+    const newStartTime = offsetDateTime(originalStart, delta)
+    const command: OrchestrationCommand = {
+      action: 'move',
+      reasoning: `将 ${current.targetTime} 对应节目${current.moveConfig.direction === 'forward' ? '向后' : '向前'}移动 ${formatOffset(current.moveConfig.offsetSeconds)}。`,
+      data: {
+        itemId: selectedItem.id,
+        newStartTime,
+      },
+    }
+
+    await executeCommand(command, {
+      successMessage: `已将《${selectedItem.programName || selectedItem.programCode || selectedItem.id}》${current.moveConfig.direction === 'forward' ? '向后' : '向前'}移动 ${formatOffset(current.moveConfig.offsetSeconds)}。`,
+      thinking: '我已根据你选择的目标节目继续完成移动操作。',
+      explanation: current.reasoning,
+      details: {
+        matchedItem: selectedItem,
+        targetTime: current.targetTime,
+        direction: current.moveConfig.direction,
+        offsetSeconds: current.moveConfig.offsetSeconds,
+        newStartTime,
+        targetResolution: current.resolutionDetails,
+      },
+    })
+    return
+  }
+
+  if (current.action === 'replace' && current.replaceProgramName) {
+    const candidates = await candidateService.searchPrograms({
+      channelId: props.channelId,
+      programName: current.replaceProgramName,
+      columnId: resolveItemColumnId(selectedItem),
+      limit: 5,
+    })
+
+    if (candidates.length === 0) {
+      messages.value.push(buildAssistantMessage({
+        content: `没有检索到“${current.replaceProgramName}”的可用节目，请确认节目名。`,
+        thinking: `我已根据你确认的目标节目继续检索《${current.replaceProgramName}》的替换候选，但当前没有命中结果。`,
+        processType: 'general',
+        processTypeLabel: '未执行',
+      }))
+      return
+    }
+
+    const selectedCandidate = candidates[0]!
+    const command: OrchestrationCommand = {
+      action: 'replace',
+      reasoning: `将 ${current.targetTime} 对应节目替换为《${selectedCandidate.programName}》。`,
+      data: {
+        itemId: selectedItem.id,
+        newCandidateId: selectedCandidate.id,
+      },
+    }
+
+    const preview = replaceCommandExecutor.preview(command)
+    if (!preview.canExecute) {
+      messages.value.push(buildAssistantMessage({
+        content: '替换后的节目时段会与现有编排冲突，当前无法执行替换。',
+        thinking: '我已根据你确认的目标节目继续检索替换候选，并检查了替换后的时间占用情况。',
+        processType: 'general',
+        processTypeLabel: '未执行',
+        explanation: {
+          type: 'command',
+          targetId: 'replace-preview',
+          explanation: current.reasoning,
+          details: {
+            matchedItem: selectedItem,
+            replacementProgramName: current.replaceProgramName,
+            selectedCandidate,
+            candidateOptions: candidates.slice(0, 3),
+            preview,
+            targetResolution: current.resolutionDetails,
+          },
+        },
+      }))
+      pendingTargetSelection.value = null
+      return
+    }
+
+    pendingCommand.value = {
+      command,
+      summary: summarizeCommand(command),
+      reasoning: current.reasoning,
+      details: {
+        matchedItem: selectedItem,
+        targetTime: current.targetTime,
+        replacementProgramName: current.replaceProgramName,
+        selectedCandidate,
+        candidateOptions: candidates.slice(0, 3),
+        targetResolution: current.resolutionDetails,
+      },
+    }
+  }
+}
+
 const cancelPendingCommand = () => {
   if (!pendingCommand.value) return
-  messages.value.push({
-    role: 'assistant',
+  messages.value.push(buildAssistantMessage({
     content: `${pendingCommand.value.summary}，已取消执行。`,
+    thinking: '我已根据你的选择停止这次高风险修改，不会对当前编排单做任何变更。',
     processType: 'general',
     processTypeLabel: '已取消',
-    expanded: false,
-  })
+  }))
   pendingCommand.value = null
+}
+
+const cancelPendingTargetSelection = () => {
+  if (!pendingTargetSelection.value) return
+  messages.value.push(buildAssistantMessage({
+    content: `${pendingTargetSelection.value.summary}，已取消选择。`,
+    thinking: '我已停止这次目标选择，不会继续执行后续修改。',
+    processType: 'general',
+    processTypeLabel: '已取消',
+  }))
+  pendingTargetSelection.value = null
 }
 
 const requiresConfirmation = (command: OrchestrationCommand): boolean =>
@@ -953,9 +2632,9 @@ const summarizeCommand = (command: OrchestrationCommand): string => {
     case 'move':
       return '修改节目开始时间'
     case 'insert':
-      return '鎻掑叆鑺傜洰'
+      return '插入节目'
     case 'update_field':
-      return '淇敼鑺傜洰瀛楁'
+      return '修改节目字段'
     default:
       return `执行 ${command.action} 命令`
   }
@@ -976,10 +2655,11 @@ const buildLogMessage = (log: PlanningLogEntry): Message => {
   const details = log.details ?? {}
   const processType = mapLogToProcessType(log)
   const explanationDetails = compressLogDetails(details, processType)
+  const mergeMeta = getRuntimeMergeMeta(log)
 
-  return {
-    role: 'assistant',
-    content: summarizeRuntimeLog(log),
+  return buildAssistantMessage({
+    content: buildRuntimeResult(log, details),
+    thinking: buildRuntimeThinking(log, details),
     explanation: {
       type: 'command',
       targetId: log.id,
@@ -988,11 +2668,17 @@ const buildLogMessage = (log: PlanningLogEntry): Message => {
     },
     processType,
     processTypeLabel: mapRuntimeLogToProcessLabel(log),
-    expanded: false,
-  }
+    mergeKey: mergeMeta.key,
+    mergeKind: mergeMeta.kind,
+  })
 }
 
 const appendSystemLogMessage = (message: Message) => {
+  if (tryMergeRuntimeMessage(message)) {
+    trimRuntimeProgressMessages()
+    return
+  }
+
   const lastMessage = messages.value[messages.value.length - 1]
   if (
     lastMessage &&
@@ -1004,6 +2690,93 @@ const appendSystemLogMessage = (message: Message) => {
   }
 
   messages.value.push(message)
+  trimRuntimeProgressMessages()
+}
+
+const tryMergeRuntimeMessage = (message: Message): boolean => {
+  if (!message.mergeKey || !message.mergeKind) {
+    return false
+  }
+
+  const chainIndexes = messages.value
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) =>
+      item.mergeKey === message.mergeKey
+      && ['idea', 'query_request', 'query_result', 'selection', 'execution', 'other'].includes(item.mergeKind ?? ''),
+    )
+    .map(({ index }) => index)
+
+  if (chainIndexes.length === 0) {
+    return false
+  }
+
+  const anchorIndex = chainIndexes[0]!
+  const mergedDetails = {
+    ...(messages.value[anchorIndex]?.explanation?.details as Record<string, any> | undefined ?? {}),
+    ...(message.explanation?.details as Record<string, any> | undefined ?? {}),
+  }
+  const mergedLog: PlanningLogEntry = {
+    id: message.explanation?.targetId || messages.value[anchorIndex]?.explanation?.targetId || 'merged-runtime',
+    timestamp: new Date().toISOString(),
+    level: message.processType === 'error' ? 'error' : 'info',
+    phase:
+      message.processType === 'execution'
+        ? 'execution'
+        : message.processType === 'query'
+          ? 'query'
+          : message.processType === 'validation'
+            ? 'validation'
+            : 'planning',
+    message: message.content,
+    details: mergedDetails,
+  }
+
+  messages.value[anchorIndex] = decorateAssistantMessage({
+    ...message,
+    content: buildRuntimeResult(mergedLog, mergedDetails),
+    thinking: buildRuntimeThinking(mergedLog, mergedDetails),
+    explanation: {
+      type: 'command',
+      targetId: mergedLog.id,
+      explanation: buildFriendlyLogExplanation(mergedLog, mergedDetails),
+      details: mergedDetails,
+    },
+  })
+
+  for (let i = chainIndexes.length - 1; i >= 1; i -= 1) {
+    messages.value.splice(chainIndexes[i]!, 1)
+  }
+  return true
+}
+
+const findLastMessageIndex = (predicate: (message: Message) => boolean): number => {
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    if (predicate(messages.value[index]!)) {
+      return index
+    }
+  }
+  return -1
+}
+
+const isRuntimeProgressMessage = (message: Message) =>
+  message.role !== 'user'
+  && typeof message.mergeKey === 'string'
+  && ['idea', 'query_request', 'query_result', 'selection', 'execution', 'other'].includes(message.mergeKind ?? '')
+
+const trimRuntimeProgressMessages = () => {
+  const runtimeIndexes = messages.value
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => isRuntimeProgressMessage(item))
+    .map(({ index }) => index)
+
+  if (runtimeIndexes.length <= MAX_RUNTIME_PROGRESS_MESSAGES) {
+    return
+  }
+
+  const removeIndexes = runtimeIndexes.slice(0, runtimeIndexes.length - MAX_RUNTIME_PROGRESS_MESSAGES)
+  for (let i = removeIndexes.length - 1; i >= 0; i -= 1) {
+    messages.value.splice(removeIndexes[i]!, 1)
+  }
 }
 
 const summarizeLog = (log: PlanningLogEntry): string => {
@@ -1257,6 +3030,48 @@ const mapRuntimeLogToProcessLabel = (log: PlanningLogEntry) => {
   return mapping[type]
 }
 
+const getRuntimeMergeMeta = (log: PlanningLogEntry): { key?: string; kind: Message['mergeKind'] } => {
+  const details = log.details ?? {}
+  const key =
+    typeof details.gapId === 'string'
+      ? details.gapId
+      : typeof details.slotId === 'string'
+        ? details.slotId
+      : typeof details.startTime === 'string' && typeof details.endTime === 'string'
+        ? `${details.startTime}_${details.endTime}`
+        : undefined
+
+  if (typeof details.programName === 'string' && typeof details.itemId === 'string') {
+    return { key, kind: 'execution' }
+  }
+
+  if (typeof details.error === 'string' && typeof details.gapId === 'string') {
+    return { key, kind: 'execution' }
+  }
+
+  if (typeof details.selectedCandidateName === 'string') {
+    return { key, kind: 'selection' }
+  }
+
+  if (typeof details.candidateCount === 'number') {
+    return { key, kind: 'query_result' }
+  }
+
+  if (details.criteria && typeof details.criteria === 'object') {
+    return { key, kind: 'query_request' }
+  }
+
+  if (typeof details.summary === 'string') {
+    return { key, kind: 'idea' }
+  }
+
+  if (typeof details.slotId === 'string') {
+    return { key, kind: 'execution' }
+  }
+
+  return { key, kind: 'other' }
+}
+
 watch(
   () => messages.value.length,
   () => {
@@ -1265,10 +3080,11 @@ watch(
 )
 
 watch(
-  () => props.orchestrationLogs?.length ?? 0,
-  (count) => {
-    if (!count || !props.isOrchestrating) return
+  () => (props.orchestrationLogs ?? []).map((log) => log.id).join('|'),
+  () => {
     const logs = props.orchestrationLogs ?? []
+    if (logs.length === 0) return
+
     const unseenLogs = logs.filter((log) => !displayedLogIds.value.includes(log.id))
     if (unseenLogs.length === 0) return
 
@@ -1281,6 +3097,44 @@ watch(
     if (displayedLogIds.value.length > MAX_DISPLAYED_LOG_IDS) {
       displayedLogIds.value.splice(0, displayedLogIds.value.length - MAX_DISPLAYED_LOG_IDS)
     }
+
+    if (messages.value.length > MAX_MESSAGE_COUNT) {
+      messages.value.splice(0, messages.value.length - MAX_MESSAGE_COUNT)
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => [props.channelId, props.date],
+  () => {
+    syncImportedLayoutState()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => ({
+    isOrchestrating: props.isOrchestrating,
+    sessionId: props.orchestrationSession?.id ?? '',
+    status: props.orchestrationSession?.status ?? '',
+  }),
+  ({ isOrchestrating, sessionId, status }) => {
+    if (
+      isOrchestrating ||
+      !sessionId ||
+      !['completed', 'manual_review'].includes(status) ||
+      !props.orchestrationSession
+    ) {
+      return
+    }
+
+    if (lastSummarySessionId.value === sessionId) {
+      return
+    }
+
+    messages.value.push(buildOrchestrationOverviewMessage(props.orchestrationSession))
+    lastSummarySessionId.value = sessionId
 
     if (messages.value.length > MAX_MESSAGE_COUNT) {
       messages.value.splice(0, messages.value.length - MAX_MESSAGE_COUNT)
@@ -1342,7 +3196,7 @@ watch(
 
 .system-summary-row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -1354,7 +3208,45 @@ watch(
   line-height: 1.5;
   color: #223046;
   white-space: normal;
-  word-break: break-all;
+  word-break: break-word;
+}
+
+.system-summary-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.reason-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reason-tag-row.is-panel {
+  margin-top: 10px;
+}
+
+.reason-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(255, 247, 237, 0.9);
+  border: 1px solid rgba(251, 146, 60, 0.16);
+  color: #9a3412;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.system-thinking-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #6b7280;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .process-pill {
@@ -1433,6 +3325,22 @@ watch(
   border-radius: 12px;
   padding: 12px;
   background: rgba(255, 255, 255, 0.88);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.explanation-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.explanation-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #78716c;
 }
 
 .explanation-content {
@@ -1441,14 +3349,131 @@ watch(
 }
 
 .explanation-content.is-secondary {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(148, 163, 184, 0.18);
   color: #475569;
 }
 
-.details-data,
-.pending-command-data {
+.explanation-content.is-risk {
+  color: #b45309;
+}
+
+.candidate-comparison-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.candidate-comparison-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.candidate-comparison-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  background: rgba(248, 250, 252, 0.96);
+}
+
+.candidate-comparison-item.is-selected {
+  border-color: rgba(251, 146, 60, 0.24);
+  background: rgba(255, 247, 237, 0.98);
+}
+
+.candidate-comparison-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.candidate-comparison-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.candidate-comparison-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(251, 146, 60, 0.14);
+  color: #9a3412;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.candidate-comparison-meta {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.candidate-comparison-note {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: right;
+  max-width: 180px;
+}
+
+.details-panel {
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  padding-top: 10px;
+}
+
+.details-toggle,
+.raw-details-toggle {
+  padding: 0;
+}
+
+.details-summary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.details-summary-list.is-panel {
+  margin-top: 12px;
+}
+
+.detail-summary-item {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.detail-summary-label {
+  color: #78716c;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.detail-summary-value {
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.raw-details-block {
+  margin-top: 2px;
+}
+
+.details-data {
   margin: 10px 0 0;
   padding: 12px;
   background: #0f172a;
@@ -1526,13 +3551,45 @@ watch(
   background: rgba(255, 255, 255, 0.86);
 }
 
+.layout-upload-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px 0;
+  color: #7c2d12;
+  font-size: 12px;
+}
+
+.layout-upload-label {
+  font-weight: 600;
+  color: #9a3412;
+}
+
+.layout-upload-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.layout-file-input {
+  display: none;
+}
+
 .input-area {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   gap: 10px;
   padding: 18px;
   border-top: 1px solid rgba(251, 146, 60, 0.12);
   background: rgba(255, 255, 255, 0.92);
+}
+
+.layout-upload-button {
+  min-width: 44px;
+  padding-left: 12px;
+  padding-right: 12px;
 }
 
 .input-area :deep(.el-textarea__inner) {
@@ -1550,6 +3607,15 @@ watch(
 
   .input-area {
     grid-template-columns: 1fr;
+  }
+
+  .candidate-comparison-item {
+    grid-template-columns: 1fr;
+  }
+
+  .candidate-comparison-note {
+    max-width: none;
+    text-align: left;
   }
 }
 </style>

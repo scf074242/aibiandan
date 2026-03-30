@@ -10,8 +10,47 @@ export interface ReplaceExecutionResult {
   validationReport?: ValidationReport
 }
 
+export interface ReplacePreviewResult {
+  canExecute: boolean
+  warnings: string[]
+  timeRange?: { start: string; end: string }
+}
+
 export class ReplaceCommandExecutor {
-  async execute(command: ReplaceCommand, context: { scheduleDate: string; channelId: string }): Promise<ReplaceExecutionResult> {
+  preview(command: ReplaceCommand): ReplacePreviewResult {
+    const { itemId, newCandidateId } = command.data
+    const atomicCapabilities = getAtomicCapabilities()
+    const currentItem = atomicCapabilities.getItem(itemId)
+
+    if (!currentItem) {
+      return {
+        canExecute: false,
+        warnings: [`未找到待替换节目 ${itemId}`],
+      }
+    }
+
+    const candidate = getCandidateService().getCandidateById(newCandidateId)
+    if (!candidate) {
+      return {
+        canExecute: false,
+        warnings: [`未找到替换候选节目 ${newCandidateId}`],
+      }
+    }
+
+    const nextEndTime = this.calculateEndTime(currentItem.startTime, candidate.duration)
+    const canExecute = atomicCapabilities.isTimeRangeAvailable(currentItem.startTime, nextEndTime, itemId)
+
+    return {
+      canExecute,
+      warnings: canExecute ? [] : ['替换后的节目时段与其他已编排记录重叠'],
+      timeRange: { start: currentItem.startTime, end: nextEndTime },
+    }
+  }
+
+  async execute(
+    command: ReplaceCommand,
+    context: { scheduleDate: string; channelId: string },
+  ): Promise<ReplaceExecutionResult> {
     const { itemId, newCandidateId } = command.data
     const atomicCapabilities = getAtomicCapabilities()
     const currentItem = atomicCapabilities.getItem(itemId)
@@ -19,7 +58,7 @@ export class ReplaceCommandExecutor {
     if (!currentItem) {
       return {
         success: false,
-        message: `条目不存在 ${itemId}`,
+        message: `未找到待替换节目 ${itemId}`,
       }
     }
 
@@ -28,6 +67,14 @@ export class ReplaceCommandExecutor {
       return {
         success: false,
         message: `未找到替换候选节目 ${newCandidateId}`,
+      }
+    }
+
+    const preview = this.preview(command)
+    if (!preview.canExecute) {
+      return {
+        success: false,
+        message: preview.warnings[0] || '替换后的节目与现有编排冲突，无法执行',
       }
     }
 
@@ -48,7 +95,20 @@ export class ReplaceCommandExecutor {
       }
     }
 
-    const validationReport = getScheduleValidationService().validateCurrentSchedule(context.scheduleDate, context.channelId)
+    const validationReport = getScheduleValidationService().validateCurrentSchedule(
+      context.scheduleDate,
+      context.channelId,
+    )
+
+    if (!validationReport.isValid) {
+      atomicCapabilities.restoreSnapshot(itemId)
+      return {
+        success: false,
+        message: `替换后校验未通过，已撤销本次修改（发现 ${validationReport.summary.totalIssues} 个问题）`,
+        validationReport,
+      }
+    }
+
     return {
       success: true,
       message: `已替换节目为 ${candidate.programName}`,

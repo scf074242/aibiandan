@@ -1,4 +1,4 @@
-import { getOrchestrationDemoColumn } from '@/mock/orchestrationMock'
+import { getEffectiveColumnDefinition } from './orchestration/runtimeLayoutRegistry'
 import type { GapInfo, GenerationContext, PlanningStrategy } from '@/types/orchestration'
 import type { LLMClient } from './llm/llmClient'
 
@@ -35,7 +35,7 @@ export class OrchestrationStrategyService {
     context: GenerationContext,
   ): GapPlanningThought {
     const layoutMatch = this.findLayoutMatch(gap, context)
-    const column = layoutMatch?.columnId ? getOrchestrationDemoColumn(layoutMatch.columnId) : undefined
+    const column = layoutMatch?.columnId ? getEffectiveColumnDefinition(layoutMatch.columnId) : undefined
     const inferredTypes =
       gap.constraints.allowedTypes?.length
         ? gap.constraints.allowedTypes

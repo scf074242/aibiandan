@@ -139,6 +139,7 @@ export type PlanningSessionStatus =
   | 'planning'
   | 'filling'
   | 'repairing'
+  | 'manual_review'
   | 'completed'
   | 'failed'
   | 'cancelled'
@@ -595,6 +596,7 @@ export interface ColumnDefinition {
   columnName: string
   channelId: string
   defaultProgramType: string
+  isSequential?: boolean
 }
 
 /** 版面参考 */
