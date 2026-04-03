@@ -64,11 +64,11 @@ interface ExecutedGapPlanResult {
 }
 
 class EventEmitter {
-  private listeners = new Map<keyof EventPayloadMap, Array<(payload: any) => void>>()
+  private listeners = new Map<keyof EventPayloadMap, Array<(payload: EventPayloadMap[keyof EventPayloadMap]) => void>>()
 
   on<K extends keyof EventPayloadMap>(event: K, listener: (payload: EventPayloadMap[K]) => void) {
     const current = this.listeners.get(event) ?? []
-    current.push(listener as (payload: any) => void)
+    current.push(listener as (payload: EventPayloadMap[keyof EventPayloadMap]) => void)
     this.listeners.set(event, current)
     return this
   }

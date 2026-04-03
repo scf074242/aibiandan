@@ -393,8 +393,6 @@ const formatDuration = (seconds: number) => {
   return `${seconds} 秒`
 }
 
-const formatColumnDisplayName = (name: string) => name.replace(/带$/, '')
-
 const normalizeClockText = (value: string) => {
   if (!value) return ''
   if (value.includes('T')) {

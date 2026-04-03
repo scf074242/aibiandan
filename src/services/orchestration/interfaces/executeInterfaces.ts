@@ -5,6 +5,7 @@
 
 import type {
   OrchestrationCommand,
+  ProgramCandidate,
   ValidationReport,
   RepairAction,
   ScheduleItemSnapshot,
@@ -127,7 +128,7 @@ export class ExecuteInterfaces {
     validationReport: ValidationReport,
     context: {
       items: ScheduleItemSnapshot[]
-      candidates: any[]
+      candidates: ProgramCandidate[]
     },
   ): Promise<{
     success: boolean

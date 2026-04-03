@@ -73,6 +73,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import type { Component } from 'vue'
 import type { TaskMode } from '@/types/orchestration'
 import {
   Guide,
@@ -90,7 +91,7 @@ interface ModeOption {
   label: string
   description: string
   detailDescription: string
-  icon: any
+  icon: Component
   conditions: string[]
   recommended?: boolean
   disabled?: boolean

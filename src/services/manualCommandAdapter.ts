@@ -113,7 +113,7 @@ export class ManualCommandAdapter {
     }
   }
 
-  private buildUpdateFieldCommand(itemId: string, field: string, value: any): UpdateFieldCommand {
+  private buildUpdateFieldCommand(itemId: string, field: string, value: unknown): UpdateFieldCommand {
     return {
       action: 'update_field',
       reasoning: `人工修改了字段 ${field}，转换为统一更新命令。`,

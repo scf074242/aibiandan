@@ -130,7 +130,7 @@ export interface PlanningLogEntry {
   level: 'info' | 'warn' | 'error'
   phase: string
   message: string
-  details?: Record<string, any>
+  details?: Record<string, unknown>
 }
 
 /** 编排会话状态 */
@@ -239,7 +239,7 @@ export interface RepairCommand extends BaseCommand {
     targetId: string
     targetType: 'item' | 'gap'
     strategy: RepairStrategy
-    parameters?: Record<string, any>
+    parameters?: Record<string, unknown>
   }
 }
 
@@ -290,7 +290,7 @@ export interface UpdateFieldCommand extends BaseCommand {
   data: {
     itemId: string
     field: string
-    value: any
+    value: unknown
   }
 }
 
@@ -420,7 +420,7 @@ export interface RepairAction {
   description: string
   targetIssueId: string
   estimatedImpact: 'low' | 'medium' | 'high'
-  parameters?: Record<string, any>
+  parameters?: Record<string, unknown>
 }
 
 // ==================== 物化相关 ====================
@@ -508,7 +508,7 @@ export interface FallbackRecord {
   timestamp: string
   reason: string
   affectedItems: string[]
-  snapshot: any
+  snapshot: unknown
 }
 
 /** 回退策略配置 */
@@ -668,7 +668,7 @@ export interface CommandPreview {
   command: OrchestrationCommand
   affectedItems: string[]
   affectedTimeRanges: TimeRange[]
-  estimatedResult?: any
+  estimatedResult?: unknown
   warnings?: string[]
   canExecute: boolean
 }
@@ -678,7 +678,7 @@ export interface ExplanationResult {
   type: 'candidate_selection' | 'validation_issue' | 'command'
   targetId: string
   explanation: string
-  details?: Record<string, any>
+  details?: Record<string, unknown>
 }
 
 export interface ValidationContext {

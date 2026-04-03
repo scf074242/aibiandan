@@ -16,7 +16,7 @@ import type {
 } from '@/types/orchestration'
 
 /** 原子操作结果 */
-export interface AtomicOperationResult<T = any> {
+export interface AtomicOperationResult<T = unknown> {
   success: boolean
   data?: T
   error?: string
@@ -30,8 +30,8 @@ export interface OperationChange {
   type: 'insert' | 'delete' | 'update' | 'move'
   itemId: string
   field?: string
-  oldValue?: any
-  newValue?: any
+  oldValue?: unknown
+  newValue?: unknown
 }
 
 /** 条目快照 */
@@ -372,9 +372,9 @@ export class AtomicCapabilities {
   async updateField(
     itemId: string,
     field: string,
-    value: any,
+    value: unknown,
     options?: { skipValidation?: boolean },
-  ): Promise<AtomicOperationResult<{ item: ScheduleItemSnapshot; oldValue: any; newValue: any }>> {
+  ): Promise<AtomicOperationResult<{ item: ScheduleItemSnapshot; oldValue: unknown; newValue: unknown }>> {
     try {
       const item = this.items.get(itemId)
       if (!item) {
@@ -385,7 +385,7 @@ export class AtomicCapabilities {
       }
 
       // 保存旧值
-      const oldValue = (item as any)[field]
+      const oldValue = (item as unknown as Record<string, unknown>)[field]
 
       // 创建快照
       this.createSnapshot(itemId, 'update_field')
@@ -395,8 +395,8 @@ export class AtomicCapabilities {
       
       // 如果更新的是时间相关字段，需要重新计算
       if (field === 'startTime' || field === 'duration') {
-        const startTime = field === 'startTime' ? value : item.startTime
-        const duration = field === 'duration' ? value : item.duration
+        const startTime = field === 'startTime' && typeof value === 'string' ? value : item.startTime
+        const duration = field === 'duration' && typeof value === 'number' ? value : item.duration
         const startMs = new Date(startTime).getTime()
         const endMs = startMs + duration * 1000
         updatedItem.endTime = this.formatLocalDateTime(endMs)

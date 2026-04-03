@@ -11,6 +11,7 @@ import type {
   CandidateQueryResult,
   GapInfo,
   ProgramCandidate,
+  ScheduleItemSnapshot,
 } from '@/types/orchestration'
 
 export interface CandidateServiceConfig {
@@ -42,6 +43,13 @@ type CandidateSortContext = {
   gap?: GapInfo
   criteria?: CandidateQueryCriteria
   keyword?: string
+}
+
+type ScheduledItemRecord = ScheduleItemSnapshot & {
+  keySlot?: string
+  columnId?: string
+  code18?: string
+  instanceName?: string
 }
 
 const DEFAULT_CONFIG: CandidateServiceConfig = {
@@ -301,12 +309,16 @@ export class CandidateService {
     return Boolean(getEffectiveColumnDefinition(columnId)?.isSequential)
   }
 
+  private toScheduledItemRecord(item: ScheduleItemSnapshot): ScheduledItemRecord {
+    return item as ScheduledItemRecord
+  }
+
   private collectScheduledSequenceState(columnId: string, allowedProgramIds: Set<string>) {
     const maxSequenceBySeries = new Map<string, number>()
     const seriesWithSchedule = new Set<string>()
 
     this.atomicCapabilities.getAllItems().forEach((item) => {
-      const matchedCandidate = this.resolveScheduledCandidate(item as Record<string, any>, columnId, allowedProgramIds)
+      const matchedCandidate = this.resolveScheduledCandidate(this.toScheduledItemRecord(item), columnId, allowedProgramIds)
       if (!matchedCandidate) return
 
       const seriesKey = this.buildSeriesKey(matchedCandidate)
@@ -329,7 +341,7 @@ export class CandidateService {
   }
 
   private resolveScheduledCandidate(
-    item: Record<string, any>,
+    item: ScheduledItemRecord,
     columnId: string,
     allowedProgramIds: Set<string>,
   ): ProgramCandidate | undefined {
@@ -441,7 +453,7 @@ export class CandidateService {
     return this.atomicCapabilities
       .getAllItems()
       .map((item) => {
-        const record = item as Record<string, any>
+        const record = this.toScheduledItemRecord(item)
         return String(record.programCode ?? record.code18 ?? record.id ?? '')
       })
       .filter(Boolean)
@@ -454,7 +466,7 @@ export class CandidateService {
     return this.atomicCapabilities
       .getAllItems()
       .some((item) => {
-        const record = item as Record<string, any>
+        const record = this.toScheduledItemRecord(item)
         return record.programCode === programCode || record.code18 === programCode
       })
   }

@@ -422,23 +422,16 @@
 </template>
 
 <script setup lang="ts">
+defineOptions({
+  name: 'BroadcastPlanCreate',
+})
+
 import { ref, computed, onMounted, nextTick, watch, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft,
-  ArrowRight,
-  ArrowUp,
-  ArrowDown,
   Plus,
-  Delete,
-  Check,
-  DocumentChecked,
-  Lock,
-  Unlock,
-  VideoCamera,
-  VideoPlay,
   View,
-  Document,
   WarningFilled,
   ChatDotRound,
   Close
@@ -460,10 +453,30 @@ import {
   getTimeDiff
 } from './scheduleData'
 import { demoBaseDate } from '@/mock/demoData'
-import { layoutReferenceData, type LayoutReferenceItem } from './layoutReferenceData'
+import { layoutReferenceData } from './layoutReferenceData'
+import {
+  mapAtomicItemToPageItem,
+  mapPageItemToAtomicSnapshot,
+  mapScheduleItemToChatSchedule,
+} from './broadcastPlanScheduleBridge'
+import {
+  buildDisplayGapEntries,
+  buildRuntimeGapEntries,
+  buildTimeDiscontinuities,
+  resolveGapSummaryLabel,
+} from './broadcastPlanGapState'
+import type { GapEntry, TimeDiscontinuity } from './broadcastPlanGapState'
+import {
+  buildReferenceItems,
+  countEmptyMaterialItems,
+  countUnlinkedItems,
+  selectDisplayItems,
+  sortScheduleItems,
+} from './broadcastPlanViewState'
+import { useBroadcastPlanEditor } from './useBroadcastPlanEditor'
+import { useBroadcastPlanOrchestration } from './useBroadcastPlanOrchestration'
 
 // AI 编排相关导入
-import { useOrchestrator } from '@/composables/useOrchestrator'
 import { getAtomicCapabilities } from '@/services/atomicCapabilities'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
 import { getManualCommandAdapter } from '@/services/manualCommandAdapter'
@@ -477,11 +490,6 @@ const router = useRouter()
 
 // 页面模式
 const isViewMode = computed(() => route.query.mode === 'view')
-const isEditMode = computed(() => !isViewMode.value)
-const pageTitle = computed(() => {
-  if (isViewMode.value) return '查看编单'
-  return '编辑编单'
-})
 
 const isHeaderFieldsDisabled = computed(() => {
   return isViewMode.value || Boolean(route.params.id) || Boolean(scheduleForm.value.isLocked)
@@ -499,13 +507,6 @@ const channelOptions = ref([
   { id: 'sports', name: '五星体育' },
   { id: 'doc', name: '纪实人文' },
   { id: 'cartoon', name: '哈哈炫动' }
-])
-
-// 编辑者列表
-const editors = ref([
-  { id: 'user1', name: '张三', avatar: 'https://cube.elemecdn.com/0/88/03b0d39583f48206768a7534e55bcpng.png' },
-  { id: 'user2', name: '李四', avatar: 'https://cube.elemecdn.com/3/7c/3ea6beec64369c2642b92c6726f1epng.png' },
-  { id: 'user3', name: '王五', avatar: 'https://cube.elemecdn.com/9/0/e5e9e6c8f0e0e0e0e0e0e0e0e0e0e0e0.png' }
 ])
 
 // 编单表单
@@ -610,7 +611,6 @@ const timelineContentRef = ref<HTMLElement | null>(null)
 const scrollTrackRef = ref<HTMLElement | null>(null)
 const contentScrollWidth = ref(0)
 const contentClientWidth = ref(0)
-const showHorizontalScrollBar = computed(() => contentScrollWidth.value > contentClientWidth.value + 1)
 let isSyncingScroll = false
 let resizeRaf = 0
 
@@ -631,15 +631,6 @@ const handleTimelineContentScroll = (event: Event) => {
   if (!scrollTrackRef.value || scrollTrackRef.value === target) return
   isSyncingScroll = true
   scrollTrackRef.value.scrollLeft = target.scrollLeft
-  isSyncingScroll = false
-}
-
-const handleScrollTrackScroll = (event: Event) => {
-  if (isSyncingScroll) return
-  const target = event.target as HTMLElement
-  if (!timelineContentRef.value || timelineContentRef.value === target) return
-  isSyncingScroll = true
-  timelineContentRef.value.scrollLeft = target.scrollLeft
   isSyncingScroll = false
 }
 
@@ -665,13 +656,6 @@ const syncCurrentBroadcastWindow = async () => {
 // 版面参考显示状态
 const showLayoutReference = ref(false)
 
-// 弹窗相关
-const dialogVisible = ref(false)
-const editingItem = ref<ScheduleItem | null>(null)
-
-// 保存状态
-const saving = ref(false)
-
 // AI 编排相关状态
 const aiSidebarVisible = ref(true)
 const aiUserInput = ref('')
@@ -692,92 +676,23 @@ const currentBroadcastWindowText = computed(
   () => `${formatTime4(currentBroadcastWindow.value.startTime)} - ${formatTime4(currentBroadcastWindow.value.endTime)}`,
 )
 
-const formatAtomicDateTime = (value: Date) => {
-  const year = value.getFullYear()
-  const month = String(value.getMonth() + 1).padStart(2, '0')
-  const day = String(value.getDate()).padStart(2, '0')
-  const hours = String(value.getHours()).padStart(2, '0')
-  const minutes = String(value.getMinutes()).padStart(2, '0')
-  const seconds = String(value.getSeconds()).padStart(2, '0')
-  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
-}
-
-const normalizeAtomicDateTime = (value: string, fallbackDate: string, dayOffset = 0) => {
-  if (value.includes('T')) {
-    return /([zZ]|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}+08:00`
-  }
-
-  const normalizedClock = value.length === 5 ? `${value}:00` : value
-  const baseDate = new Date(`${fallbackDate}T00:00:00+08:00`)
-  baseDate.setDate(baseDate.getDate() + dayOffset)
-  const [hours = 0, minutes = 0, seconds = 0] = normalizedClock
-    .split(':')
-    .map((part) => parseInt(part || '0', 10) || 0)
-  baseDate.setHours(hours, minutes, seconds, 0)
-  return formatAtomicDateTime(baseDate)
-}
-
-const buildAtomicTimeRange = (date: string, startTime: string, endTime: string) => {
-  const startClock = normalizeClockText(startTime)
-  const endClock = normalizeClockText(endTime)
-  const startSeconds = timeToSeconds(startClock)
-  const endSeconds = timeToSeconds(endClock)
-  const endDayOffset = endSeconds <= startSeconds ? 1 : 0
-  const normalizedStartTime = normalizeAtomicDateTime(startTime, date)
-  const normalizedEndTime = normalizeAtomicDateTime(endTime, date, endDayOffset)
-  const duration = Math.max(
-    60,
-    Math.floor((new Date(normalizedEndTime).getTime() - new Date(normalizedStartTime).getTime()) / 1000),
-  )
-
-  return {
-    normalizedStartTime,
-    normalizedEndTime,
-    duration,
-  }
-}
-
 const syncPageItemsToAtomic = () => {
   const date = scheduleForm.value.date || demoBaseDate
   atomicCapabilities.loadItems(
-    scheduleItems.value.map((item, index) => {
-      const timeRange = buildAtomicTimeRange(date, item.startTime, item.endTime)
-      return {
-        id: item.id,
-        programCode: item.programCode || item.code18 || item.id,
-        programName: item.programName || item.instanceName || '未命名节目',
-        startTime: timeRange.normalizedStartTime,
-        endTime: timeRange.normalizedEndTime,
-        duration: timeRange.duration,
-        programType: resolveScheduleItemProgramType(item),
-        sequence: index + 1,
-        relativeStartSeconds: timeToSeconds(item.relativeStart || '00:00:00'),
-      }
-    }),
+    scheduleItems.value.map((item, index) => mapPageItemToAtomicSnapshot(item, index, date, {
+      normalizeClockText,
+      timeToSeconds,
+      resolveScheduleItemProgramType,
+    })),
   )
 }
 
 const syncAtomicItemsToPage = () => {
   const atomicItems = atomicCapabilities.getAllItems()
-  scheduleItems.value = atomicItems.map((item, index) => ({
-    id: item.id,
+  scheduleItems.value = atomicItems.map((item, index) => mapAtomicItemToPageItem(item, index, {
     scheduleId: scheduleForm.value.id || '',
-    startTime: item.startTime.split('T')[1]?.slice(0, 8) || item.startTime,
-    endTime: item.endTime.split('T')[1]?.slice(0, 8) || item.endTime,
-    programType: item.programType,
-    instanceName: item.programName,
-    programName: item.programName,
-    businessType: item.programType === 'ad' ? 'ad' : 'program',
-    sourceType: item.programType === 'live' ? 'live' : 'record',
-    sortOrder: index + 1,
-    duration: Math.max(1, Math.round(item.duration / 60)),
-    programCode: item.programCode,
-    code18: item.programCode,
-    materialStatus: item.programType === 'ad' ? 'pending' : 'ready',
-    materialName: item.programType === 'ad' ? '待广告系统下发' : `${item.programCode}-MAT`,
-    playLength: formatPlayLengthText(item.duration),
-    relativeStart: formatRelativeStart(item.relativeStartSeconds ?? 0),
-    remark: '',
+    formatPlayLengthText,
+    formatRelativeStart,
   }))
 }
 
@@ -792,171 +707,37 @@ const syncAtomicItemsToPageDeferred = () => {
 }
 
 const chatScheduleItems = computed(() =>
-  scheduleItems.value.map((item) => ({
-    id: item.id,
-    programCode: item.programCode || item.code18 || item.id,
-    programName: item.programName || item.instanceName || '未命名节目',
-    startTime: item.startTime,
-    endTime: item.endTime,
-    duration: Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime)),
-    programType: resolveScheduleItemProgramType(item),
+  scheduleItems.value.map((item) => mapScheduleItemToChatSchedule(item, {
+    timeToSeconds,
+    normalizeClockText,
+    resolveScheduleItemProgramType,
   })),
 )
 
-const handleChatCommandExecuted = (result: { success: boolean; message: string }) => {
-  if (result.success) {
-    syncAtomicItemsToPage()
-  }
-}
-
-const handleChatScheduleUpdated = () => {
-  syncAtomicItemsToPage()
-}
-
-const handleChatOrchestrateRequested = async (payload: { userInput: string }) => {
-  aiUserInput.value = payload.userInput
-  await handleAICommand()
-}
-
-const orchestratorRuntime = useOrchestrator({
-  onComplete: (session) => {
-    syncAtomicItemsToPage()
-    if (session.status === 'manual_review') {
-      ElMessage.warning('自动编排阶段已结束，仍有空窗待人工确认')
-      return
-    }
-    ElMessage.success('AI 编排完成')
-  },
-  onError: (error: Error) => {
-    ElMessage.error(`AI 编排失败: ${error.message}`)
-  },
-  onProgress: () => {
-    syncAtomicItemsToPageDeferred()
-  },
-  onStatusChange: (status) => {
-    if (status === 'cancelled') {
-      syncAtomicItemsToPage()
-      ElMessage.info('AI 编排已中止，当前已生成内容已保留')
-    }
-  },
-  onLog: (log: any) => {
-    console.log('编排日志:', log.message || log)
-  }
-})
-
-const startOrchestrationRuntime = async () => {
-  try {
-    syncPageItemsToAtomic()
-    await orchestratorRuntime.startFullGeneration(
-      currentChannelId.value,
-      scheduleDate.value,
-      '06:00:00',
-      '23:59:59',
-    )
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : 'AI 编排失败')
-  }
-}
-
-const handleAICommand = async () => {
-  const userInput = aiUserInput.value.trim()
-  if (!userInput) {
-    ElMessage.warning('请输入需求')
-    return
-  }
-
-  const date = scheduleDate.value
-  const task = await orchestratorRuntime.classifyTask(
-    {
-      channelId: currentChannelId.value,
-      channelName: currentChannelName.value,
-      date,
-      isEmpty: scheduleItems.value.length === 0,
-      itemCount: scheduleItems.value.length,
-      gapCount: displayGapCount.value,
-      hasSelectedTimeRange: false,
-    },
-    userInput,
-  )
-
-  aiUserInput.value = ''
-
-  if (task.mode === 'partial_generate' && scheduleItems.value.length > 0) {
-    syncPageItemsToAtomic()
-    await orchestratorRuntime.startPartialGeneration(
-      currentChannelId.value,
-      date,
-    )
-    return
-  }
-
-  await startOrchestrationRuntime()
-}
-
-const handleCancelOrchestration = async () => {
-  try {
-    await ElMessageBox.confirm(
-      '中止后将保留当前已编排结果，剩余空窗不再继续自动处理。是否停止本次 AI 编排？',
-      '中止编排',
-      {
-        type: 'warning',
-        confirmButtonText: '中止编排',
-        cancelButtonText: '继续运行',
-      },
-    )
-    orchestratorRuntime.cancel()
-  } catch {
-    // 用户取消中止
-  }
-}
-
 // 排序后的编单项
 const sortedItems = computed(() => {
-  return [...scheduleItems.value].sort((a, b) => {
-    if (a.sortOrder !== b.sortOrder) return (a.sortOrder || 0) - (b.sortOrder || 0)
-    return timeToMinutes(a.startTime) - timeToMinutes(b.startTime)
-  })
+  return sortScheduleItems(scheduleItems.value, timeToMinutes)
 })
 
 // 版面参考项（转换为ScheduleItem格式）
 const referenceItems = computed<ScheduleItem[]>(() => {
   const channelId = currentChannelId.value
-  const references = layoutReferenceData[channelId] || []
-  return references.map((ref, index): ScheduleItem => ({
-    id: `ref-${index}`,
-    scheduleId: '',
-    startTime: `${ref.startTime}:00`,
-    endTime: `${ref.endTime}:00`,
-    programType: ref.programType,
-    instanceName: normalizeDemoDisplayName(ref.programName),
-    indexingSheetCode: `IDX${ref.code18 || String(index + 1).padStart(6, '0')}`,
-    materialStatus: 'ready' as const,
-    businessType: ref.type,
-    programName: normalizeDemoDisplayName(ref.programName),
-    sourceType: ref.sourceType,
-    remark: ref.remark || '',
-    sortOrder: index,
-    duration: getTimeDiff(ref.startTime || '', ref.endTime || ''),
-    isReference: true,
-    code18: ref.code18 || ''
-  }))
+  return buildReferenceItems(layoutReferenceData[channelId] || [], {
+    normalizeDemoDisplayName,
+    getTimeDiff,
+  })
 })
 
 // 显示的项目（实际编排或版面参考）
-const displayItems = computed<ScheduleItem[]>(() => {
-  if (showLayoutReference.value) {
-    return referenceItems.value
-  }
-  return sortedItems.value
-})
+const displayItems = computed<ScheduleItem[]>(() =>
+  selectDisplayItems(showLayoutReference.value, referenceItems.value, sortedItems.value),
+)
 
-const unlinkedItemCount = computed(() => {
-  return scheduleItems.value.filter(v => v.isUnlinkedProduct).length
-})
+const unlinkedItemCount = computed(() => countUnlinkedItems(scheduleItems.value))
 
-const emptyMaterialItemCount = computed(() => {
-  return scheduleItems.value.filter(v => shouldWarnEmptyMaterialFields(v)).length
-})
+const emptyMaterialItemCount = computed(() =>
+  countEmptyMaterialItems(scheduleItems.value, shouldWarnEmptyMaterialFields),
+)
 
 const timeToSeconds = (time: string): number => {
   const parts = String(time || '').split(':')
@@ -1001,83 +782,38 @@ const resolveManualCandidateId = async (item: Partial<ScheduleItem>): Promise<st
   return (exactMatch ?? candidates[0])?.id ?? null
 }
 
-type TimeDiscontinuity = {
-  id: string
-  from: string
-  to: string
-  prevId: string
-  nextId: string
-  prevSortOrder: number
-  nextSortOrder: number
-}
-
-type GapEntry = TimeDiscontinuity & {
-  source: 'manual' | 'runtime'
-  status: GapProcessingStatus
-  error?: string
-}
-
 const timeDiscontinuities = computed<TimeDiscontinuity[]>(() => {
-  const items = sortedItems.value.filter(v => !v.isReference)
-  if (items.length < 2) return []
-  const list: TimeDiscontinuity[] = []
-  for (let i = 0; i < items.length - 1; i++) {
-    const prev = items[i]
-    const next = items[i + 1]
-    if (!prev?.endTime || !next?.startTime) continue
-    const prevEnd = timeToSeconds(prev.endTime)
-    const nextStart = timeToSeconds(next.startTime)
-    if (prevEnd === nextStart) continue
-    if (nextStart <= prevEnd) continue
-    const from = prev.endTime
-    const to = next.startTime
-    list.push({
-      id: `${prev.id}-${next.id}`,
-      from,
-      to,
-      prevId: prev.id,
-      nextId: next.id,
-      prevSortOrder: prev.sortOrder || 0,
-      nextSortOrder: next.sortOrder || 0
-    })
-  }
-  return list
+  return buildTimeDiscontinuities(sortedItems.value, timeToSeconds)
 })
 
 const runtimeGapEntries = computed<GapEntry[]>(() => {
-  const progress = orchestratorRuntime.progress.value
-  if (!progress) return []
-
-  return progress.liveGaps
-    .filter((gap) => gap.status !== 'completed')
-    .map((gap) => ({
-      id: gap.id,
-      from: normalizeClockText(gap.startTime),
-      to: normalizeClockText(gap.endTime),
-      prevId: gap.precedingItemId || '',
-      nextId: gap.followingItemId || '',
-      prevSortOrder: 0,
-      nextSortOrder: 0,
-      source: 'runtime',
-      status: gap.status,
-      error: gap.error,
-    }))
+  return buildRuntimeGapEntries(orchestratorRuntime.progress.value, normalizeClockText)
 })
 
 const displayGapEntries = computed<GapEntry[]>(() => {
-  if (runtimeGapEntries.value.length > 0) {
-    return runtimeGapEntries.value
-  }
-
-  return timeDiscontinuities.value.map((gap) => ({
-    ...gap,
-    source: 'manual' as const,
-    status: 'pending' as const,
-  }))
+  return buildDisplayGapEntries(runtimeGapEntries.value, timeDiscontinuities.value)
 })
 
 const displayGapCount = computed(() => displayGapEntries.value.length)
-const gapSummaryLabel = computed(() => (runtimeGapEntries.value.length > 0 ? '待处理空窗' : '时间空缺'))
+const gapSummaryLabel = computed(() => resolveGapSummaryLabel(runtimeGapEntries.value))
+
+const {
+  orchestratorRuntime,
+  handleCancelOrchestration,
+  handleChatCommandExecuted,
+  handleChatOrchestrateRequested,
+  handleChatScheduleUpdated,
+} = useBroadcastPlanOrchestration({
+  aiUserInput,
+  currentChannelId,
+  currentChannelName,
+  scheduleDate,
+  scheduleItems,
+  displayGapCount,
+  syncPageItemsToAtomic,
+  syncAtomicItemsToPage,
+  syncAtomicItemsToPageDeferred,
+})
 
 const getGapEntryStatusText = (status: GapProcessingStatus) => {
   switch (status) {
@@ -1105,25 +841,35 @@ const getGapEntryTagType = (status: GapProcessingStatus): 'info' | 'warning' | '
   }
 }
 
-const gapDialogDefaults = ref<{ startTime: string; endTime: string; sortOrder: number } | null>(null)
-
-const openAddItemForGap = (gap: TimeDiscontinuity) => {
-  if (isViewMode.value || scheduleForm.value.isLocked) return
-  if (allowedDialogTypes.value.length === 0) {
-    ElMessage.warning('当前用户无可编辑板块权限')
-    return
-  }
-  const a = gap.prevSortOrder
-  const b = gap.nextSortOrder
-  const sortOrder = b > a ? (a + b) / 2 : a + 0.5
-  gapDialogDefaults.value = {
-    startTime: gap.from,
-    endTime: gap.to,
-    sortOrder
-  }
-  editingItem.value = null
-  dialogVisible.value = true
-}
+const {
+  dialogVisible,
+  editingItem,
+  gapDialogDefaults,
+  openAddItemForGap,
+  handleAddItem,
+  handleItemClick,
+  handleEmptyAreaClick,
+  handleDeleteItemById,
+  handleSaveItem,
+} = useBroadcastPlanEditor({
+  isViewMode,
+  scheduleForm,
+  scheduleItems,
+  allowedDialogTypes,
+  canEditSection,
+  scheduleDate,
+  currentChannelId,
+  syncAtomicItemsToPage,
+  resolveManualCandidateId,
+  generateId,
+  resolveScheduleItemProgramType,
+  normalizeClockText,
+  formatRelativeStart,
+  formatPlayLengthText,
+  timeToSeconds,
+  scheduleCommandBus,
+  manualCommandAdapter,
+})
 
 // 最大排序号
 const maxSortOrder = computed(() => {
@@ -1166,332 +912,6 @@ const handleBack = () => {
   router.back()
 }
 
-/**
- * 切换版面参考显示
- */
-const toggleLayoutReference = () => {
-  showLayoutReference.value = false
-}
-
-/**
- * 处理添加编单项
- */
-const handleAddItem = () => {
-  if (allowedDialogTypes.value.length === 0) {
-    ElMessage.warning('当前用户无可编辑板块权限')
-    return
-  }
-  gapDialogDefaults.value = null
-  editingItem.value = null
-  dialogVisible.value = true
-}
-
-/**
- * 处理编辑编单项
- * @param item - 编单项
- */
-const handleEditItem = (item: ScheduleItem) => {
-  gapDialogDefaults.value = null
-  editingItem.value = { ...item }
-  dialogVisible.value = true
-}
-
-/**
- * 处理点击编单项
- * @param item - 编单项
- */
-const handleItemClick = (item: ScheduleItem) => {
-  if (!isViewMode.value && !scheduleForm.value.isLocked && !item.isReference) {
-    if (!canEditSection(item)) {
-      ElMessage.warning('当前用户无权限编辑该板块内容')
-      return
-    }
-    handleEditItem(item)
-  }
-}
-
-/**
- * 处理空白区域点击 - 创建新编单项
- * @param event - 点击事件
- */
-const handleEmptyAreaClick = (event: MouseEvent) => {
-  // 如果点击的是节目行本身，不处理（由handleItemClick处理）
-  const target = event.target as HTMLElement
-  if (target.closest('.schedule-item-row')) {
-    return
-  }
-
-  // 只有在非查看模式且未锁定时才允许创建
-  if (isViewMode.value || scheduleForm.value.isLocked) {
-    return
-  }
-  if (allowedDialogTypes.value.length === 0) {
-    ElMessage.warning('当前用户无可编辑板块权限')
-    return
-  }
-
-  // 显示创建弹窗
-  gapDialogDefaults.value = null
-  editingItem.value = null
-  dialogVisible.value = true
-}
-
-/**
- * 处理删除编单项
- * @param item - 编单项
- * @param index - 索引
- */
-const handleDeleteItem = (item: ScheduleItem, index: number) => {
-  ElMessageBox.confirm(
-    `确定要删除节目"${item.programName}"吗？`,
-    '删除节目',
-    {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'warning'
-    }
-  ).then(async () => {
-    const result = await scheduleCommandBus.execute(
-      manualCommandAdapter.buildDeleteCommand(item),
-      {
-        scheduleDate: scheduleDate.value,
-        channelId: currentChannelId.value,
-      },
-    )
-
-    if (!result.success) {
-      ElMessage.error(result.error || result.message)
-      return
-    }
-
-    syncAtomicItemsToPage()
-    ElMessage.success(result.message)
-  })
-}
-
-const handleDeleteItemById = async (itemId: string) => {
-  const item = scheduleItems.value.find((entry) => entry.id === itemId)
-  if (!item) {
-    ElMessage.error('未找到待删除节目')
-    return
-  }
-
-  const result = await scheduleCommandBus.execute(
-    manualCommandAdapter.buildDeleteCommand(item),
-    {
-      scheduleDate: scheduleDate.value,
-      channelId: currentChannelId.value,
-    },
-  )
-
-  if (!result.success) {
-    ElMessage.error(result.error || result.message)
-    return
-  }
-
-  syncAtomicItemsToPage()
-  gapDialogDefaults.value = null
-  ElMessage.success(result.message)
-}
-
-const handleMoveUp = async (item: ScheduleItem, index: number) => {
-  const currentIndex = sortedItems.value.findIndex(v => v.id === item.id)
-  if (currentIndex <= 0) return
-  const prev = sortedItems.value[currentIndex - 1]
-  const cur = sortedItems.value[currentIndex]
-  if (!prev || !cur) return
-  const a = scheduleItems.value.find(v => v.id === cur.id)
-  const b = scheduleItems.value.find(v => v.id === prev.id)
-  if (!a || !b) return
-
-  const result = await scheduleCommandBus.executeBatch(
-    manualCommandAdapter.buildSortSwapCommands(a.id, b.sortOrder || 0, b.id, a.sortOrder || 0),
-    {
-      scheduleDate: scheduleDate.value,
-      channelId: currentChannelId.value,
-    },
-  )
-
-  if (!result.success) {
-    ElMessage.error(result.error || result.message)
-    return
-  }
-
-  syncAtomicItemsToPage()
-  ElMessage.success('已上移')
-}
-
-const handleMoveDown = async (item: ScheduleItem, index: number) => {
-  const currentIndex = sortedItems.value.findIndex(v => v.id === item.id)
-  if (currentIndex < 0 || currentIndex >= sortedItems.value.length - 1) return
-  const next = sortedItems.value[currentIndex + 1]
-  const cur = sortedItems.value[currentIndex]
-  if (!next || !cur) return
-  const a = scheduleItems.value.find(v => v.id === cur.id)
-  const b = scheduleItems.value.find(v => v.id === next.id)
-  if (!a || !b) return
-
-  const result = await scheduleCommandBus.executeBatch(
-    manualCommandAdapter.buildSortSwapCommands(a.id, b.sortOrder || 0, b.id, a.sortOrder || 0),
-    {
-      scheduleDate: scheduleDate.value,
-      channelId: currentChannelId.value,
-    },
-  )
-
-  if (!result.success) {
-    ElMessage.error(result.error || result.message)
-    return
-  }
-
-  syncAtomicItemsToPage()
-  ElMessage.success('已下移')
-}
-
-/**
- * 处理保存编单项
- * @param item - 编单项
- */
-const handleSaveItem = async (item: Partial<ScheduleItem>) => {
-  if (!item.startTime || !item.endTime) {
-    ElMessage.error('节目数据不完整，无法保存')
-    return
-  }
-
-  const normalizedItem: ScheduleItem = {
-    ...item,
-    id: item.id || generateId(),
-    programType: resolveScheduleItemProgramType(item),
-    startTime: normalizeClockText(item.startTime),
-    endTime: normalizeClockText(item.endTime),
-    relativeStart: item.relativeStart || formatRelativeStart(),
-    playLength: item.playLength || formatPlayLengthText(Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime))),
-    materialStatus: item.materialStatus || (resolveScheduleItemProgramType(item) === 'ad' ? 'pending' : item.materialStatus),
-    materialName:
-      item.materialName ||
-      (resolveScheduleItemProgramType(item) === 'ad' ? '待广告系统下发' : item.programCode ? `${item.programCode}-MAT` : ''),
-  }
-  const commandContext: { scheduleDate: string; channelId: string } = {
-    scheduleDate: scheduleDate.value,
-    channelId: currentChannelId.value,
-  }
-  const currentIndex = scheduleItems.value.findIndex(i => i.id === normalizedItem.id)
-
-  if (currentIndex > -1) {
-    const currentItem = scheduleItems.value[currentIndex]
-    if (!currentItem) return
-    const commands = manualCommandAdapter.buildUpdateCommands(currentItem, normalizedItem, commandContext)
-    if (commands.length === 0) {
-      scheduleItems.value[currentIndex] = { ...normalizedItem, scheduleId: scheduleForm.value.id || '' }
-      gapDialogDefaults.value = null
-      return
-    }
-
-    const result = await scheduleCommandBus.executeBatch(commands, commandContext)
-    if (!result.success) {
-      ElMessage.error(result.error || result.message)
-      return
-    }
-
-    syncAtomicItemsToPage()
-    gapDialogDefaults.value = null
-    ElMessage.success(result.message)
-    return
-  }
-
-  const newItem = {
-    ...normalizedItem,
-    sortOrder: gapDialogDefaults.value?.sortOrder ?? normalizedItem.sortOrder,
-    startTime: normalizedItem.startTime || gapDialogDefaults.value?.startTime || normalizedItem.startTime,
-    endTime: normalizedItem.endTime || gapDialogDefaults.value?.endTime || normalizedItem.endTime,
-    scheduleId: scheduleForm.value.id || ''
-  }
-  let insertCommand = manualCommandAdapter.buildInsertCommand(newItem, commandContext)
-
-  if (!insertCommand) {
-    const resolvedCandidateId = await resolveManualCandidateId(newItem)
-    if (resolvedCandidateId) {
-      insertCommand = manualCommandAdapter.buildInsertCommandForCandidate(
-        resolvedCandidateId,
-        newItem,
-        commandContext,
-      )
-    }
-  }
-
-  if (!insertCommand) {
-    ElMessage.error('未匹配到可插入的节目候选，请输入有效节目编号或更准确的节目名称。')
-    return
-  }
-
-  const result = await scheduleCommandBus.execute(insertCommand, commandContext)
-  if (!result.success) {
-    ElMessage.error(result.error || result.message)
-    return
-  }
-
-  syncAtomicItemsToPage()
-  gapDialogDefaults.value = null
-  ElMessage.success(result.message)
-}
-
-/**
- * 处理查看素材
- * @param item - 编单项
- */
-const handleViewMaterial = (item: ScheduleItem) => {
-  if (item.materialId) {
-    router.push({
-      path: '/finished-product-library/detail',
-      query: { id: item.materialId }
-    })
-    ElMessage.info(`正在打开素材: ${item.materialName}`)
-  }
-}
-
-/**
- * 处理从版面引用复制
- * @param item - 版面参考项
- */
-const handleCopyFromReference = (item: any) => {
-  const newItem: ScheduleItem = {
-    id: generateId(),
-    scheduleId: scheduleForm.value.id || '',
-    startTime: item.startTime,
-    endTime: item.endTime,
-    programName: item.programName,
-    businessType: item.businessType,
-    sourceType: item.sourceType,
-    code18: item.code18 || '',
-    materialName: '',
-    materialId: '',
-    materialStatus: 'pending',
-    remark: item.remark || '',
-    sortOrder: maxSortOrder.value + 1,
-    duration: item.duration
-  }
-  scheduleItems.value.push(newItem)
-  ElMessage.success(`已添加节目: ${item.programName}`)
-}
-
-/**
- * 验证表单
- * @returns 是否通过
- */
-const basicHeaderCheck = (): boolean => {
-  return Boolean(scheduleForm.value.name && scheduleForm.value.channelId && scheduleForm.value.date)
-}
-
-const validateHeaderForm = async (): Promise<boolean> => {
-  if (!headerFormRef.value) return basicHeaderCheck()
-  try {
-    await headerFormRef.value.validate()
-    return true
-  } catch {
-    return false
-  }
-}
-
 const formatTime4 = (time: string) => {
   const parts = (time || '').split(':')
   const h = String(parseInt(parts[0] || '0', 10) || 0).padStart(2, '0')
@@ -1528,35 +948,6 @@ const getContentTypeTagType = (item: Pick<ScheduleItem, 'instanceName' | 'progra
   return 'primary'
 }
 
-const addDays = (dateStr: string, days: number) => {
-  if (!dateStr) return ''
-  const d = new Date(dateStr)
-  if (Number.isNaN(d.getTime())) return ''
-  d.setDate(d.getDate() + days)
-  const yyyy = d.getFullYear()
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${yyyy}-${mm}-${dd}`
-}
-
-const getThirdReviewDate = (item: Pick<ScheduleItem, 'isReference' | 'isUnlinkedProduct'>) => {
-  if (item.isReference || item.isUnlinkedProduct) return '-'
-  return scheduleForm.value.date || '-'
-}
-
-const getLastPlayableTime = (item: Pick<ScheduleItem, 'isReference' | 'isUnlinkedProduct'>) => {
-  if (item.isReference || item.isUnlinkedProduct) return '-'
-  const base = scheduleForm.value.date || ''
-  return addDays(base, 30) || '-'
-}
-
-const getRebroadcastReauditDate = (item: Pick<ScheduleItem, 'isReference' | 'businessType' | 'isUnlinkedProduct'>) => {
-  if (item.isReference || item.isUnlinkedProduct) return '-'
-  const base = scheduleForm.value.date || ''
-  if (!base) return '-'
-  return item.businessType === 'ad' ? addDays(base, 7) || '-' : '-'
-}
-
 /**
  * 获取素材状态文本
  * @param status - 素材状态
@@ -1573,38 +964,6 @@ const getMaterialStatusText = (status: string) => {
  */
 const getMaterialStatusType = (status: string) => {
   return materialStatusType[status as keyof typeof materialStatusType] || 'info'
-}
-
-/**
- * 获取状态文本
- * @param status - 状态
- * @returns 文本
- */
-const getStatusText = (status: string) => {
-  const map: Record<string, string> = {
-    draft: '草稿',
-    pending: '待审核',
-    approved: '审核通过',
-    rejected: '已退回',
-    broadcasting: '已推播出'
-  }
-  return map[status] || status
-}
-
-/**
- * 获取状态标签类型
- * @param status - 状态
- * @returns 标签类型
- */
-const getStatusType = (status: string) => {
-  const map: Record<string, string> = {
-    draft: 'info',
-    pending: 'warning',
-    approved: 'success',
-    rejected: 'danger',
-    broadcasting: 'primary'
-  }
-  return map[status] || 'info'
 }
 
 onMounted(async () => {

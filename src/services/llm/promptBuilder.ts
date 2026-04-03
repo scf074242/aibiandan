@@ -352,7 +352,7 @@ ${suggestedModes ? `【可能的意图】\n${suggestedModes.join(', ')}` : ''}
     type: 'candidate_selection' | 'validation_issue'
     targetId: string
     targetName: string
-    context: Record<string, any>
+    context: Record<string, unknown>
   }): ChatMessage[] {
     const { type, targetId, targetName, context } = params
 
@@ -370,12 +370,19 @@ ${suggestedModes ? `【可能的意图】\n${suggestedModes.join(', ')}` : ''}
 
 输出格式：纯文本，不需要 JSON`
 
+      const gapDuration = typeof context.gapDuration === 'number' ? context.gapDuration : undefined
+      const candidateDuration = typeof context.candidateDuration === 'number' ? context.candidateDuration : undefined
+      const candidateType = typeof context.candidateType === 'string' ? context.candidateType : '未知'
+      const candidateRating = typeof context.candidateRating === 'number' || typeof context.candidateRating === 'string'
+        ? String(context.candidateRating)
+        : '未知'
+
       userPrompt = `【选择解释】
 - 选中节目: ${targetName} (ID: ${targetId})
-- 空窗时长: ${context.gapDuration ? this.formatDuration(context.gapDuration) : '未知'}
-- 节目时长: ${context.candidateDuration ? this.formatDuration(context.candidateDuration) : '未知'}
-- 节目类型: ${context.candidateType || '未知'}
-- 收视率: ${context.candidateRating || '未知'}
+- 空窗时长: ${gapDuration !== undefined ? this.formatDuration(gapDuration) : '未知'}
+- 节目时长: ${candidateDuration !== undefined ? this.formatDuration(candidateDuration) : '未知'}
+- 节目类型: ${candidateType}
+- 收视率: ${candidateRating}
 
 请解释为什么选择这个节目。`
     } else if (type === 'validation_issue') {

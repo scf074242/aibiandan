@@ -133,7 +133,6 @@
 </template>
 
 <script setup lang="ts">
-// @ts-nocheck
 import { computed } from 'vue'
 import type { GapInfo } from '@/types/orchestration'
 import type { ScheduleItem } from '@/views/broadcast-plan/scheduleData'
@@ -277,8 +276,8 @@ const formatDuration = (seconds: number) => {
 }
 
 const timeToSeconds = (time: string) => {
-  const parts = time.split(':').map(Number)
-  return parts[0] * 3600 + parts[1] * 60 + (parts[2] || 0)
+  const [hours = 0, minutes = 0, seconds = 0] = time.split(':').map(Number)
+  return hours * 3600 + minutes * 60 + seconds
 }
 </script>
 

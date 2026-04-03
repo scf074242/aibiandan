@@ -270,6 +270,30 @@ import {
   getRuntimeLayoutEntry,
   setRuntimeLayout,
 } from '@/services/orchestration/runtimeLayoutRegistry'
+import {
+  formatDetails as formatStructuredDetails,
+  formatOffset as formatOffsetText,
+  formatProgramLabel as formatProgramDisplayLabel,
+  normalizeDecisionExplanation,
+  toDetailMap,
+  toPreviewRecord,
+  toValidationSummaryRecord,
+  truncateText,
+} from './chatPanelFormatting'
+import type {
+  CandidateComparisonItem,
+  DetailMap,
+  DetailSummaryItem,
+  ExplanationSection,
+  ProgramRecord,
+} from './chatPanelFormatting'
+import {
+  buildCandidateComparisonItems,
+  buildDetailsSummary as buildMessageDetailsSummary,
+  extractWarnings,
+  isLayoutImportDetails,
+  isOrchestrationOverviewDetails,
+} from './chatPanelDetails'
 
 type ProcessType =
   | 'planning'
@@ -293,30 +317,11 @@ interface Message extends ChatMessage {
   mergeKind?: 'idea' | 'query_request' | 'query_result' | 'selection' | 'execution' | 'other'
 }
 
-interface DetailSummaryItem {
-  label: string
-  value: string
-}
-
-interface ExplanationSection {
-  title: string
-  body: string
-  tone?: 'default' | 'secondary' | 'risk'
-}
-
-interface CandidateComparisonItem {
-  id: string
-  name: string
-  meta: string
-  note: string
-  selected: boolean
-}
-
 interface PendingCommandState {
   command: OrchestrationCommand
   summary: string
   reasoning: string
-  details?: Record<string, any>
+  details?: DetailMap
 }
 
 interface PendingTargetSelectionState {
@@ -332,7 +337,7 @@ interface PendingTargetSelectionState {
     offsetSeconds: number
   }
   replaceProgramName?: string
-  resolutionDetails?: Record<string, any>
+  resolutionDetails?: DetailMap
 }
 
 interface SchedulePreviewItem {
@@ -711,7 +716,7 @@ const buildMicroEditCommand = async (
   message?: string
   thinking?: string
   explanation?: string
-  details?: Record<string, any>
+  details?: DetailMap
   pendingTargetSelection?: PendingTargetSelectionState
 }> => {
   const context = buildDialogueContext({
@@ -1135,6 +1140,13 @@ const formatDisplayTimeRange = (startTime: string, endTime?: string): string => 
   return `${start}到${formatDisplayTime(endTime)}`
 }
 
+const formatDetails = (details: DetailMap) => formatStructuredDetails(details, formatDisplayTime)
+
+const formatProgramLabel = (value: unknown): string =>
+  formatProgramDisplayLabel(value, formatDisplayTimeRange)
+
+const formatOffset = (offsetSeconds: number): string => formatOffsetText(offsetSeconds)
+
 const timeToSeconds = (value?: string): number | null => {
   if (!value) return null
   const normalized = normalizeClockText(value)
@@ -1162,7 +1174,7 @@ const resolveColumnIdByTime = (targetTime?: string): string | undefined => {
 
 const resolveItemColumnId = (item?: SchedulePreviewItem | null): string | undefined => {
   if (!item) return undefined
-  const record = item as Record<string, any>
+  const record = item as unknown as ProgramRecord
 
   if (typeof record.keySlot === 'string' && record.keySlot.trim()) {
     return record.keySlot
@@ -1174,394 +1186,31 @@ const resolveItemColumnId = (item?: SchedulePreviewItem | null): string | undefi
   return typeof record.startTime === 'string' ? resolveColumnIdByTime(record.startTime) : undefined
 }
 
-const sanitizeDetails = (value: unknown): unknown => {
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeDetails(item))
-  }
+const getMessageDetails = (message: Message): DetailMap | undefined =>
+  message.explanation?.details as DetailMap | undefined
 
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    const cloned: Record<string, unknown> = {}
-
-    for (const [key, nestedValue] of Object.entries(record)) {
-      if (
-        typeof nestedValue === 'string' &&
-        ['startTime', 'endTime', 'newStartTime', 'targetTime', 'from', 'to'].includes(key)
-      ) {
-        cloned[key] = formatDisplayTime(nestedValue)
-      } else {
-        cloned[key] = sanitizeDetails(nestedValue)
-      }
-    }
-
-    return cloned
-  }
-
-  return value
-}
-
-const formatDetails = (details: Record<string, any>) => JSON.stringify(sanitizeDetails(details), null, 2)
-
-const getMessageDetails = (message: Message): Record<string, any> | undefined =>
-  message.explanation?.details as Record<string, any> | undefined
-
-const normalizeDecisionExplanation = (text?: string): string | undefined => {
-  if (!text) return undefined
-
-  return text
-    .replace(/\s+/g, ' ')
-    .replace(/^我把你的要求理解为/, '已理解为')
-    .replace(/^我已根据你确认的目标节目继续/, '已根据你确认的目标继续')
-    .replace(/^我已根据你确认的修改目标和风险提示继续执行本次操作。$/, '已根据你的确认结果继续执行本次操作。')
-    .replace(/^我已根据你的选择停止/, '已按你的选择停止')
-    .replace(/^我已停止这次目标选择，不会继续执行后续修改。$/, '已停止这次目标选择，不会继续执行后续修改。')
-    .replace(/^我尝试根据/, '已尝试根据')
-    .replace(/^我先按/, '已先按')
-    .replace(/^我已根据你选择的目标节目继续完成移动操作。$/, '已根据你确认的目标完成这次移动操作。')
-    .trim()
-}
-
-const formatProgramLabel = (value: unknown): string => {
-  if (!value || typeof value !== 'object') return ''
-  const item = value as Record<string, any>
-  const name = item.programName || item.instanceName || item.programCode || item.id
-  if (!name) return ''
-  if (typeof item.startTime === 'string') {
-    return `${name}（${formatDisplayTimeRange(item.startTime, typeof item.endTime === 'string' ? item.endTime : undefined)}）`
-  }
-  return String(name)
-}
-
-const formatProgramTypeLabel = (value?: string): string => {
-  const mapping: Record<string, string> = {
-    news: '新闻',
-    news_magazine: '新闻杂志',
-    current_affairs: '时政',
-    drama: '剧场',
-    kids: '少儿',
-    health: '健康',
-    entertainment: '娱乐',
-    commentary: '评论',
-    lifestyle: '生活',
-    movie: '电影',
-  }
-
-  return value ? (mapping[value] ?? value) : ''
-}
-
-const formatCandidateDuration = (duration?: number): string => {
-  if (typeof duration !== 'number' || duration <= 0) return ''
-  if (duration % 3600 === 0) return `${duration / 3600}小时`
-  if (duration % 60 === 0) return `${duration / 60}分钟`
-  return `${duration}秒`
-}
-
-const formatSequenceLabel = (candidate: Record<string, any>): string => {
-  const sequenceNo = typeof candidate.sequenceNo === 'number'
-    ? candidate.sequenceNo
-    : typeof candidate.issueNo === 'string' && Number.isFinite(Number(candidate.issueNo))
-      ? Number(candidate.issueNo)
-      : null
-  if (sequenceNo === null) return ''
-
-  if (typeof candidate.programType === 'string' && candidate.programType.includes('drama')) {
-    return `第${sequenceNo}集`
-  }
-
-  return `第${sequenceNo}期`
-}
-
-const formatSelectionModeLabel = (value?: string): string => {
-  if (value === 'sequential') return '顺播推荐'
-  if (value === 'rerun') return '重播候选'
-  return '匹配候选'
-}
-
-const buildCandidateComparisonNote = (
-  candidate: Record<string, any>,
-  selected: boolean,
-  fallbackSelectionReason: string,
-): string => {
-  const selectionMode = typeof candidate.selectionMode === 'string' ? candidate.selectionMode : 'default'
-  const explicitNote = normalizeDecisionExplanation(
-    typeof candidate.selectionNote === 'string' ? candidate.selectionNote : undefined,
-  )
-
-  if (selected) {
-    return truncateText(explicitNote || fallbackSelectionReason, 40)
-  }
-
-  if (explicitNote) {
-    return truncateText(explicitNote, 36)
-  }
-
-  if (selectionMode === 'sequential') {
-    return '按当前已播进度继续顺播，可作为后续候选。'
-  }
-
-  if (selectionMode === 'rerun') {
-    return '当前栏目不按顺播推进，可作为重播备选。'
-  }
-
-  return '可作为备选方案继续比较'
-}
-
-const formatMatchedBy = (value: unknown): string => {
-  if (!Array.isArray(value)) return ''
-  const labels: Record<string, string> = {
-    time_window: '时间窗口',
-    name_match: '节目名称',
-    llm_nomination: '语义理解',
-    local_safety: '本地校验',
-  }
-  return value
-    .filter((item): item is string => typeof item === 'string')
-    .map((item) => labels[item] ?? item)
-    .join('、')
-}
-
-const formatValidationSummaryText = (value: unknown): string => {
-  if (!value || typeof value !== 'object') return ''
-  const summary = value as {
-    totalIssues?: number
-    criticalCount?: number
-    warningCount?: number
-    infoCount?: number
-  }
-  const total = summary.totalIssues ?? 0
-  if (total <= 0) return '未发现明显问题'
-
-  const parts = [`共 ${total} 个问题`]
-  if ((summary.criticalCount ?? 0) > 0) {
-    parts.push(`严重 ${summary.criticalCount} 个`)
-  }
-  if ((summary.warningCount ?? 0) > 0) {
-    parts.push(`提示 ${summary.warningCount} 个`)
-  }
-  return parts.join('，')
-}
-
-const extractWarnings = (details?: Record<string, any>): string[] => {
-  if (!details) return []
-  const warnings: string[] = []
-  const previewWarnings = Array.isArray(details.preview?.warnings)
-    ? (details.preview.warnings as unknown[]).filter((item): item is string => typeof item === 'string')
-    : []
-  warnings.push(...previewWarnings)
-
-  if (details.preview?.canExecute === false) {
-    warnings.push('预演显示当前方案会与现有编排冲突')
-  }
-
-  if (isNoCandidateCase(details)) {
-    warnings.push('当前条件下没有命中可直接使用的候选节目')
-  }
-
-  if (typeof details.error === 'string' && details.error !== 'No candidates found') {
-    warnings.push(details.error)
-  }
-
-  const validationSummary = details.validationSummary ?? details.summary
-  if (validationSummary?.totalIssues > 0) {
-    warnings.push(`校验仍发现 ${validationSummary.totalIssues} 个问题`)
-  }
-
-  return Array.from(new Set(warnings.filter(Boolean))).slice(0, 3)
-}
-
-const getCandidateComparisonItems = (message: Message): CandidateComparisonItem[] => {
-  const details = getMessageDetails(message)
-  if (!details) return []
-
-  const selectedId = details.selectedCandidate?.id ?? details.selectedCandidateId
-  const selectedName = details.selectedCandidate?.programName ?? details.selectedCandidateName
-  const selectionReason =
-    normalizeDecisionExplanation(
-      typeof details.selectionReason === 'string'
-        ? details.selectionReason
-        : typeof details.targetResolution?.reasoning === 'string'
-          ? details.targetResolution.reasoning
-          : undefined,
-    ) || '更贴合当前时间、类型和约束条件。'
-
-  const rawCandidates = Array.isArray(details.candidateOptions)
-    ? details.candidateOptions
-    : Array.isArray(details.topCandidates)
-      ? details.topCandidates
-      : []
-
-  return rawCandidates
-    .slice(0, 3)
-    .map((candidate, index) => {
-      const item = candidate as Record<string, any>
-      const id = String(item.id ?? item.programCode ?? `candidate-${index}`)
-      const name = String(item.programName ?? item.instanceName ?? item.programCode ?? id)
-      const selected =
-        (typeof selectedId === 'string' && selectedId === id)
-        || (typeof selectedName === 'string' && selectedName === name)
-        || (index === 0 && !selectedId && !selectedName)
-      const sequenceLabel = formatSequenceLabel(item)
-      const selectionModeLabel = formatSelectionModeLabel(
-        typeof item.selectionMode === 'string' ? item.selectionMode : undefined,
-      )
-      const metaParts = [
-        sequenceLabel,
-        formatProgramTypeLabel(typeof item.programType === 'string' ? item.programType : undefined),
-        formatCandidateDuration(typeof item.duration === 'number' ? item.duration : undefined),
-        selectionModeLabel,
-      ].filter(Boolean)
-
-      return {
-        id,
-        name,
-        meta: metaParts.join(' · ') || '可作为当前时段候选',
-        note: buildCandidateComparisonNote(item, selected, selectionReason),
-        selected,
-      }
-    })
-}
+const getCandidateComparisonItems = (message: Message): CandidateComparisonItem[] =>
+  buildCandidateComparisonItems(getMessageDetails(message))
 
 const buildDetailsSummary = (
-  details?: Record<string, any>,
-  _processType?: ProcessType,
+  details?: DetailMap,
+  processType?: ProcessType,
 ): DetailSummaryItem[] => {
-  if (!details) return []
-
-  if (isOrchestrationOverviewDetails(details)) {
-    const items: DetailSummaryItem[] = []
-    const pushItem = (label: string, value?: string) => {
-      const normalized = value?.trim()
-      if (!normalized) return
-      items.push({ label, value: normalized })
-    }
-
-    pushItem('版面来源', typeof details.layoutSourceFileName === 'string' ? details.layoutSourceFileName : '')
-    pushItem('版面时段', typeof details.layoutSlotCount === 'number' ? `${details.layoutSlotCount} 个` : '')
-    pushItem('补排轮次', typeof details.completedGapCount === 'number' ? `${details.completedGapCount} 轮` : '')
-    pushItem('选中节目', typeof details.insertedItemCount === 'number' ? `${details.insertedItemCount} 次` : '')
-    pushItem('实际写入', typeof details.writtenItemCount === 'number' ? `${details.writtenItemCount} 条` : '')
-    pushItem('顺播推进', typeof details.sequentialFillCount === 'number' && details.sequentialFillCount > 0 ? `${details.sequentialFillCount} 次` : '')
-    pushItem('重播补位', typeof details.rerunFillCount === 'number' && details.rerunFillCount > 0 ? `${details.rerunFillCount} 次` : '')
-    pushItem('校验结果', formatValidationSummaryText(details.validationSummary))
-    return items.slice(0, 6)
-  }
-
-  if (isLayoutImportDetails(details)) {
-    const items: DetailSummaryItem[] = []
-    const pushItem = (label: string, value?: string) => {
-      const normalized = value?.trim()
-      if (!normalized) return
-      items.push({ label, value: normalized })
-    }
-
-    pushItem('版面文件', typeof details.fileName === 'string' ? details.fileName : '')
-    pushItem('命中星期', typeof details.matchedWeekdayLabel === 'string' ? details.matchedWeekdayLabel : '')
-    pushItem('命中列', typeof details.matchedColumnLabel === 'string' ? details.matchedColumnLabel : '')
-    pushItem('工作表', typeof details.matchedSheetName === 'string' ? details.matchedSheetName : '')
-    pushItem('版面时段', typeof details.slotCount === 'number' ? `${details.slotCount} 个` : '')
-    pushItem('栏目数量', typeof details.columnCount === 'number' ? `${details.columnCount} 个` : '')
-    pushItem('顺播栏目', typeof details.sequentialColumnCount === 'number' ? `${details.sequentialColumnCount} 个` : '')
-    pushItem(
-      '导入提醒',
-      Array.isArray(details.warnings)
-        ? details.warnings.filter((item: unknown): item is string => typeof item === 'string').join('；')
-        : '',
-    )
-    return items.slice(0, 6)
-  }
-
-  const items: DetailSummaryItem[] = []
-  const pushItem = (label: string, value?: string) => {
-    const normalized = value?.trim()
-    if (!normalized) return
-    if (items.some((item) => item.label === label && item.value === normalized)) return
-    items.push({ label, value: normalized })
-  }
-
-  if (typeof details.targetTime === 'string') {
-    pushItem('目标时间', formatDisplayTime(details.targetTime))
-  }
-
-  pushItem('目标节目', formatProgramLabel(details.matchedItem))
-  pushItem('选中节目', formatProgramLabel(details.selectedCandidate))
-
-  if (!details.selectedCandidate && typeof details.selectedCandidateName === 'string') {
-    pushItem('选中节目', details.selectedCandidateName)
-  }
-
-  const matchedColumn = resolveMatchedColumnInfo(details)
-  pushItem('命中栏目', matchedColumn.columnName)
-  pushItem('栏目ID', matchedColumn.columnId)
-
-  const criteria = details.criteria ?? details.queryCommand?.data?.criteria
-  if (criteria && typeof criteria === 'object') {
-    pushItem('检索条件', buildQueryCriteriaSummary(criteria as Record<string, any>).replace(/^查询：/, ''))
-  }
-
-  if (typeof details.candidateCount === 'number') {
-    pushItem('候选结果', `${details.candidateCount} 个`)
-  }
-
-  const candidateStrategy = (() => {
-    const source = details.selectedCandidate ?? details.candidateOptions?.[0] ?? details.topCandidates?.[0]
-    if (!source || typeof source !== 'object') return ''
-    const item = source as Record<string, any>
-    return formatSelectionModeLabel(typeof item.selectionMode === 'string' ? item.selectionMode : undefined)
-  })()
-  pushItem('候选策略', candidateStrategy)
-
-  if (typeof details.replacementProgramName === 'string') {
-    pushItem('替换目标', details.replacementProgramName)
-  }
-
-  const matchedBy = formatMatchedBy(details.targetResolution?.matchedBy)
-  pushItem('定位依据', matchedBy)
-
-  if (typeof details.targetResolution?.reasoning === 'string') {
-    pushItem('定位结论', truncateText(normalizeDecisionExplanation(details.targetResolution.reasoning) || '', 48))
-  }
-
-  if (typeof details.direction === 'string') {
-    pushItem('调整方向', details.direction === 'forward' ? '向后' : '向前')
-  }
-
-  if (typeof details.offsetSeconds === 'number') {
-    pushItem('调整幅度', formatOffset(details.offsetSeconds))
-  }
-
-  if (typeof details.newStartTime === 'string') {
-    pushItem('新的开始时间', formatDisplayTime(details.newStartTime))
-  }
-
-  const validationSummary = details.validationSummary ?? details.summary
-  pushItem('校验结果', formatValidationSummaryText(validationSummary))
-
-  if (Array.isArray(details.issues) && details.issues.length > 0) {
-    const issueText = (details.issues as Array<{ message?: string }>)
-      .slice(0, 3)
-      .map((item) => item?.message)
-      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-      .join('；')
-    pushItem('主要问题', issueText)
-  }
-
-  const warnings = extractWarnings(details)
-  pushItem('风险提示', warnings.join('；'))
-
-  return items.slice(0, 6)
+  void processType
+  return buildMessageDetailsSummary(details, {
+    formatDisplayTime,
+    formatProgramLabel,
+    resolveMatchedColumnInfo,
+    buildQueryCriteriaSummary,
+    formatOffset,
+  })
 }
-
-const isOrchestrationOverviewDetails = (details?: Record<string, any>): boolean =>
-  details?.summaryKind === 'orchestration_overview'
-
-const isLayoutImportDetails = (details?: Record<string, any>): boolean =>
-  details?.summaryKind === 'layout_import'
 
 const buildOrchestrationOverviewMessage = (session: PlanningSession): Message => {
   const logs = session.logs ?? []
   const runtimeLayoutEntry = getRuntimeLayoutEntry(props.channelId, props.date)
   const layoutSlotCount = logs.find((log) => typeof log.details?.layoutSlotCount === 'number')?.details?.layoutSlotCount
-  const existingItemCount = logs.find((log) => typeof log.details?.existingItemCount === 'number')?.details?.existingItemCount
+  const existingItemCount = logs.find((log) => typeof log.details?.existingItemCount === 'number')?.details?.existingItemCount as number | undefined
   const fillExecutionLogs = logs.filter((log) => (
     log.phase === 'execution'
     && typeof log.details?.gapId === 'string'
@@ -1572,12 +1221,12 @@ const buildOrchestrationOverviewMessage = (session: PlanningSession): Message =>
       return false
     }
     const insertedItems = Array.isArray(log.details?.insertedItems) ? log.details.insertedItems : []
-    return insertedItems.some((item: any) => item?.programType === 'ad')
+    return insertedItems.some((item: unknown) => (item as ProgramRecord | undefined)?.programType === 'ad')
   })
   const validationEntry = [...logs].reverse().find(
     (log) => log.phase === 'validation' && typeof log.details?.summary === 'object',
   )
-  const validationSummary = validationEntry?.details?.summary as Record<string, any> | undefined
+  const validationSummary = validationEntry?.details?.summary as DetailMap | undefined
   const validationIssueCount =
     typeof validationSummary?.totalIssues === 'number' ? validationSummary.totalIssues : 0
   const failedGapCount = session.gaps.failed.length
@@ -1593,7 +1242,7 @@ const buildOrchestrationOverviewMessage = (session: PlanningSession): Message =>
   const sequentialFillCount = fillExecutionLogs.filter((log) => log.details?.selectionMode === 'sequential').length
   const rerunFillCount = fillExecutionLogs.filter((log) => log.details?.selectionMode === 'rerun').length
   const fixedOrLockedCount = props.currentSchedule.filter((item) => {
-    const record = item as Record<string, any>
+    const record = item as unknown as ProgramRecord
     return Boolean(record.isLocked)
   }).length
   const unresolvedRisks: string[] = []
@@ -1671,15 +1320,20 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
   }
 
   if (isOrchestrationOverviewDetails(details)) {
+    const validationSummary = toValidationSummaryRecord(details?.validationSummary)
+    const validationIssueCount = validationSummary?.totalIssues ?? 0
+    const failedGapCount = typeof details?.failedGapCount === 'number' ? details.failedGapCount : 0
+    const sequentialFillCount = typeof details?.sequentialFillCount === 'number' ? details.sequentialFillCount : 0
+    const rerunFillCount = typeof details?.rerunFillCount === 'number' ? details.rerunFillCount : 0
     addTag('版面优先')
-    if ((details?.validationSummary?.totalIssues ?? 0) > 0 || (details?.failedGapCount ?? 0) > 0) {
+    if (validationIssueCount > 0 || failedGapCount > 0) {
       addTag('需人工确认')
     } else {
       addTag('校验通过')
     }
-    if ((details?.sequentialFillCount ?? 0) > 0) {
+    if (sequentialFillCount > 0) {
       addTag('顺播推进')
-    } else if ((details?.rerunFillCount ?? 0) > 0) {
+    } else if (rerunFillCount > 0) {
       addTag('重播补位')
     } else {
       addTag('结构稳定')
@@ -1689,6 +1343,7 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
 
   if (isLayoutImportDetails(details)) {
     addTag('版面已导入')
+    const sequentialColumnCount = typeof details?.sequentialColumnCount === 'number' ? details.sequentialColumnCount : 0
     if (
       details?.templateMode === 'weekday_columns'
       || details?.templateMode === 'weekday_sheet'
@@ -1696,7 +1351,7 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
     ) {
       addTag('按星期匹配')
     }
-    if ((details?.sequentialColumnCount ?? 0) > 0) {
+    if (sequentialColumnCount > 0) {
       addTag('含顺播栏目')
     }
     if (Array.isArray(details?.warnings) && details.warnings.length > 0) {
@@ -1706,11 +1361,13 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
   }
 
   if (message.processType === 'validation') {
-    const summary = details?.summary ?? details?.validationSummary
+    const summary = toValidationSummaryRecord(details?.summary ?? details?.validationSummary)
+    const totalIssues = summary?.totalIssues ?? 0
+    const criticalCount = summary?.criticalCount ?? 0
     addTag('已完成校验')
-    if (summary?.totalIssues > 0) {
+    if (totalIssues > 0) {
       addTag('存在风险')
-      if ((summary.criticalCount ?? 0) > 0) {
+      if (criticalCount > 0) {
         addTag('需人工确认')
       }
     } else {
@@ -1728,7 +1385,8 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
     addTag('需人工确认')
   }
 
-  if (details?.matchedItem || details?.targetResolution?.matchedBy?.length) {
+  const targetResolution = toDetailMap(details?.targetResolution)
+  if (details?.matchedItem || (Array.isArray(targetResolution?.matchedBy) && targetResolution.matchedBy.length > 0)) {
     addTag('目标已定位')
   }
 
@@ -1736,9 +1394,11 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
     addTag('已选候选')
   }
 
-  const strategySource = details?.selectedCandidate ?? details?.candidateOptions?.[0] ?? details?.topCandidates?.[0]
+  const candidateOptions = Array.isArray(details?.candidateOptions) ? details.candidateOptions : []
+  const topCandidates = Array.isArray(details?.topCandidates) ? details.topCandidates : []
+  const strategySource = details?.selectedCandidate ?? candidateOptions[0] ?? topCandidates[0]
   if (strategySource && typeof strategySource === 'object') {
-    const strategy = (strategySource as Record<string, any>).selectionMode
+    const strategy = (strategySource as ProgramRecord).selectionMode
     if (strategy === 'sequential') {
       addTag('顺播推进')
     } else if (strategy === 'rerun') {
@@ -1746,7 +1406,9 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
     }
   }
 
-  const criteria = details?.criteria ?? details?.queryCommand?.data?.criteria
+  const queryCommand = toDetailMap(details?.queryCommand)
+  const queryCommandData = toDetailMap(queryCommand?.data)
+  const criteria = toDetailMap(details?.criteria ?? queryCommandData?.criteria)
   if (criteria) {
     if (criteria.columnId || (Array.isArray(criteria.programTypePreference) && criteria.programTypePreference.length > 0)) {
       addTag('栏目匹配')
@@ -1760,11 +1422,12 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
     addTag('局部调整')
   }
 
-  if (Array.isArray(details?.preview?.warnings) && details.preview.warnings.length > 0) {
+  const preview = toPreviewRecord(details?.preview)
+  if (Array.isArray(preview?.warnings) && preview.warnings.length > 0) {
     addTag('存在风险提示')
   }
 
-  if (details?.preview?.canExecute === false || /冲突|占用/.test(message.content)) {
+  if (preview?.canExecute === false || /冲突|占用/.test(message.content)) {
     addTag('时段冲突')
   }
 
@@ -1780,10 +1443,11 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
     addTag('已完成选择')
   }
 
-  const validationSummary = details?.validationSummary
-  if (validationSummary?.totalIssues === 0) {
+  const validationSummary = toValidationSummaryRecord(details?.validationSummary)
+  const validationIssueCount = validationSummary?.totalIssues
+  if (validationIssueCount === 0) {
     addTag('校验通过')
-  } else if (validationSummary?.totalIssues > 0) {
+  } else if ((validationIssueCount ?? 0) > 0) {
     addTag('仍有风险')
   }
 
@@ -1823,8 +1487,8 @@ const buildDecisionShortExplanation = (message: Message): string | undefined => 
   }
 
   if (message.processType === 'validation') {
-    const summary = details?.summary ?? details?.validationSummary
-    if (summary?.totalIssues > 0) {
+    const summary = toValidationSummaryRecord(details?.summary ?? details?.validationSummary)
+    if ((summary?.totalIssues ?? 0) > 0) {
       return '已按当前节目单完成校验，并提炼出需要优先关注的问题。'
     }
     return '已按当前节目单完成校验，当前未发现明显风险。'
@@ -1834,9 +1498,11 @@ const buildDecisionShortExplanation = (message: Message): string | undefined => 
     return '当前时间附近存在多个可执行目标，先确认具体节目再继续修改。'
   }
 
-  const strategySource = details?.selectedCandidate ?? details?.candidateOptions?.[0] ?? details?.topCandidates?.[0]
+  const candidateOptions = Array.isArray(details?.candidateOptions) ? details.candidateOptions : []
+  const topCandidates = Array.isArray(details?.topCandidates) ? details.topCandidates : []
+  const strategySource = details?.selectedCandidate ?? candidateOptions[0] ?? topCandidates[0]
   if (strategySource && typeof strategySource === 'object') {
-    const strategy = (strategySource as Record<string, any>).selectionMode
+    const strategy = (strategySource as ProgramRecord).selectionMode
     if (strategy === 'sequential') {
       return '已结合当前栏目顺播进度和已排记录，优先选择下一可播集/期。'
     }
@@ -1853,7 +1519,8 @@ const buildDecisionShortExplanation = (message: Message): string | undefined => 
     return '已结合目标时间和当前编排记录完成目标定位。'
   }
 
-  if (details?.preview?.canExecute === false || /冲突|无法执行/.test(message.content)) {
+  const preview = toPreviewRecord(details?.preview)
+  if (preview?.canExecute === false || /冲突|无法执行/.test(message.content)) {
     return '已先检查主要约束，当前方案仍会影响现有编排。'
   }
 
@@ -2100,18 +1767,10 @@ const getPendingCommandReasonTags = () => {
 const getPendingCommandDetailItems = () =>
   pendingCommand.value ? buildDetailsSummary(pendingCommand.value.details, 'execution') : []
 
-const formatProgramTypes = (types: unknown): string => {
-  if (!Array.isArray(types)) return ''
-  return types.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).join('、')
-}
-
-const formatKeywords = (keywords: unknown): string => {
-  if (!Array.isArray(keywords)) return ''
-  return keywords.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).join('、')
-}
-
-const resolveMatchedColumnInfo = (details?: Record<string, any>) => {
-  const criteria = details?.criteria ?? details?.queryCommand?.data?.criteria
+const resolveMatchedColumnInfo = (details?: DetailMap) => {
+  const queryCommand = toDetailMap(details?.queryCommand)
+  const queryCommandData = toDetailMap(queryCommand?.data)
+  const criteria = toDetailMap(details?.criteria ?? queryCommandData?.criteria)
   const columnId =
     typeof criteria?.columnId === 'string' && criteria.columnId.trim()
       ? criteria.columnId.trim()
@@ -2130,7 +1789,7 @@ const resolveMatchedColumnInfo = (details?: Record<string, any>) => {
   }
 }
 
-const formatMatchedColumnText = (details?: Record<string, any>) => {
+const formatMatchedColumnText = (details?: DetailMap) => {
   const { columnId, columnName } = resolveMatchedColumnInfo(details)
   if (columnName && columnId) return `${columnName}（${columnId}）`
   return columnName || columnId
@@ -2143,7 +1802,7 @@ const formatExpectedDuration = (expectedDuration: unknown): string => {
   return `${value.min}-${value.max}秒`
 }
 
-const buildQueryCriteriaSummary = (criteria: Record<string, any>): string => {
+const buildQueryCriteriaSummary = (criteria: DetailMap): string => {
   const columnName =
     typeof criteria.columnId === 'string' && criteria.columnId.trim()
       ? getEffectiveColumnDefinition(criteria.columnId)?.columnName ?? criteria.columnId
@@ -2153,13 +1812,7 @@ const buildQueryCriteriaSummary = (criteria: Record<string, any>): string => {
   return result ? `查询：${result}` : '查询：未指定'
 }
 
-const truncateText = (text: string, maxLength = 42): string => {
-  const normalized = text.replace(/\s+/g, ' ').trim()
-  if (normalized.length <= maxLength) return normalized
-  return `${normalized.slice(0, maxLength)}...`
-}
-
-const compressLogDetails = (details: Record<string, any>, processType: ProcessType): Record<string, any> | undefined => {
+const compressLogDetails = (details: DetailMap, processType: ProcessType): DetailMap | undefined => {
   const compact = { ...details }
 
   if (processType === 'planning') {
@@ -2192,11 +1845,11 @@ const shouldDisplayLog = (log: PlanningLogEntry): boolean => {
   return true
 }
 
-const isNoCandidateCase = (details: Record<string, any>) => details.error === 'No candidates found'
+const isNoCandidateCase = (details: DetailMap) => details.error === 'No candidates found'
 
-const buildFriendlyLogExplanation = (log: PlanningLogEntry, details: Record<string, any>) => {
+const buildFriendlyLogExplanation = (log: PlanningLogEntry, details: DetailMap) => {
   const insertedItems = Array.isArray(details?.insertedItems) ? details.insertedItems : []
-  const containsAdInsert = insertedItems.some((item: any) => item?.programType === 'ad')
+  const containsAdInsert = insertedItems.some((item: unknown) => (item as ProgramRecord | undefined)?.programType === 'ad')
 
   if (typeof details.layoutSlotCount === 'number') {
     return `已命中版面参考，并初始化 ${details.layoutSlotCount} 个待处理时段。`
@@ -2236,7 +1889,7 @@ const buildFriendlyLogExplanation = (log: PlanningLogEntry, details: Record<stri
   return `${formatPhaseLabel(log.phase)}阶段已更新`
 }
 
-const buildRuntimeThinking = (log: PlanningLogEntry, details: Record<string, any>): string | undefined => {
+const buildRuntimeThinking = (log: PlanningLogEntry, details: DetailMap): string | undefined => {
   const timeRange =
     typeof details.startTime === 'string'
       ? formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)
@@ -2244,7 +1897,7 @@ const buildRuntimeThinking = (log: PlanningLogEntry, details: Record<string, any
   const matchedColumnText = formatMatchedColumnText(details)
   const columnName = matchedColumnText
     || (typeof details.criteria === 'object' && details.criteria
-      ? buildQueryCriteriaSummary(details.criteria as Record<string, any>).replace(/^查询：/, '')
+      ? buildQueryCriteriaSummary(details.criteria as DetailMap).replace(/^查询：/, '')
       : typeof details.preferredProgramGroup === 'string'
         ? details.preferredProgramGroup
         : typeof details.targetSlotLabel === 'string'
@@ -2274,13 +1927,13 @@ const buildRuntimeThinking = (log: PlanningLogEntry, details: Record<string, any
   return log.phase === 'planning' ? '我正在结合当前空窗、栏目和前后衔接关系继续处理。' : undefined
 }
 
-const buildRuntimeResult = (log: PlanningLogEntry, details: Record<string, any>): string => {
+const buildRuntimeResult = (log: PlanningLogEntry, details: DetailMap): string => {
   const timeRange =
     typeof details.startTime === 'string'
       ? formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)
       : ''
   const insertedItems = Array.isArray(details?.insertedItems) ? details.insertedItems : []
-  const containsAdInsert = insertedItems.some((item: any) => item?.programType === 'ad')
+  const containsAdInsert = insertedItems.some((item: unknown) => (item as ProgramRecord | undefined)?.programType === 'ad')
 
   if (typeof details.programName === 'string' && typeof details.itemId === 'string') {
     return timeRange ? `${timeRange} 已排入《${details.programName}》。` : `已排入《${details.programName}》。`
@@ -2341,67 +1994,13 @@ const offsetDateTime = (dateTime: string, offsetSeconds: number): string => {
   return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
 }
 
-const formatOffset = (offsetSeconds: number): string => {
-  if (offsetSeconds % 3600 === 0) return `${offsetSeconds / 3600}小时`
-  if (offsetSeconds % 60 === 0) return `${offsetSeconds / 60}分钟`
-  return `${offsetSeconds}秒`
-}
-
-const buildFallbackCommandWithLLM = async (userInput: string): Promise<OrchestrationCommand | null> => {
-  const scheduleSummary = props.currentSchedule
-    .slice(0, 12)
-    .map(
-      (item, index) =>
-        `${index + 1}. id=${item.id}, 节目=${item.programName || item.programCode || item.id}, 时间=${formatDisplayTimeRange(item.startTime, item.endTime)}`,
-    )
-    .join('\n')
-
-  const response = await llmClient.chat(
-    [
-      {
-        role: 'system',
-        content:
-          '你是广播串联单编辑助手。请基于用户要求输出一个 JSON OrchestrationCommand。' +
-          '只允许 action 为 delete、replace、move、update_field、clarification。' +
-          '如果无法确定，请输出 clarification。只返回 JSON。',
-      },
-      {
-        role: 'user',
-        content:
-          `棰戦亾=${props.channelName} 鏃ユ湡=${props.date}\n` +
-          `当前节目单：\n${scheduleSummary || '当前为空表'}\n` +
-          `鐢ㄦ埛瑕佹眰锛?{userInput}\n` +
-          'JSON 绀轰緥锛歿"action":"delete","data":{"itemId":"xxx"},"reasoning":"..."}',
-      },
-    ],
-    {
-      temperature: 0.1,
-      maxTokens: 500,
-    },
-  )
-
-  return parseCommand(response.content)
-}
-
-const parseCommand = (content: string): OrchestrationCommand | null => {
-  try {
-    const match = content.match(/\{[\s\S]*\}/)
-    if (!match) return null
-    const parsed = JSON.parse(match[0]) as OrchestrationCommand
-    if (!parsed.action || !('data' in parsed)) return null
-    return parsed
-  } catch {
-    return null
-  }
-}
-
 const executeCommand = async (
   command: OrchestrationCommand,
   options?: {
     successMessage?: string
     thinking?: string
     explanation?: string
-    details?: Record<string, any>
+    details?: DetailMap
   },
 ) => {
   const result = await scheduleCommandBus.execute(command, {
@@ -2712,8 +2311,8 @@ const tryMergeRuntimeMessage = (message: Message): boolean => {
 
   const anchorIndex = chainIndexes[0]!
   const mergedDetails = {
-    ...(messages.value[anchorIndex]?.explanation?.details as Record<string, any> | undefined ?? {}),
-    ...(message.explanation?.details as Record<string, any> | undefined ?? {}),
+    ...(messages.value[anchorIndex]?.explanation?.details as DetailMap | undefined ?? {}),
+    ...(message.explanation?.details as DetailMap | undefined ?? {}),
   }
   const mergedLog: PlanningLogEntry = {
     id: message.explanation?.targetId || messages.value[anchorIndex]?.explanation?.targetId || 'merged-runtime',
@@ -2749,15 +2348,6 @@ const tryMergeRuntimeMessage = (message: Message): boolean => {
   return true
 }
 
-const findLastMessageIndex = (predicate: (message: Message) => boolean): number => {
-  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
-    if (predicate(messages.value[index]!)) {
-      return index
-    }
-  }
-  return -1
-}
-
 const isRuntimeProgressMessage = (message: Message) =>
   message.role !== 'user'
   && typeof message.mergeKey === 'string'
@@ -2777,96 +2367,6 @@ const trimRuntimeProgressMessages = () => {
   for (let i = removeIndexes.length - 1; i >= 0; i -= 1) {
     messages.value.splice(removeIndexes[i]!, 1)
   }
-}
-
-const summarizeLog = (log: PlanningLogEntry): string => {
-  const details = log.details ?? {}
-
-  if (Array.isArray(details.gapRanges) && details.gapRanges.length > 0) {
-    const ranges = details.gapRanges
-      .slice(0, 3)
-      .map((item) =>
-        typeof item?.startTime === 'string'
-          ? formatDisplayTimeRange(item.startTime, typeof item?.endTime === 'string' ? item.endTime : undefined)
-          : '',
-      )
-      .filter(Boolean)
-
-    return ranges.length > 0 ? `发现待处理空窗：${ranges.join('；')}` : '发现待处理空窗'
-  }
-
-  if (typeof details.selectedCandidateName === 'string') {
-    const gapRange =
-      typeof details.startTime === 'string'
-        ? `锛屽搴旂┖绐?${formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)}`
-        : ''
-    return `已选中节目《${details.selectedCandidateName}》${gapRange}`
-  }
-
-  if (typeof details.selectedCandidateName === 'string') {
-    const reason =
-      typeof details.selectionReason === 'string' ? `，原因：${details.selectionReason}` : ''
-    const gapRange =
-      typeof details.startTime === 'string'
-        ? `，对应空窗 ${formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)}`
-        : ''
-    return `已选中节目《${details.selectedCandidateName}》${gapRange}${reason}`
-  }
-
-  if (typeof details.candidateCount === 'number') {
-    return `查询结果：${details.candidateCount} 个`
-  }
-
-  if (details.criteria && typeof details.criteria === 'object') {
-    const criteria = details.criteria as Record<string, any>
-    return buildQueryCriteriaSummary(criteria)
-  }
-
-  if (typeof details.programName === 'string' && typeof details.startTime === 'string') {
-    const timeRange = formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)
-    return `已插入节目《${details.programName}》，时间 ${timeRange}`
-  }
-
-  if (typeof details.gapId === 'string' && typeof details.error === 'string') {
-    const timeRange =
-      typeof details.startTime === 'string'
-        ? formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)
-        : ''
-    return timeRange ? `空窗 ${timeRange} 处理失败：${details.error}` : `处理失败：${details.error}`
-  }
-
-  if (typeof details.summary === 'string') {
-    const timeRange =
-      typeof details.startTime === 'string'
-        ? formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)
-        : ''
-    const compactSummary = truncateText(details.summary, 34)
-    return timeRange ? `空窗 ${timeRange} 的编排想法：${compactSummary}` : `编排想法：${compactSummary}`
-  }
-
-  if (typeof details.gapId === 'string') {
-    const timeRange =
-      typeof details.startTime === 'string'
-        ? formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)
-        : typeof details.targetTimeRange === 'string'
-          ? details.targetTimeRange
-          : ''
-    if (timeRange) {
-      return `发现空窗 ${timeRange}`
-    }
-  }
-
-  if (typeof details.issueCount === 'number') {
-    return details.issueCount > 0
-      ? `校验完成，发现 ${details.issueCount} 个问题`
-      : '校验完成，未发现问题'
-  }
-
-  if (typeof details.error === 'string') {
-    return `处理失败：${details.error}`
-  }
-
-  return `编排过程：${log.message}`
 }
 
 const summarizeRuntimeLog = (log: PlanningLogEntry): string => {
@@ -2923,7 +2423,7 @@ const summarizeRuntimeLog = (log: PlanningLogEntry): string => {
   }
 
   if (details.criteria && typeof details.criteria === 'object') {
-    const criteriaSummary = buildQueryCriteriaSummary(details.criteria as Record<string, any>)
+    const criteriaSummary = buildQueryCriteriaSummary(details.criteria as DetailMap)
     return criteriaSummary ? `接口查询参数：${criteriaSummary}` : '接口查询参数已生成'
   }
 
@@ -3000,20 +2500,6 @@ const mapLogToProcessType = (log: PlanningLogEntry): ProcessType => {
     return 'selection'
   if (log.phase === 'planning') return 'planning'
   return 'general'
-}
-
-const mapLogToProcessLabel = (log: PlanningLogEntry) => {
-  const type = mapLogToProcessType(log)
-  const mapping: Record<ProcessType, string> = {
-    planning: '想法',
-    query: '查询',
-    selection: '选择',
-    execution: '执行',
-    validation: '校验',
-    error: '异常',
-    general: '过程',
-  }
-  return mapping[type]
 }
 
 const mapRuntimeLogToProcessLabel = (log: PlanningLogEntry) => {

@@ -60,7 +60,7 @@ export type CommandType =
 // 编排命令
 export interface ScheduleCommand {
   action: CommandType
-  data: any
+  data: unknown
   reasoning?: string
 }
 

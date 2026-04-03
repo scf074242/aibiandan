@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "run-s lint:*",
     "lint:oxlint": "oxlint . --fix",
     "lint:eslint": "eslint . --fix --cache",
@@ -46,6 +48,7 @@
     "typescript": "~5.9.3",
     "vite": "^7.3.1",
     "vite-plugin-vue-devtools": "^8.0.7",
+    "vitest": "^4.1.2",
     "vue-tsc": "^3.2.5"
   },
   "engines": {

@@ -45,7 +45,6 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
 import { Plus, Document, Close } from '@element-plus/icons-vue'
 
 interface Props {

@@ -20,7 +20,7 @@ import { getAtomicCapabilities, type AtomicCapabilities } from './atomicCapabili
 import { getCandidateService } from './candidateService'
 import { getMaterializer } from './materializer'
 
-export interface ExecutionResult<T = any> {
+export interface ExecutionResult<T = unknown> {
   success: boolean
   message: string
   data?: T
@@ -35,7 +35,7 @@ export interface PreviewResult {
   command: OrchestrationCommand
   affectedItems: string[]
   affectedTimeRanges: { start: string; end: string }[]
-  estimatedResult?: any
+  estimatedResult?: unknown
   warnings: string[]
   risks: string[]
 }
