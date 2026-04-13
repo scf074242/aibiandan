@@ -269,27 +269,12 @@ export class GapManager {
         .sort((left, right) => left.slotStart - right.slotStart)
 
       if (!overlapSlots.length) {
-        this.gaps.set(gap.id, gap)
         continue
       }
 
-      let cursor = gapStart
       for (const { slot, slotStart, slotEnd } of overlapSlots) {
-        const segmentStart = Math.max(cursor, slotStart)
+        const segmentStart = Math.max(gapStart, slotStart)
         const segmentEnd = Math.min(gapEnd, slotEnd)
-
-        if (segmentStart > cursor) {
-          const leadingGap = this.createGap({
-            startTime: this.formatLocalDateTime(cursor),
-            endTime: this.formatLocalDateTime(segmentStart),
-            constraints: gap.constraints,
-            metadata: {
-              source: gap.metadata.source,
-              priority: gap.metadata.priority,
-            },
-          })
-          this.gaps.set(leadingGap.id, leadingGap)
-        }
 
         if (segmentEnd > segmentStart) {
           const alignedGap = this.createGap({
@@ -305,21 +290,7 @@ export class GapManager {
             },
           })
           this.gaps.set(alignedGap.id, alignedGap)
-          cursor = segmentEnd
         }
-      }
-
-      if (cursor < gapEnd) {
-        const trailingGap = this.createGap({
-          startTime: this.formatLocalDateTime(cursor),
-          endTime: this.formatLocalDateTime(gapEnd),
-          constraints: gap.constraints,
-          metadata: {
-            source: gap.metadata.source,
-            priority: gap.metadata.priority,
-          },
-        })
-        this.gaps.set(trailingGap.id, trailingGap)
       }
     }
   }

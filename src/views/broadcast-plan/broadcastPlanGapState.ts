@@ -23,11 +23,54 @@ export type GapEntry = TimeDiscontinuity & {
 export const buildTimeDiscontinuities = (
   items: ScheduleItem[],
   timeToSeconds: (time: string) => number,
+  broadcastWindow?: {
+    startTime: string
+    endTime: string
+  },
 ): TimeDiscontinuity[] => {
   const editableItems = items.filter((item) => !item.isReference)
-  if (editableItems.length < 2) return []
-
   const result: TimeDiscontinuity[] = []
+
+  if (broadcastWindow?.startTime && broadcastWindow?.endTime && editableItems.length === 0) {
+    const windowStart = timeToSeconds(broadcastWindow.startTime)
+    const windowEnd = timeToSeconds(broadcastWindow.endTime)
+
+    if (windowEnd > windowStart) {
+      result.push({
+        id: 'broadcast-start-broadcast-end',
+        from: broadcastWindow.startTime,
+        to: broadcastWindow.endTime,
+        prevId: '',
+        nextId: '',
+        prevSortOrder: 0,
+        nextSortOrder: 1,
+      })
+    }
+
+    return result
+  }
+
+  if (editableItems.length === 0) return result
+
+  if (broadcastWindow?.startTime) {
+    const firstItem = editableItems[0]
+    if (firstItem?.startTime) {
+      const windowStart = timeToSeconds(broadcastWindow.startTime)
+      const firstStart = timeToSeconds(firstItem.startTime)
+
+      if (firstStart > windowStart) {
+        result.push({
+          id: `broadcast-start-${firstItem.id}`,
+          from: broadcastWindow.startTime,
+          to: firstItem.startTime,
+          prevId: '',
+          nextId: firstItem.id,
+          prevSortOrder: 0,
+          nextSortOrder: firstItem.sortOrder || 1,
+        })
+      }
+    }
+  }
 
   for (let index = 0; index < editableItems.length - 1; index += 1) {
     const previousItem = editableItems[index]
@@ -49,6 +92,26 @@ export const buildTimeDiscontinuities = (
       prevSortOrder: previousItem.sortOrder || 0,
       nextSortOrder: nextItem.sortOrder || 0,
     })
+  }
+
+  if (broadcastWindow?.endTime) {
+    const lastItem = editableItems[editableItems.length - 1]
+    if (lastItem?.endTime) {
+      const lastEnd = timeToSeconds(lastItem.endTime)
+      const windowEnd = timeToSeconds(broadcastWindow.endTime)
+
+      if (windowEnd > lastEnd) {
+        result.push({
+          id: `${lastItem.id}-broadcast-end`,
+          from: lastItem.endTime,
+          to: broadcastWindow.endTime,
+          prevId: lastItem.id,
+          nextId: '',
+          prevSortOrder: lastItem.sortOrder || 0,
+          nextSortOrder: (lastItem.sortOrder || 0) + 1,
+        })
+      }
+    }
   }
 
   return result

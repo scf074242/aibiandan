@@ -1,46 +1,62 @@
-/**
- * 任务判别器
- * 统一识别任务类型，支持6种模式：
- * - full_generate: 从零生成完整编排单
- * - partial_generate: 对当前空窗自动补排
- * - micro_edit: 局部增删改查
- * - validate_only: 只执行校验
- * - repair_only: 只执行修复
- * - clarify: 语义不明确，需澄清
- */
-
 import type {
-  TaskClassification,
-  TaskMode,
-  ScheduleState,
   RiskAssessment,
   RiskLevel,
+  ScheduleState,
+  TaskClassification,
+  TaskMode,
 } from '@/types/orchestration'
 import type { ChatMessage } from '@/types/llm'
 import { LLMClient } from './llmClient'
 
-/** 任务判别输入 */
 export interface TaskClassifierInput {
   scheduleState: ScheduleState
   userInput: string
   history?: string[]
 }
 
-/** 任务判别器配置 */
 export interface TaskClassifierConfig {
   confidenceThreshold: number
   defaultMode: TaskMode
   enableClarification: boolean
 }
 
-/** 默认配置 */
 const DEFAULT_CONFIG: TaskClassifierConfig = {
   confidenceThreshold: 0.7,
   defaultMode: 'clarify',
   enableClarification: true,
 }
 
-/** 任务判别器 */
+const LAYOUT_SCOPE_KEYWORDS = [
+  '全天',
+  '整天',
+  '全日',
+  '上午',
+  '中午',
+  '午间',
+  '下午',
+  '晚间',
+  '晚上',
+  '夜间',
+  '深夜',
+  '凌晨',
+]
+
+const LAYOUT_CONTENT_KEYWORDS = [
+  '电视剧',
+  '剧场',
+  '黄金剧场',
+  '新闻',
+  '资讯',
+  '评论',
+  '健康',
+  '娱乐',
+  '综艺',
+  '少儿',
+  '纪录片',
+  '电影',
+  '民生',
+]
+
 export class TaskClassifier {
   private llmClient: LLMClient
   private config: TaskClassifierConfig
@@ -50,89 +66,210 @@ export class TaskClassifier {
     this.config = { ...DEFAULT_CONFIG, ...config }
   }
 
-  /**
-   * 判别任务类型
-   */
   async classify(input: TaskClassifierInput): Promise<TaskClassification> {
-    // 1. 基于规则快速判别
     const ruleBasedResult = this.ruleBasedClassification(input)
     if (ruleBasedResult.confidence >= this.config.confidenceThreshold) {
       return ruleBasedResult
     }
 
-    // 2. 使用 LLM 进行语义判别
     const llmResult = await this.llmBasedClassification(input)
-    
-    // 3. 融合结果
     return this.mergeResults(ruleBasedResult, llmResult)
   }
 
-  /**
-   * 基于规则的快速判别
-   */
+  assessRisk(input: TaskClassifierInput): RiskAssessment {
+    const normalized = this.normalizeInput(input.userInput)
+    const factors: string[] = []
+    let level: RiskLevel = 'low'
+
+    if (this.hasAny(normalized, ['全部', '所有', '整天', '全天', '批量'])) {
+      factors.push('涉及较大范围的批量操作')
+      level = 'high'
+    }
+
+    if (this.hasAny(normalized, ['删除', '清空'])) {
+      factors.push('包含删除类操作')
+      level = 'high'
+    }
+
+    if (this.shouldPrepareLayout(normalized) || this.shouldRefineLayout(normalized)) {
+      factors.push('操作对象为版面结构，可能影响后续整段编排结果')
+      if (level !== 'high') {
+        level = 'medium'
+      }
+    }
+
+    if (!input.scheduleState.isEmpty && this.hasAny(normalized, ['生成', '重排', '重新编排'])) {
+      factors.push('当前节目单已有内容，重编排可能覆盖已有结果')
+      level = 'high'
+    }
+
+    return {
+      level,
+      factors: factors.length > 0 ? factors : ['未发现明显高风险因素'],
+    }
+  }
+
   private ruleBasedClassification(input: TaskClassifierInput): TaskClassification {
     const { scheduleState, userInput } = input
-    const lowerInput = userInput.toLowerCase()
+    const normalized = this.normalizeInput(userInput)
+    const targetTimeRange = this.extractTimeRange(normalized)
 
-    // 空节目单 + 生成意图 = full_generate
-    if (scheduleState.isEmpty && this.hasGenerateIntent(lowerInput)) {
+    if (this.shouldCommitLayout(normalized)) {
       return {
-        mode: 'full_generate',
-        confidence: 0.9,
-        reasoning: '节目单为空且用户表达生成意图',
+        mode: 'layout_commit',
+        confidence: 0.95,
+        reasoning: '用户正在确认当前版面草案，并希望据此开始编排。',
       }
     }
 
-    // 校验关键词 = validate_only
-    if (this.hasValidateIntent(lowerInput)) {
+    if (this.isVagueLayoutRequest(normalized)) {
       return {
-        mode: 'validate_only',
-        confidence: 0.85,
-        reasoning: '用户明确表达校验意图',
+        mode: 'clarify',
+        confidence: 0.92,
+        reasoning: '检测到版面相关表达，但缺少明确范围或内容偏好，需要先补充版面信息。',
       }
     }
 
-    // 修复关键词 = repair_only
-    if (this.hasRepairIntent(lowerInput)) {
+    if (
+      this.matchesActualLayoutScope(normalized)
+      && this.matchesActualLayoutContent(normalized)
+      && this.matchesActualLayoutRefineVerb(normalized)
+      && this.matchesActualLayoutContext(normalized)
+    ) {
       return {
-        mode: 'repair_only',
-        confidence: 0.85,
-        reasoning: '用户明确表达修复意图',
-      }
-    }
-
-    // 增删改关键词 = micro_edit
-    if (this.hasEditIntent(lowerInput)) {
-      return {
-        mode: 'micro_edit',
-        confidence: 0.8,
-        reasoning: '用户表达编辑意图',
+        mode: 'layout_refine',
+        confidence: 0.95,
+        reasoning: '检测到用户正在用自然语言微调当前版面草案。',
         suggestedParams: {
-          userIntent: this.extractEditIntent(lowerInput),
+          userIntent: this.extractLayoutIntent(normalized),
+          targetTimeRange,
+          ignoreExistingLayout:
+            this.shouldIgnoreExistingLayout(normalized) || this.matchesExplicitIgnoreCurrentLayout(normalized),
         },
       }
     }
 
-    // 有空窗 + 补排关键词 = partial_generate
-    if (scheduleState.gapCount > 0 && this.hasFillIntent(lowerInput)) {
+    if (
+      (this.matchesActualLayoutScope(normalized) && this.matchesActualLayoutContent(normalized))
+      || (this.matchesActualLayoutContent(normalized)
+        && (this.matchesActualLayoutPrepareVerb(normalized) || this.matchesExplicitIgnoreCurrentLayout(normalized)))
+    ) {
       return {
-        mode: 'partial_generate',
-        confidence: 0.8,
-        reasoning: '存在空窗且用户表达补排意图',
+        mode: 'layout_prepare',
+        confidence: 0.95,
+        reasoning: '检测到用户正在描述一份新的版面草案需求。',
+        suggestedParams: {
+          userIntent: this.extractLayoutIntent(normalized),
+          targetTimeRange,
+          ignoreExistingLayout:
+            this.shouldIgnoreExistingLayout(normalized) || this.matchesExplicitIgnoreCurrentLayout(normalized),
+        },
       }
     }
 
-    // 默认需要澄清
+    if (this.shouldRefineLayout(normalized)) {
+      return {
+        mode: 'layout_refine',
+        confidence: 0.9,
+        reasoning: '用户正在对已有版面草案做局部调整。',
+        suggestedParams: {
+          userIntent: this.extractLayoutIntent(normalized),
+          targetTimeRange,
+          ignoreExistingLayout:
+            this.shouldIgnoreExistingLayout(normalized) || this.matchesExplicitIgnoreCurrentLayout(normalized),
+        },
+      }
+    }
+
+    if (this.shouldPrepareLayout(normalized)) {
+      return {
+        mode: 'layout_prepare',
+        confidence: 0.92,
+        reasoning: '用户明确提出了按内容要求生成或覆盖版面的需求。',
+        suggestedParams: {
+          userIntent: this.extractLayoutIntent(normalized),
+          targetTimeRange,
+          ignoreExistingLayout:
+            this.shouldIgnoreExistingLayout(normalized) || this.matchesExplicitIgnoreCurrentLayout(normalized),
+        },
+      }
+    }
+
+    if (normalized.includes('帮我全天编排') || normalized.includes('全天编排') || normalized.includes('整天编排')) {
+      return {
+        mode: 'full_generate',
+        confidence: 0.92,
+        reasoning: '用户明确希望对整天节目单发起编排，应先进入版面准备阶段。',
+      }
+    }
+
+    if (normalized.includes('帮我填充全天节目') || normalized.includes('填充全天节目')) {
+      return {
+        mode: scheduleState.gapCount > 0 ? 'partial_generate' : 'full_generate',
+        confidence: 0.9,
+        reasoning: '用户明确希望补齐整天节目内容，应先准备版面，再进入后续编排。',
+      }
+    }
+
+    if (scheduleState.isEmpty && this.hasGenerateIntent(normalized)) {
+      return {
+        mode: 'full_generate',
+        confidence: 0.9,
+        reasoning: '节目单为空，且用户表达了直接编排节目单的意图。',
+      }
+    }
+
+    if (this.hasValidateIntent(normalized)) {
+      return {
+        mode: 'validate_only',
+        confidence: 0.85,
+        reasoning: '用户明确要求执行校验。',
+      }
+    }
+
+    if (this.hasRepairIntent(normalized)) {
+      return {
+        mode: 'repair_only',
+        confidence: 0.85,
+        reasoning: '用户明确要求修复已知问题。',
+      }
+    }
+
+    if (this.hasEditIntent(normalized)) {
+      return {
+        mode: 'micro_edit',
+        confidence: 0.8,
+        reasoning: '用户表达了对现有节目单做增删改动的意图。',
+        suggestedParams: {
+          userIntent: this.extractEditIntent(normalized),
+          targetTimeRange,
+        },
+      }
+    }
+
+    if (scheduleState.gapCount > 0 && this.hasStrongFillIntent(normalized)) {
+      return {
+        mode: 'partial_generate',
+        confidence: 0.8,
+        reasoning: '当前存在空窗，且用户明确要求补齐空窗。',
+      }
+    }
+
+    if (scheduleState.gapCount > 0 && this.hasWeakFillIntent(normalized)) {
+      return {
+        mode: 'clarify',
+        confidence: 0.55,
+        reasoning: '用户可能在表达补空窗，但目标范围还不够清晰，需要进一步确认。',
+      }
+    }
+
     return {
       mode: 'clarify',
       confidence: 0.5,
-      reasoning: '无法通过规则明确判别用户意图',
+      reasoning: '无法通过规则明确判断用户当前任务意图。',
     }
   }
 
-  /**
-   * 基于 LLM 的语义判别
-   */
   private async llmBasedClassification(
     input: TaskClassifierInput,
   ): Promise<TaskClassification> {
@@ -140,7 +277,7 @@ export class TaskClassifier {
 
     try {
       const response = await this.llmClient.chat(messages, {
-        temperature: 0.3, // 低温度，更确定性
+        temperature: 0.3,
         maxTokens: 500,
       })
 
@@ -150,42 +287,39 @@ export class TaskClassifier {
       return {
         mode: 'clarify',
         confidence: 0,
-        reasoning: 'LLM 判别失败，需要澄清',
+        reasoning: 'LLM 分类失败，需要进一步澄清。',
       }
     }
   }
 
-  /**
-   * 构建判别 Prompt
-   */
   private buildClassificationPrompt(input: TaskClassifierInput): ChatMessage[] {
     const { scheduleState, userInput, history } = input
 
-    const systemPrompt = `你是一位电视节目编排系统的任务判别助手。
-你的职责是分析用户意图和当前节目单状态，准确判断任务类型。
+    const systemPrompt = `你是电视播单系统的任务分类助手。请根据用户输入和当前节目单状态，把任务归类为以下模式之一：
+1. full_generate：直接对节目单执行全天编排
+2. partial_generate：直接补齐当前空窗
+3. micro_edit：直接编辑已有节目单
+4. validate_only：仅做校验
+5. repair_only：仅做修复
+6. clarify：信息不足，需要追问
+7. layout_prepare：先准备版面草案，再让用户确认
+8. layout_refine：微调当前版面草案
+9. layout_commit：用户确认当前版面草案，可以开始编排
 
-可选任务模式：
-1. full_generate - 从零生成完整编排单（节目单为空或用户要求重新生成全天）
-2. partial_generate - 对当前空窗自动补排（存在空窗，需要自动填充）
-3. micro_edit - 局部增删改查（插入、删除、替换、移动某条节目）
-4. validate_only - 只执行校验（检查编排是否正确）
-5. repair_only - 只执行修复（修复已知问题）
-6. clarify - 语义不明确，需要向用户澄清
+识别原则：
+- 如果用户在描述“某个时段按某类内容铺排版面”，优先判断为 layout_prepare 或 layout_refine。
+- 如果用户表达过于模糊，例如既没有范围也没有内容偏好，返回 clarify。
+- 只有在用户明确是在操作节目单而不是版面时，才返回 micro_edit。
 
-判别原则：
-- 优先根据用户明确意图判断
-- 结合节目单当前状态
-- 如果不确定，选择 clarify
-
-输出必须是 JSON 格式：
+请只输出 JSON：
 {
   "mode": "任务模式",
   "confidence": 0.95,
-  "reasoning": "判别理由",
+  "reasoning": "判断理由",
   "suggestedParams": {
     "userIntent": "解析后的用户意图",
-    "targetGaps": ["目标空窗ID"],
-    "targetItems": ["目标条目ID"]
+    "targetTimeRange": { "start": "13:00:00", "end": "18:00:00" },
+    "ignoreExistingLayout": false
   }
 }`
 
@@ -200,9 +334,8 @@ export class TaskClassifier {
 【用户输入】
 ${userInput}
 
-${history ? `【历史对话】\n${history.join('\n')}` : ''}
-
-请判断任务类型，输出 JSON 格式。`
+${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
+`
 
     return [
       { role: 'system', content: systemPrompt },
@@ -210,20 +343,14 @@ ${history ? `【历史对话】\n${history.join('\n')}` : ''}
     ]
   }
 
-  /**
-   * 解析 LLM 响应
-   */
   private parseClassificationResponse(content: string): TaskClassification {
     try {
-      // 提取 JSON
       const jsonMatch = content.match(/\{[\s\S]*\}/)
       if (!jsonMatch) {
         throw new Error('No JSON found in response')
       }
 
       const result = JSON.parse(jsonMatch[0])
-
-      // 验证模式有效性
       const validModes: TaskMode[] = [
         'full_generate',
         'partial_generate',
@@ -231,6 +358,9 @@ ${history ? `【历史对话】\n${history.join('\n')}` : ''}
         'validate_only',
         'repair_only',
         'clarify',
+        'layout_prepare',
+        'layout_refine',
+        'layout_commit',
       ]
 
       if (!validModes.includes(result.mode)) {
@@ -239,7 +369,7 @@ ${history ? `【历史对话】\n${history.join('\n')}` : ''}
 
       return {
         mode: result.mode,
-        confidence: result.confidence || 0.5,
+        confidence: typeof result.confidence === 'number' ? result.confidence : 0.5,
         reasoning: result.reasoning || '',
         suggestedParams: result.suggestedParams,
       }
@@ -248,29 +378,23 @@ ${history ? `【历史对话】\n${history.join('\n')}` : ''}
       return {
         mode: 'clarify',
         confidence: 0,
-        reasoning: '解析响应失败，需要澄清',
+        reasoning: '解析分类结果失败，需要进一步澄清。',
       }
     }
   }
 
-  /**
-   * 融合规则和 LLM 结果
-   */
   private mergeResults(
     ruleResult: TaskClassification,
     llmResult: TaskClassification,
   ): TaskClassification {
-    // 如果规则判别置信度高，优先使用规则结果
     if (ruleResult.confidence >= 0.85) {
       return ruleResult
     }
 
-    // 如果 LLM 判别置信度高，使用 LLM 结果
     if (llmResult.confidence >= this.config.confidenceThreshold) {
       return llmResult
     }
 
-    // 如果两者一致，合并置信度
     if (ruleResult.mode === llmResult.mode) {
       return {
         mode: ruleResult.mode,
@@ -280,103 +404,128 @@ ${history ? `【历史对话】\n${history.join('\n')}` : ''}
       }
     }
 
-    // 不一致时，如果 LLM 置信度明显高于规则，使用 LLM
-    if (llmResult.confidence > ruleResult.confidence + 0.2) {
-      return llmResult
-    }
-
-    // 否则需要澄清
     return {
       mode: 'clarify',
       confidence: 0.5,
-      reasoning: `规则判别为 ${ruleResult.mode}，LLM 判别为 ${llmResult.mode}，存在歧义需要澄清`,
+      reasoning: `规则分类为 ${ruleResult.mode}，LLM 分类为 ${llmResult.mode}，当前存在歧义，需要用户进一步确认。`,
       suggestedParams: {
-        userIntent: '需要澄清用户意图',
+        userIntent: '需要补充更明确的范围、内容类型或是否沿用现有版面。',
       },
     }
   }
 
-  /**
-   * 评估风险等级
-   */
-  assessRisk(input: TaskClassifierInput): RiskAssessment {
-    const { scheduleState, userInput } = input
-    const factors: string[] = []
-    let level: RiskLevel = 'low'
-
-    // 评估影响范围
-    const lowerInput = userInput.toLowerCase()
-
-    // 批量操作风险
-    if (lowerInput.includes('全部') || lowerInput.includes('所有') || lowerInput.includes('批量')) {
-      factors.push('涉及批量操作')
-      level = 'high'
-    }
-
-    // 长时间段风险
-    if (lowerInput.includes('全天') || lowerInput.includes('整天')) {
-      factors.push('影响长时间段')
-      if (level !== 'high') level = 'medium'
-    }
-
-    // 删除操作风险
-    if (lowerInput.includes('删除') || lowerInput.includes('清空')) {
-      factors.push('涉及删除操作')
-      level = 'high'
-    }
-
-    // 已有内容风险
-    if (!scheduleState.isEmpty && lowerInput.includes('生成')) {
-      factors.push('节目单已有内容，重新生成可能覆盖')
-      level = 'high'
-    }
-
-    // 高风险命令
-    if (this.hasHighRiskCommand(lowerInput)) {
-      factors.push('涉及高风险命令')
-      level = 'high'
-    }
-
-    return {
-      level,
-      factors: factors.length > 0 ? factors : ['无明显风险因素'],
-    }
+  private normalizeInput(input: string): string {
+    return input.trim().toLowerCase().replace(/\s+/g, '')
   }
 
-  // ==================== 意图识别辅助方法 ====================
+  private hasAny(input: string, keywords: string[]): boolean {
+    return keywords.some((keyword) => input.includes(keyword))
+  }
 
   private hasGenerateIntent(input: string): boolean {
-    const keywords = ['生成', '编排', '排期', '创建', '制作', '排表', '自动排', 'ai排']
-    return keywords.some((k) => input.includes(k))
+    return this.hasAny(input, ['生成', '编排', '排期', '创建', '制作', '排表', '自动排', 'ai排'])
   }
 
   private hasValidateIntent(input: string): boolean {
-    const keywords = ['校验', '检查', '验证', '核对', '审查', '查看问题']
-    return keywords.some((k) => input.includes(k))
+    return this.hasAny(input, ['校验', '检查', '验证', '核对', '审查', '查看问题'])
   }
 
   private hasRepairIntent(input: string): boolean {
-    const keywords = ['修复', '修正', '改正', '解决', '处理', '自动修复']
-    return keywords.some((k) => input.includes(k))
+    return this.hasAny(input, ['修复', '修正', '改正', '解决', '处理问题', '自动修复'])
   }
 
   private hasEditIntent(input: string): boolean {
-    const keywords = ['插入', '删除', '替换', '移动', '修改', '调整', '改成', '换成', '添加']
-    return keywords.some((k) => input.includes(k))
+    return this.hasAny(input, ['插入', '删除', '替换', '移动', '修改', '调整', '改成', '换成', '添加'])
   }
 
-  private hasFillIntent(input: string): boolean {
-    const keywords = ['补', '填', '填充', '补齐', '补排', '补上', '自动补']
-    return keywords.some((k) => input.includes(k))
+  private hasStrongFillIntent(input: string): boolean {
+    const exactKeywords = [
+      '补齐空窗',
+      '补空窗',
+      '空窗补排',
+      '补排',
+      '自动补排',
+      '补齐当前所有空窗',
+      '补齐当前空窗',
+      '填充节目单',
+      '补齐编单',
+      '补全编单',
+      '填满节目单',
+    ]
+
+    if (exactKeywords.some((keyword) => input.includes(keyword))) {
+      return true
+    }
+
+    const hasDomainTarget = ['空窗', '节目单', '编单'].some((keyword) => input.includes(keyword))
+    const hasFillVerb = ['补齐', '补全', '填充', '补上'].some((keyword) => input.includes(keyword))
+    return hasDomainTarget && hasFillVerb
   }
 
-  private hasHighRiskCommand(input: string): boolean {
-    const keywords = ['批量替换', '批量删除', '全部删除', '清空', '重置', '覆盖']
-    return keywords.some((k) => input.includes(k))
+  private hasWeakFillIntent(input: string): boolean {
+    return this.hasAny(input, ['补', '填', '填补', '补一补', '补一个', '空白位置', '空位'])
+  }
+
+  private shouldPrepareLayout(input: string): boolean {
+    const hasScope = this.hasLayoutScope(input)
+    const hasContent = this.hasLayoutContent(input)
+    const hasLayoutVerb = this.hasAny(input, [
+      '版面',
+      '不要参考已有版面',
+      '不参考已有版面',
+      '按',
+      '全部排入',
+      '都排',
+      '都改成',
+      '统一成',
+    ])
+
+    return (hasScope && hasContent) || (hasContent && hasLayoutVerb)
+  }
+
+  private shouldRefineLayout(input: string): boolean {
+    const hasScope = this.hasLayoutScope(input)
+    const hasContent = this.hasLayoutContent(input)
+    const hasRefineVerb = this.hasAny(input, ['改成', '换成', '调整为', '改为', '替换成', '变成'])
+    const hasLayoutContext = this.hasAny(input, ['版面', '时段', '下午', '上午', '晚间', '全天'])
+    return hasScope && hasContent && hasRefineVerb && hasLayoutContext
+  }
+
+  private shouldCommitLayout(input: string): boolean {
+    const hasCommitVerb = this.hasAny(input, ['开始编排', '开始排', '确认版面', '采用这个版面', '按这个版面', '按该版面'])
+    const hasDraftReference = this.hasAny(input, ['版面', '草案', '当前版面', '这个版面', '该版面'])
+    return hasCommitVerb && hasDraftReference
+  }
+
+  private shouldIgnoreExistingLayout(input: string): boolean {
+    return this.hasAny(input, ['不要参考已有版面', '不参考已有版面', '忽略现有版面', '不要沿用当前版面'])
+  }
+
+  private isVagueLayoutRequest(input: string): boolean {
+    const hasLayoutWord = this.hasAny(input, ['版面', '排单', '排一下', '下单排单'])
+    if (!hasLayoutWord) {
+      return false
+    }
+
+    return !this.hasLayoutScope(input) || !this.hasLayoutContent(input)
+  }
+
+  private hasLayoutScope(input: string): boolean {
+    return this.matchesActualLayoutScope(input)
+      || LAYOUT_SCOPE_KEYWORDS.some((keyword) => input.includes(keyword))
+      || this.containsExplicitTimeRange(input)
+  }
+
+  private hasLayoutContent(input: string): boolean {
+    return this.matchesActualLayoutContent(input) || LAYOUT_CONTENT_KEYWORDS.some((keyword) => input.includes(keyword))
+  }
+
+  private containsExplicitTimeRange(input: string): boolean {
+    return /(\d{1,2})(:\d{1,2})?点?(到|-|至)(\d{1,2})(:\d{1,2})?点?/.test(input)
+      || /(\d{1,2}:\d{2})(到|-|至)(\d{1,2}:\d{2})/.test(input)
   }
 
   private extractEditIntent(input: string): string {
-    // 提取编辑意图的简化描述
     if (input.includes('插入')) return '插入节目'
     if (input.includes('删除')) return '删除节目'
     if (input.includes('替换')) return '替换节目'
@@ -384,9 +533,174 @@ ${history ? `【历史对话】\n${history.join('\n')}` : ''}
     if (input.includes('修改')) return '修改节目属性'
     return '编辑操作'
   }
+
+  private extractLayoutIntent(input: string): string {
+    const scope = LAYOUT_SCOPE_KEYWORDS.find((keyword) => input.includes(keyword))
+    const content = this.extractActualLayoutLabel(input)
+      ?? LAYOUT_CONTENT_KEYWORDS.find((keyword) => input.includes(keyword))
+    if (scope && content) {
+      return `${scope}以${content}为主`
+    }
+    if (content) {
+      return `以${content}为主`
+    }
+    return '生成版面草案'
+  }
+
+  private extractTimeRange(input: string): { start: string; end: string } | undefined {
+    const actualColonRange = input.match(/(\d{1,2}:\d{2})(?:到|至|-)(\d{1,2}:\d{2})/)
+    if (actualColonRange) {
+      return {
+        start: this.normalizeClock(actualColonRange[1]!),
+        end: this.normalizeClock(actualColonRange[2]!),
+      }
+    }
+
+    const actualPointRange = input.match(/(\d{1,2})(?::(\d{1,2}))?(?:点|點)?(?:到|至|-)(\d{1,2})(?::(\d{1,2}))?(?:点|點)?/)
+    if (actualPointRange) {
+      return {
+        start: this.normalizeClock(`${actualPointRange[1]}:${actualPointRange[2] ?? '00'}`),
+        end: this.normalizeClock(`${actualPointRange[3]}:${actualPointRange[4] ?? '00'}`),
+      }
+    }
+    const colonRange = input.match(/(\d{1,2}:\d{2})(?:分)?(?:到|-|至)(\d{1,2}:\d{2})/)
+    if (colonRange) {
+      return {
+        start: this.normalizeClock(colonRange[1]!),
+        end: this.normalizeClock(colonRange[2]!),
+      }
+    }
+
+    const pointRange = input.match(/(\d{1,2})(?::(\d{1,2}))?点(?:到|-|至)(\d{1,2})(?::(\d{1,2}))?点?/)
+    if (pointRange) {
+      return {
+        start: this.normalizeClock(`${pointRange[1]}:${pointRange[2] ?? '00'}`),
+        end: this.normalizeClock(`${pointRange[3]}:${pointRange[4] ?? '00'}`),
+      }
+    }
+
+    if (input.includes('上午')) {
+      return { start: '06:00:00', end: '12:00:00' }
+    }
+    if (input.includes('中午') || input.includes('午间')) {
+      return { start: '12:00:00', end: '14:00:00' }
+    }
+    if (input.includes('下午')) {
+      return { start: '13:00:00', end: '18:00:00' }
+    }
+    if (input.includes('晚间') || input.includes('晚上')) {
+      return { start: '18:00:00', end: '23:00:00' }
+    }
+    if (input.includes('深夜') || input.includes('凌晨')) {
+      return { start: '23:00:00', end: '23:59:59' }
+    }
+
+    if (input.includes('上午')) {
+      return { start: '06:00:00', end: '12:00:00' }
+    }
+    if (input.includes('中午') || input.includes('午间')) {
+      return { start: '12:00:00', end: '14:00:00' }
+    }
+    if (input.includes('下午')) {
+      return { start: '13:00:00', end: '18:00:00' }
+    }
+    if (input.includes('晚间') || input.includes('晚上')) {
+      return { start: '18:00:00', end: '23:00:00' }
+    }
+    if (input.includes('深夜') || input.includes('凌晨')) {
+      return { start: '23:00:00', end: '23:59:59' }
+    }
+
+    return undefined
+  }
+
+  private extractActualLayoutLabel(input: string): string | null {
+    const normalized = input
+      .replace(/^(?:不参考当前版面参考|不要参考当前版面参考|不参考当前版面|不要参考当前版面|忽略当前版面参考)[,，、]*/u, '')
+      .trim()
+    const verbMatch = normalized.match(/(?:排入|编入|改成|换成|替换成|替换为|调整为|改为|统一成|变成)(.+)$/u)
+    if (!verbMatch && !/(电视剧|剧场|新闻|资讯|评论|健康|娱乐|综艺|少儿|纪录|电影|栏目)/u.test(normalized)) {
+      return null
+    }
+    const rawLabel = verbMatch?.[1] ?? normalized
+    const cleaned = rawLabel
+      .replace(/^(?:全部|都|统一|整体)+/u, '')
+      .replace(/(?:节目|栏目|版面|内容)+$/u, '')
+      .trim()
+    return cleaned || null
+  }
+
+  private matchesActualLayoutScope(input: string): boolean {
+    return ['全天', '整天', '全日', '上午', '中午', '午间', '下午', '晚间', '晚上', '夜间', '深夜', '凌晨']
+      .some((keyword) => input.includes(keyword))
+  }
+
+  private matchesActualLayoutContent(input: string): boolean {
+    if (this.extractActualLayoutLabel(input)) {
+      return true
+    }
+    return [
+      '电视剧',
+      '剧场',
+      '黄金剧场',
+      '下午剧场',
+      '新闻',
+      '新闻栏目',
+      '资讯',
+      '评论',
+      '健康',
+      '娱乐',
+      '综艺',
+      '少儿',
+      '纪录片',
+      '电影',
+      '民生',
+    ].some((keyword) => input.includes(keyword))
+  }
+
+  private matchesActualLayoutPrepareVerb(input: string): boolean {
+    return ['版面', '全部排入', '排入', '都排', '统一成', '编入', '铺成', '按', '不参考当前版面参考', '不参考当前版面']
+      .some((keyword) => input.includes(keyword))
+  }
+
+  private matchesActualLayoutRefineVerb(input: string): boolean {
+    return ['改成', '换成', '调整为', '改为', '替换成', '变成'].some((keyword) => input.includes(keyword))
+  }
+
+  private matchesActualLayoutCommitVerb(input: string): boolean {
+    return ['开始编排', '开始排', '确认版面', '采用这个版面', '按这个版面', '按该版面']
+      .some((keyword) => input.includes(keyword))
+  }
+
+  private matchesActualLayoutContext(input: string): boolean {
+    return ['版面', '草案', '当前版面', '这个版面', '该版面', '时段', '下午', '上午', '晚间', '晚上', '全天']
+      .some((keyword) => input.includes(keyword))
+  }
+
+  private matchesExplicitIgnoreCurrentLayout(input: string): boolean {
+    return [
+      '不参考当前版面参考',
+      '不要参考当前版面参考',
+      '不参考当前版面',
+      '不要参考当前版面',
+      '不参考当前频道版面参考',
+      '不参考当前频道版面',
+      '不要参考当前频道版面',
+      '不参考现有版面参考',
+      '不要参考现有版面参考',
+      '忽略当前版面参考',
+      '忽略当前版面',
+    ].some((keyword) => input.includes(keyword))
+  }
+
+  private normalizeClock(clock: string): string {
+    const [hourText, minuteText = '00'] = clock.split(':')
+    const hour = Math.max(0, Math.min(23, Number(hourText)))
+    const minute = Math.max(0, Math.min(59, Number(minuteText)))
+    return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:00`
+  }
 }
 
-// 导出单例工厂函数
 let globalClassifier: TaskClassifier | null = null
 
 export function getTaskClassifier(llmClient?: LLMClient): TaskClassifier {

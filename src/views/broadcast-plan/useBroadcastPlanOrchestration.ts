@@ -3,13 +3,12 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { useOrchestrator } from '@/composables/useOrchestrator'
 import type { ScheduleItem } from './scheduleData'
-import {
-  buildOrchestrationScheduleState,
-  shouldStartPartialGeneration,
-} from './broadcastPlanOrchestrationHelpers'
+import type { LayoutDraft, TaskMode } from '@/types/orchestration'
+import { useBroadcastPlanFocus } from './useBroadcastPlanFocus'
+import type { ValidationReport } from '@/types/orchestration'
+import { setRuntimeLayout } from '@/services/orchestration/runtimeLayoutRegistry'
 
 type UseBroadcastPlanOrchestrationOptions = {
-  aiUserInput: Ref<string>
   currentChannelId: ComputedRef<string>
   currentChannelName: ComputedRef<string>
   scheduleDate: ComputedRef<string>
@@ -18,10 +17,33 @@ type UseBroadcastPlanOrchestrationOptions = {
   syncPageItemsToAtomic: () => void
   syncAtomicItemsToPage: () => void
   syncAtomicItemsToPageDeferred: () => void
+  focusRuntime: ReturnType<typeof useBroadcastPlanFocus>
+  normalizeClockText: (value: string) => string
 }
 
 export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestrationOptions) => {
   const orchestratorRuntime = useOrchestrator({
+    onGapStart: (gap) => {
+      options.focusRuntime.startGap({
+        ...gap,
+        startTime: options.normalizeClockText(gap.startTime),
+        endTime: options.normalizeClockText(gap.endTime),
+      })
+    },
+    onGapComplete: (_gap, item) => {
+      options.focusRuntime.completeItem({
+        ...item,
+        startTime: options.normalizeClockText(item.startTime),
+        endTime: options.normalizeClockText(item.endTime),
+      })
+    },
+    onGapFailed: (gap, error) => {
+      options.focusRuntime.failGap({
+        ...gap,
+        startTime: options.normalizeClockText(gap.startTime),
+        endTime: options.normalizeClockText(gap.endTime),
+      }, error)
+    },
     onComplete: (session) => {
       options.syncAtomicItemsToPage()
       if (session.status === 'manual_review') {
@@ -34,6 +56,14 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
       ElMessage.error(`AI 编排失败: ${error.message}`)
     },
     onProgress: () => {
+      const liveGaps = orchestratorRuntime.progress.value?.liveGaps ?? []
+      options.focusRuntime.reconcileWithLiveGaps(
+        liveGaps.map((gap) => ({
+          ...gap,
+          startTime: options.normalizeClockText(gap.startTime),
+          endTime: options.normalizeClockText(gap.endTime),
+        })),
+      )
       options.syncAtomicItemsToPageDeferred()
     },
     onStatusChange: (status) => {
@@ -47,9 +77,18 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
     },
   })
 
-  const startOrchestrationRuntime = async () => {
+  const startOrchestrationRuntime = async (mode: Extract<TaskMode, 'full_generate' | 'partial_generate'> = 'full_generate') => {
     try {
+      options.focusRuntime.resetForRun()
       options.syncPageItemsToAtomic()
+      if (mode === 'partial_generate') {
+        await orchestratorRuntime.startPartialGeneration(
+          options.currentChannelId.value,
+          options.scheduleDate.value,
+        )
+        return
+      }
+
       await orchestratorRuntime.startFullGeneration(
         options.currentChannelId.value,
         options.scheduleDate.value,
@@ -61,43 +100,36 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
     }
   }
 
-  const handleAICommand = async () => {
-    const userInput = options.aiUserInput.value.trim()
-    if (!userInput) {
-      ElMessage.warning('请输入需求')
-      return
-    }
-
-    const date = options.scheduleDate.value
-    const itemCount = options.scheduleItems.value.length
-    const task = await orchestratorRuntime.classifyTask(
-      buildOrchestrationScheduleState({
-        channelId: options.currentChannelId.value,
-        channelName: options.currentChannelName.value,
-        date,
-        itemCount,
-        gapCount: options.displayGapCount.value,
-      }),
-      userInput,
-    )
-
-    options.aiUserInput.value = ''
-
-    if (shouldStartPartialGeneration(task.mode, itemCount)) {
-      options.syncPageItemsToAtomic()
-      await orchestratorRuntime.startPartialGeneration(
-        options.currentChannelId.value,
-        date,
-      )
-      return
-    }
-
-    await startOrchestrationRuntime()
-  }
-
-  const handleChatCommandExecuted = (result: { success: boolean; message: string }) => {
+  const handleChatCommandExecuted = (result: {
+    success: boolean
+    message: string
+    commandAction?: string
+    data?: unknown
+    affectedTimeRanges?: { start: string; end: string }[]
+    validationReport?: ValidationReport
+  }) => {
     if (result.success) {
       options.syncAtomicItemsToPage()
+      let hasAppliedFocus = false
+      if (result.commandAction === 'delete') {
+        options.focusRuntime.clearDeletedEcho()
+        options.focusRuntime.clearActive()
+        hasAppliedFocus = true
+      }
+
+      if (!hasAppliedFocus && Array.isArray(result.affectedTimeRanges) && result.affectedTimeRanges.length > 0) {
+        const primaryRange = result.commandAction === 'move'
+          ? result.affectedTimeRanges[result.affectedTimeRanges.length - 1]
+          : result.affectedTimeRanges[0]
+        if (!primaryRange) {
+          return
+        }
+        options.focusRuntime.showResult({
+          type: 'range',
+          startTime: options.normalizeClockText(primaryRange.start),
+          endTime: options.normalizeClockText(primaryRange.end),
+        })
+      }
     }
   }
 
@@ -105,9 +137,29 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
     options.syncAtomicItemsToPage()
   }
 
-  const handleChatOrchestrateRequested = async (payload: { userInput: string }) => {
-    options.aiUserInput.value = payload.userInput
-    await handleAICommand()
+  const handleChatOrchestrateRequested = async (
+    payload: { userInput: string; mode: TaskMode; reasoning?: string; layoutDraft?: LayoutDraft },
+  ) => {
+    void payload.userInput
+    void payload.reasoning
+    if (payload.mode !== 'full_generate' && payload.mode !== 'partial_generate') {
+      return
+    }
+    if (payload.layoutDraft) {
+      setRuntimeLayout({
+        sourceFileName: payload.layoutDraft.source === 'uploaded'
+          ? '上传版面草案'
+          : payload.layoutDraft.source === 'channel_default'
+            ? '频道版面草案'
+            : 'AI版面草案',
+        channelId: payload.layoutDraft.channelId,
+        date: payload.layoutDraft.date,
+        warnings: payload.layoutDraft.warnings ?? [],
+        layoutReference: payload.layoutDraft.layoutReference,
+        columns: payload.layoutDraft.columns,
+      })
+    }
+    await startOrchestrationRuntime(payload.mode)
   }
 
   const handleCancelOrchestration = async () => {
@@ -130,7 +182,6 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
   return {
     orchestratorRuntime,
     startOrchestrationRuntime,
-    handleAICommand,
     handleChatCommandExecuted,
     handleChatScheduleUpdated,
     handleChatOrchestrateRequested,

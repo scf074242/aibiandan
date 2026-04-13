@@ -12,37 +12,51 @@
           :class="[
             message.role === 'user' ? 'user-bubble' : 'system-row',
             message.processType ? `process-${message.processType}` : '',
+            { 'is-focusable': canFocusMessage(message) },
           ]"
         >
-          <div v-if="message.role !== 'user'" class="system-summary-row">
+          <div
+            v-if="message.role !== 'user'"
+            class="system-summary-row"
+            :class="{ 'is-focusable': canFocusMessage(message) }"
+            @click="handleMessageFocus(message)"
+          >
             <div class="system-summary-main">
-              <div class="system-summary-text" :title="message.content">{{ message.content }}</div>
-              <div v-if="shouldShowReasonTags(message)" class="reason-tag-row">
+              <div class="system-mainline">
                 <span
-                  v-for="tag in message.reasonTags"
-                  :key="tag"
-                  class="reason-tag"
+                  v-if="shouldShowStatusLabel(message)"
+                  class="system-status-text"
+                  :class="`is-${message.statusTone || 'neutral'}`"
                 >
-                  {{ tag }}
+                  {{ message.statusLabel }}
                 </span>
-              </div>
-              <div
-                v-if="shouldShowDefaultExplanation(message)"
-                class="system-thinking-text"
-                :title="message.thinking"
-              >
-                {{ message.thinking }}
+                <div
+                  v-if="getPrimarySummary(message)"
+                  class="system-summary-text"
+                  :title="message.content"
+                >
+                  {{ getPrimarySummary(message) }}
+                </div>
               </div>
             </div>
-            <el-button
-              v-if="hasExpandableExplanation(message)"
-              link
-              size="small"
-              class="process-toggle"
-              @click="toggleExpanded(message)"
-            >
-              {{ message.expanded ? '收起依据' : '查看依据' }}
-            </el-button>
+            <div class="system-summary-side">
+              <div
+                v-if="message.stepMetric"
+                class="step-timer-chip"
+                :class="{ 'is-running': message.stepMetric.mode === 'elapsed' }"
+              >
+                <span class="step-timer-value">{{ formatStepMetric(message.stepMetric) }}</span>
+              </div>
+              <el-button
+                v-if="hasExpandableExplanation(message)"
+                link
+                size="small"
+                class="process-toggle"
+                @click.stop="toggleExpanded(message)"
+              >
+                {{ message.expanded ? '收起详情' : '详情' }}
+              </el-button>
+            </div>
           </div>
 
           <div v-if="message.role === 'user'" class="message-text">{{ message.content }}</div>
@@ -52,24 +66,20 @@
               v-for="section in getExpandedSections(message)"
               :key="section.title"
               class="explanation-section"
+              :class="{
+                'is-secondary': section.tone === 'secondary',
+                'is-risk': section.tone === 'risk',
+              }"
             >
-              <div class="explanation-title">{{ section.title }}</div>
-              <div
-                class="explanation-content"
-                :class="{
-                  'is-secondary': section.tone === 'secondary',
-                  'is-risk': section.tone === 'risk',
-                }"
-              >
-                {{ section.body }}
-              </div>
+              <span class="explanation-title">{{ section.title }}</span>
+              <div class="explanation-content">{{ section.body }}</div>
             </div>
 
             <div
               v-if="getCandidateComparisonItems(message).length > 0"
               class="candidate-comparison-panel"
             >
-              <div class="explanation-title">候选方案对比</div>
+              <div class="explanation-title">候选</div>
               <div class="candidate-comparison-list">
                 <div
                   v-for="candidate in getCandidateComparisonItems(message)"
@@ -77,14 +87,12 @@
                   class="candidate-comparison-item"
                   :class="{ 'is-selected': candidate.selected }"
                 >
-                  <div class="candidate-comparison-main">
-                    <div class="candidate-comparison-name">
-                      {{ candidate.name }}
-                      <span v-if="candidate.selected" class="candidate-comparison-badge">本次采用</span>
-                    </div>
-                    <div class="candidate-comparison-meta">{{ candidate.meta }}</div>
+                  <div class="candidate-comparison-name-line">
+                    <span class="candidate-comparison-name">{{ candidate.name }}</span>
+                    <span v-if="candidate.selected" class="candidate-comparison-badge">已采用</span>
                   </div>
-                  <div class="candidate-comparison-note">{{ candidate.note }}</div>
+                  <div v-if="candidate.meta" class="candidate-comparison-meta">{{ candidate.meta }}</div>
+                  <div v-if="candidate.note" class="candidate-comparison-note">{{ candidate.note }}</div>
                 </div>
               </div>
             </div>
@@ -94,7 +102,7 @@
               class="details-panel"
             >
               <el-button link size="small" class="details-toggle" @click="toggleDetailExpanded(message)">
-                {{ message.detailExpanded ? '收起明细' : '查看明细' }}
+                {{ message.detailExpanded ? '收起明细' : '明细' }}
               </el-button>
               <div v-if="message.detailExpanded" class="details-summary-list">
                 <div
@@ -189,6 +197,44 @@
       </div>
     </div>
 
+    <div v-if="pendingLayoutDraft" class="pending-command-panel layout-draft-panel">
+      <div class="pending-command-header">
+        <div>
+          <div class="pending-command-title">版面草案</div>
+          <div class="pending-command-summary">{{ getLayoutDraftHeaderText(pendingLayoutDraft) }}</div>
+        </div>
+        <el-tag type="success" effect="light">{{ getLayoutDraftSourceLabel(pendingLayoutDraft) }}</el-tag>
+      </div>
+
+      <div class="pending-command-body">
+        <div class="pending-command-reasoning">
+          覆盖 {{ formatDisplayTimeRange(pendingLayoutDraft.coverage.start, pendingLayoutDraft.coverage.end) }}，
+          共 {{ pendingLayoutDraft.layoutReference.slots.length }} 个时段。
+        </div>
+        <div v-if="getLayoutDraftSegmentItems(pendingLayoutDraft).length" class="layout-draft-segment-list">
+          <div
+            v-for="segment in getLayoutDraftSegmentItems(pendingLayoutDraft)"
+            :key="segment.segmentId"
+            class="layout-draft-segment-item"
+          >
+            <div class="layout-draft-segment-main">
+              <div class="layout-draft-segment-time">
+                {{ formatDisplayTimeRange(segment.startTime, segment.endTime) }}
+              </div>
+              <div class="layout-draft-segment-label">{{ segment.label }}</div>
+            </div>
+          </div>
+        </div>
+        <div class="pending-command-reasoning">
+          你可以继续输入自然语言微调当前草案，确认后再开始编排。
+        </div>
+      </div>
+
+      <div class="pending-command-actions">
+        <el-button type="primary" size="small" @click="confirmLayoutDraft">开始编排</el-button>
+      </div>
+    </div>
+
     <div class="quick-actions">
       <el-button v-for="action in quickActions" :key="action.label" size="small" @click="applyQuickAction(action.prompt)">
         {{ action.label }}
@@ -238,35 +284,41 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, Promotion, UploadFilled } from '@element-plus/icons-vue'
 import type { ChatMessage } from '@/types/llm'
 import type {
+  DraftFeasibilityReport,
   ExplanationResult,
+  LayoutDraft,
   OrchestrationCommand,
   PlanningLogEntry,
   PlanningSession,
   TaskMode,
+  ValidationReport,
 } from '@/types/orchestration'
 import { getCommandExecutor } from '@/services/commandExecutor'
-import { getLLMClient } from '@/services/llm/llmClient'
-import { getTaskClassifier } from '@/services/llm/taskClassifier'
-import { buildDialogueContext } from '@/services/dialogueContext'
-import { getIntentRecognizer } from '@/services/intentRecognizer'
-import { getParamExtractor } from '@/services/paramExtractor'
-import { getEntityLinker } from '@/services/entityLinker'
-import { getCandidateService } from '@/services/candidateService'
-import { getCandidateSelectionService } from '@/services/candidateSelectionService'
-import { getInsertCommandExecutor } from '@/services/insertCommandExecutor'
-import { getReplaceCommandExecutor } from '@/services/replaceCommandExecutor'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
-import { getScheduleTargetResolver } from '@/services/scheduleTargetResolver'
 import { getLayoutImportService } from '@/services/layoutImportService'
+import { getCandidateService } from '@/services/candidateService'
+import {
+  getOpenClawBridge,
+  type OpenClawBridgeResult,
+} from '@/services/openclaw/openClawBridge'
+import {
+  summarizeRuntimeCommand,
+  type RuntimeDecision,
+  type RuntimeFeedback,
+  type RuntimeOrchestrationRequest,
+  type RuntimePendingCommand,
+  type RuntimePendingTargetSelection,
+  type RuntimeScheduleItem,
+} from '@/services/runtime/demoRuntimeFacade'
+import type { RuntimeBridgeSessionState } from '@/services/runtime/runtimeSessionStore'
 import {
   clearRuntimeLayout,
   getEffectiveColumnDefinition,
-  getEffectiveLayoutReference,
   getRuntimeLayoutEntry,
   setRuntimeLayout,
 } from '@/services/orchestration/runtimeLayoutRegistry'
@@ -274,6 +326,7 @@ import {
   formatDetails as formatStructuredDetails,
   formatOffset as formatOffsetText,
   formatProgramLabel as formatProgramDisplayLabel,
+  formatValidationSummaryText,
   normalizeDecisionExplanation,
   toDetailMap,
   toPreviewRecord,
@@ -304,10 +357,30 @@ type ProcessType =
   | 'error'
   | 'general'
 
+interface MessageStepMetric {
+  mode: 'elapsed' | 'duration'
+  label: string
+  elapsedMs?: number
+  durationMs?: number
+}
+
+interface MessageFocusTarget {
+  type: 'item' | 'gap' | 'range'
+  startTime: string
+  endTime: string
+  itemId?: string
+  gapId?: string
+  layer?: 'intent' | 'process' | 'issue' | 'result'
+  status?: 'active' | 'success' | 'error'
+  error?: string
+}
+
 interface Message extends ChatMessage {
   explanation?: ExplanationResult
   processType?: ProcessType
   processTypeLabel?: string
+  statusLabel?: string
+  statusTone?: 'running' | 'success' | 'warning' | 'error' | 'neutral'
   expanded?: boolean
   thinking?: string
   reasonTags?: string[]
@@ -315,40 +388,11 @@ interface Message extends ChatMessage {
   rawDetailsExpanded?: boolean
   mergeKey?: string
   mergeKind?: 'idea' | 'query_request' | 'query_result' | 'selection' | 'execution' | 'other'
+  stepMetric?: MessageStepMetric
+  focusTarget?: MessageFocusTarget
 }
 
-interface PendingCommandState {
-  command: OrchestrationCommand
-  summary: string
-  reasoning: string
-  details?: DetailMap
-}
-
-interface PendingTargetSelectionState {
-  action: 'delete' | 'move' | 'replace'
-  summary: string
-  reasoning: string
-  targetTime: string
-  programName?: string
-  candidates: SchedulePreviewItem[]
-  selectedItemId: string | null
-  moveConfig?: {
-    direction: 'forward' | 'backward'
-    offsetSeconds: number
-  }
-  replaceProgramName?: string
-  resolutionDetails?: DetailMap
-}
-
-interface SchedulePreviewItem {
-  id: string
-  programCode?: string
-  programName?: string
-  startTime: string
-  endTime: string
-  duration?: number
-  programType?: string
-}
+type SchedulePreviewItem = RuntimeScheduleItem
 
 interface Props {
   currentSchedule: SchedulePreviewItem[]
@@ -364,10 +408,19 @@ interface Props {
 
 const props = defineProps<Props>()
 const emit = defineEmits<{
-  commandExecuted: [result: { success: boolean; message: string }]
+  commandExecuted: [result: {
+    success: boolean
+    message: string
+    commandAction?: string
+    data?: unknown
+    affectedTimeRanges?: { start: string; end: string }[]
+    validationReport?: ValidationReport
+  }]
   scheduleUpdated: [items: Props['currentSchedule']]
-  orchestrateRequested: [payload: { userInput: string; mode: TaskMode; reasoning: string }]
+  orchestrateRequested: [payload: RuntimeOrchestrationRequest]
   cancelRequested: []
+  focusRequested: [payload: MessageFocusTarget]
+  layoutDraftUpdated: [payload: { draft: LayoutDraft | null; feasibilityReport: DraftFeasibilityReport | null }]
 }>()
 
 const messages = ref<Message[]>([])
@@ -375,28 +428,34 @@ const inputMessage = ref('')
 const loading = ref(false)
 const messagesContainer = ref<HTMLElement>()
 const layoutFileInput = ref<HTMLInputElement>()
-const pendingCommand = ref<PendingCommandState | null>(null)
-const pendingTargetSelection = ref<PendingTargetSelectionState | null>(null)
+const pendingCommand = ref<RuntimePendingCommand | null>(null)
+const pendingTargetSelection = ref<RuntimePendingTargetSelection | null>(null)
+const pendingLayoutDraft = ref<LayoutDraft | null>(null)
+const layoutDraftFeasibility = ref<DraftFeasibilityReport | null>(null)
+const pendingLayoutDraftMode = ref<Extract<TaskMode, 'full_generate' | 'partial_generate'> | null>(null)
 const commandExecutor = getCommandExecutor()
-const insertCommandExecutor = getInsertCommandExecutor()
-const replaceCommandExecutor = getReplaceCommandExecutor()
-const scheduleCommandBus = getScheduleCommandBus()
-const llmClient = getLLMClient()
-const taskClassifier = getTaskClassifier(llmClient)
-const intentRecognizer = getIntentRecognizer(llmClient)
-const paramExtractor = getParamExtractor(llmClient)
-const entityLinker = getEntityLinker()
 const candidateService = getCandidateService()
-const candidateSelectionService = getCandidateSelectionService(llmClient)
-const scheduleTargetResolver = getScheduleTargetResolver(llmClient)
+const scheduleCommandBus = getScheduleCommandBus()
+const openClawBridge = getOpenClawBridge()
 const layoutImportService = getLayoutImportService()
 const displayedLogIds = ref<string[]>([])
 const lastSummarySessionId = ref('')
 const uploadingLayout = ref(false)
 const activeImportedLayoutName = ref('')
+const bridgeSessionId = ref('')
+const queuedCommands = ref<string[]>([])
+let unsubscribeBridgeSession: (() => void) | null = null
+let activeThinkingController: {
+  stop: () => void
+  message: Message
+  sessionId: string
+  startedAtMs: number
+} | null = null
 const MAX_DISPLAYED_LOG_IDS = 60
 const MAX_MESSAGE_COUNT = 40
 const MAX_RUNTIME_PROGRESS_MESSAGES = 24
+const activeStepTimerIds = new Set<number>()
+const MIN_VISIBLE_MESSAGE_DURATION_MS = 100
 
 const quickActions = [
   { label: '全天编排', prompt: '帮我填充全天节目' },
@@ -413,6 +472,57 @@ const applyQuickAction = (prompt: string) => {
 
 const syncImportedLayoutState = () => {
   activeImportedLayoutName.value = getRuntimeLayoutEntry(props.channelId, props.date)?.sourceFileName ?? ''
+}
+
+const getLayoutDraftSourceLabel = (draft: LayoutDraft) => {
+  switch (draft.source) {
+    case 'uploaded':
+      return '上传版面'
+    case 'channel_default':
+      return '频道版面'
+    default:
+      return 'AI 草案'
+  }
+}
+
+const getLayoutDraftHeaderText = (draft: LayoutDraft) =>
+  `${formatDisplayTimeRange(draft.coverage.start, draft.coverage.end)} · ${draft.layoutReference.slots.length} 个时段`
+
+const getLayoutDraftSegmentItems = (draft: LayoutDraft) =>
+  draft.layoutReference.slots.map((slot, index) => {
+    const column = draft.columns[index]
+    return {
+      segmentId: slot.id,
+      label: column?.semanticLabel ?? column?.columnName ?? `时段 ${index + 1}`,
+      startTime: normalizeClockText(slot.startTime),
+      endTime: normalizeClockText(slot.endTime),
+    }
+  })
+
+const clearPendingLayoutDraftState = () => {
+  pendingLayoutDraft.value = null
+  layoutDraftFeasibility.value = null
+  pendingLayoutDraftMode.value = null
+  emit('layoutDraftUpdated', {
+    draft: null,
+    feasibilityReport: null,
+  })
+}
+
+const confirmLayoutDraft = () => {
+  if (!pendingLayoutDraft.value || !pendingLayoutDraftMode.value) {
+    return
+  }
+
+  const draft = pendingLayoutDraft.value
+  const mode = pendingLayoutDraftMode.value
+  clearPendingLayoutDraftState()
+  emit('orchestrateRequested', {
+    userInput: '按当前版面开始编排',
+    mode,
+    reasoning: '用户确认当前版面草案并开始编排。',
+    layoutDraft: draft,
+  })
 }
 
 const openLayoutUpload = () => {
@@ -528,9 +638,234 @@ const handlePrimaryAction = async () => {
   await sendMessage()
 }
 
+const getBridgeConversationId = () => `${props.channelId}::${props.date}`
+
+const syncBridgeSessionState = (state: RuntimeBridgeSessionState) => {
+  bridgeSessionId.value = state.sessionId
+  pendingCommand.value = state.pendingCommand ?? null
+  pendingTargetSelection.value = state.pendingTargetSelection ?? null
+  pendingLayoutDraft.value = state.pendingLayoutDraft ?? null
+  layoutDraftFeasibility.value = state.layoutDraftFeasibility ?? null
+  pendingLayoutDraftMode.value = state.layoutDraftMode ?? null
+  emit('layoutDraftUpdated', {
+    draft: pendingLayoutDraft.value,
+    feasibilityReport: layoutDraftFeasibility.value,
+  })
+}
+
+const attachBridgeSession = (sessionId: string) => {
+  if (bridgeSessionId.value === sessionId && unsubscribeBridgeSession) {
+    return
+  }
+
+  unsubscribeBridgeSession?.()
+  bridgeSessionId.value = sessionId
+  unsubscribeBridgeSession = openClawBridge.subscribe(sessionId, (state) => {
+    syncBridgeSessionState(state)
+  })
+}
+
+const appendRuntimeFeedback = (feedback: RuntimeFeedback) => {
+  const feedbackProcessType = feedback.processType as ProcessType
+  const details = (feedback.details ?? undefined) as DetailMap | undefined
+  pushAssistantMessage(buildAssistantMessage({
+    content: feedback.content,
+    thinking: feedback.thinking,
+    explanation: feedback.explanation
+      ? {
+          type: 'command',
+          targetId: `runtime-${Date.now()}`,
+          explanation: feedback.explanation,
+          details,
+        }
+      : undefined,
+    processType: feedbackProcessType,
+    processTypeLabel: feedback.processTypeLabel,
+    focusTarget: details
+      ? extractFocusTargetFromDetails(
+          details,
+          feedbackProcessType,
+          feedbackProcessType === 'error' ? 'issue' : 'intent',
+        )
+      : undefined,
+  }))
+}
+
+const applyRuntimeDecision = async (decision: RuntimeDecision) => {
+  switch (decision.kind) {
+    case 'message':
+      appendRuntimeFeedback(decision.feedback)
+      return
+    case 'pending_command':
+      appendRuntimeFeedback(decision.feedback)
+      pendingCommand.value = decision.pendingCommand
+      return
+    case 'pending_target_selection':
+      appendRuntimeFeedback(decision.feedback)
+      pendingTargetSelection.value = decision.pendingTargetSelection
+      return
+    case 'execute_command':
+      emitFocusTarget(
+        decision.execution.details
+          ? extractFocusTargetFromDetails(
+              decision.execution.details as DetailMap,
+              'execution',
+              'intent',
+            )
+          : undefined,
+      )
+      await executeCommand(decision.execution.command, {
+        successMessage: decision.execution.successMessage,
+        thinking: decision.execution.thinking,
+        explanation: decision.execution.explanation,
+        details: decision.execution.details,
+      })
+      return
+    case 'orchestration':
+      appendRuntimeFeedback(decision.feedback)
+      emit('orchestrateRequested', decision.orchestrationRequest)
+      return
+    case 'layout_draft':
+      appendRuntimeFeedback(decision.feedback)
+      pendingLayoutDraft.value = decision.draft
+      layoutDraftFeasibility.value = decision.feasibilityReport
+      pendingLayoutDraftMode.value = decision.orchestrationMode
+      emit('layoutDraftUpdated', {
+        draft: decision.draft,
+        feasibilityReport: decision.feasibilityReport,
+      })
+      return
+    case 'layout_commit':
+      appendRuntimeFeedback(decision.feedback)
+      pendingLayoutDraft.value = null
+      layoutDraftFeasibility.value = null
+      pendingLayoutDraftMode.value = null
+      emit('layoutDraftUpdated', {
+        draft: null,
+        feasibilityReport: null,
+      })
+      emit('orchestrateRequested', decision.orchestrationRequest)
+      return
+  }
+}
+
+const applyBridgeResult = async (result: OpenClawBridgeResult) => {
+  attachBridgeSession(result.sessionId)
+  const session = openClawBridge.getSessionState(result.sessionId)
+  if (!session) {
+    return
+  }
+
+  syncBridgeSessionState(session)
+
+  if (session.lastExecution) {
+    const executed = session.lastExecution
+    if (executed.success) {
+      emit('commandExecuted', {
+        success: true,
+        message: executed.message,
+        commandAction: executed.command.action,
+        data: executed.data,
+        affectedTimeRanges: executed.affectedTimeRanges,
+        validationReport: executed.validationReport,
+      })
+      ElMessage.success(executed.message)
+      emit('scheduleUpdated', commandExecutor.getScheduleItems())
+      const details = {
+        ...(executed.details ?? {}),
+        validationSummary: executed.validationSummary,
+      } as DetailMap
+      pushAssistantMessage(buildAssistantMessage({
+        content: executed.message,
+        thinking: executed.thinking,
+        explanation: executed.explanation
+          ? {
+              type: 'command',
+              targetId: `bridge-execution-${Date.now()}`,
+              explanation: executed.explanation,
+              details,
+            }
+          : undefined,
+        processType: 'execution',
+        processTypeLabel: '执行完成',
+        focusTarget: executed.command.action === 'delete'
+          ? undefined
+          : extractFocusTargetFromDetails(details, 'execution', 'result'),
+      }), {
+        autoFocus: false,
+      })
+    } else {
+      emit('commandExecuted', {
+        success: false,
+        message: executed.message,
+        commandAction: executed.command.action,
+        data: executed.data,
+        affectedTimeRanges: executed.affectedTimeRanges,
+        validationReport: executed.validationReport,
+      })
+      ElMessage.error(executed.error || executed.message)
+      const details = (executed.details ?? undefined) as DetailMap | undefined
+      pushAssistantMessage(buildAssistantMessage({
+        content: executed.error || executed.message,
+        explanation: executed.explanation
+          ? {
+              type: 'command',
+              targetId: `bridge-execution-error-${Date.now()}`,
+              explanation: executed.explanation,
+              details,
+            }
+          : undefined,
+        processType: 'error',
+        processTypeLabel: '执行失败',
+        focusTarget: details ? extractFocusTargetFromDetails(details, 'error', 'issue') : undefined,
+      }))
+    }
+    return
+  }
+
+  if (session.lastDecision) {
+    await applyRuntimeDecision(session.lastDecision)
+  }
+}
+
+const processMessage = async (content: string) => {
+  loading.value = true
+  const stepProgress = startStepProgress('思考中')
+
+  try {
+    const result = await openClawBridge.submitInstruction({
+      conversationId: getBridgeConversationId(),
+      channelId: props.channelId,
+      channelName: props.channelName,
+      date: props.date,
+      text: content,
+      currentSchedule: props.currentSchedule,
+      gapCount: props.gapCount,
+      history: messages.value.slice(-6).map((message) => message.content),
+    })
+    await applyBridgeResult(result)
+    attachStepMetricToLatestAssistantMessage(stepProgress.finish())
+  } catch (error) {
+    const stepMetric = stepProgress.finish()
+    messages.value.push(buildAssistantMessage({
+      content: error instanceof Error ? error.message : 'AI 请求失败，请稍后重试。',
+      processType: 'error',
+      processTypeLabel: '执行异常',
+      stepMetric,
+    }))
+  } finally {
+    loading.value = false
+    await scrollToBottom()
+    const nextContent = queuedCommands.value.shift()
+    if (nextContent) {
+      void processMessage(nextContent)
+    }
+  }
+}
+
 const sendMessage = async () => {
   const content = inputMessage.value.trim()
-  if (!content || loading.value) return
+  if (!content) return
 
   // 新用户命令到来时，先清理上一次遗留的确认态，避免旧面板和新执行结果叠在一起
   pendingCommand.value = null
@@ -538,588 +873,14 @@ const sendMessage = async () => {
 
   messages.value.push({ role: 'user', content })
   inputMessage.value = ''
-  loading.value = true
+  await scrollToBottom()
 
-  try {
-    const classification = await taskClassifier.classify({
-      scheduleState: {
-        channelId: props.channelId,
-        channelName: props.channelName,
-        date: props.date,
-        isEmpty: props.currentSchedule.length === 0,
-        itemCount: props.currentSchedule.length,
-        gapCount: props.gapCount ?? 0,
-        hasSelectedTimeRange: false,
-      },
-      userInput: content,
-      history: messages.value.slice(-6).map((message) => message.content),
-    })
-
-    if (classification.mode === 'micro_edit') {
-      const result = await buildMicroEditCommand(content, classification.reasoning)
-      if (result.pendingTargetSelection) {
-        messages.value.push(buildAssistantMessage({
-          content: result.message || '我找到了多个可能的目标，请先确认具体要操作的节目。',
-          thinking: result.thinking,
-          explanation: result.explanation
-            ? {
-                type: 'command',
-                targetId: 'pending-target-selection',
-                explanation: result.explanation,
-                details: result.details,
-              }
-            : undefined,
-          processType: 'selection',
-          processTypeLabel: '待确认',
-        }))
-        pendingTargetSelection.value = result.pendingTargetSelection
-        return
-      }
-      if (!result.command) {
-        messages.value.push(buildAssistantMessage({
-          content: result.message || '已识别为局部修改，但暂时无法稳定生成命令。',
-          thinking: result.thinking,
-          processType: 'general',
-          processTypeLabel: '未执行',
-        }))
-        return
-      }
-
-      if (requiresConfirmation(result.command)) {
-        messages.value.push(buildAssistantMessage({
-          content: result.message || '请确认后执行本次修改。',
-          thinking: result.thinking,
-          explanation: result.explanation
-            ? {
-                type: 'command',
-                targetId: 'pending-command',
-                explanation: result.explanation,
-                details: result.details,
-              }
-            : undefined,
-          processType: 'execution',
-          processTypeLabel: '待确认',
-        }))
-        pendingCommand.value = {
-          command: result.command,
-          summary: summarizeCommand(result.command),
-          reasoning: result.explanation || classification.reasoning,
-          details: result.details,
-        }
-      } else {
-        await executeCommand(result.command, {
-          successMessage: result.message || `${summarizeCommand(result.command)}，已直接执行。`,
-          thinking: result.thinking,
-          explanation: result.explanation || classification.reasoning,
-          details: result.details,
-        })
-      }
-      return
-    }
-
-    if (classification.mode === 'full_generate' || classification.mode === 'partial_generate') {
-      messages.value.push(buildAssistantMessage({
-        content:
-          classification.mode === 'full_generate'
-            ? '已识别为全天编排需求，正在准备启动编排流程。'
-            : '已识别为局部补排需求，正在准备补齐空窗。',
-        explanation: {
-          type: 'command',
-          targetId: 'orchestration',
-          explanation: classification.reasoning,
-        },
-        processType: 'planning',
-        processTypeLabel:
-          classification.mode === 'full_generate' ? '任务识别' : '任务识别',
-      }))
-      const latestMessage = messages.value[messages.value.length - 1]
-      if (latestMessage) {
-        latestMessage.content =
-          classification.mode === 'full_generate'
-            ? '已进入全天编排，将开始按空窗循环检查并补排。'
-            : '已进入局部补排，将开始检查目标空窗并补排。',
-        latestMessage.explanation = {
-          type: 'command',
-          targetId: 'orchestration',
-          explanation:
-            classification.mode === 'full_generate'
-              ? '接下来会直接进入空窗检查、候选查询、候选选择和落表执行。'
-              : '接下来会围绕目标空窗执行候选查询、选择和落表。',
-        }
-        latestMessage.processTypeLabel =
-          classification.mode === 'full_generate' ? '任务识别' : '任务识别'
-      }
-
-      emit('orchestrateRequested', {
-        userInput: content,
-        mode: classification.mode,
-        reasoning: classification.reasoning,
-      })
-      return
-    }
-
-    if (classification.mode === 'validate_only') {
-      const report = scheduleCommandBus.validate({
-        scheduleDate: props.date,
-        channelId: props.channelId,
-      })
-
-      messages.value.push(buildAssistantMessage({
-        content: report.isValid
-          ? '当前节目单校验通过，未发现严重问题。'
-          : `校验完成，发现 ${report.summary.totalIssues} 个问题，其中严重问题 ${report.summary.criticalCount} 个。`,
-        explanation: {
-          type: 'validation_issue',
-          targetId: report.id,
-          explanation: classification.reasoning,
-          details: {
-            summary: report.summary,
-            issues: report.issues.slice(0, 5),
-          },
-        },
-        processType: 'validation',
-        processTypeLabel: '校验结果',
-      }))
-      return
-    }
-
-      messages.value.push(buildAssistantMessage({
-        content:
-          classification.mode === 'clarify'
-            ? '我还不能完全确定你的目标。你可以直接说“全天编排”“补齐空窗”或“在9点插入节目看东方”。'
-            : `已识别到你的意图是 ${classification.mode}，但当前演示优先支持全天编排、局部补排和插入/移动节目。`,
-      explanation: {
-        type: 'command',
-        targetId: 'classification',
-        explanation: classification.reasoning,
-      },
-      processType: 'general',
-      processTypeLabel: '任务识别',
-    }))
-  } catch (error) {
-    messages.value.push(buildAssistantMessage({
-      content: error instanceof Error ? error.message : 'AI 请求失败，请稍后重试。',
-      processType: 'error',
-      processTypeLabel: '执行异常',
-    }))
-  } finally {
-    loading.value = false
-    await scrollToBottom()
-  }
-}
-
-const buildMicroEditCommand = async (
-  userInput: string,
-  classificationReasoning: string,
-): Promise<{
-  command: OrchestrationCommand | null
-  message?: string
-  thinking?: string
-  explanation?: string
-  details?: DetailMap
-  pendingTargetSelection?: PendingTargetSelectionState
-}> => {
-  const context = buildDialogueContext({
-    scheduleState: {
-      channelId: props.channelId,
-      channelName: props.channelName,
-      date: props.date,
-      isEmpty: props.currentSchedule.length === 0,
-      itemCount: props.currentSchedule.length,
-      gapCount: props.gapCount ?? 0,
-      hasSelectedTimeRange: false,
-    },
-    userInput,
-    currentSchedule: props.currentSchedule,
-  })
-
-  const intent = await intentRecognizer.recognize(context)
-  if (intent.type === 'insert') {
-    const params = await paramExtractor.extractInsertParams(context)
-    if (!params) {
-      return {
-        command: null,
-        message: '已识别为插入节目，但还不能稳定提取时间和节目名。建议使用“在9点插入节目看东方”。',
-        thinking: '我把你的要求理解为插入节目，但当前还不能稳定定位目标时间和节目名称。',
-      }
-    }
-
-    const query = entityLinker.createInsertQuery(context, params)
-    const candidates = await candidateService.searchPrograms({
-      channelId: query.searchParams.channelId,
-      programName: query.searchParams.programName,
-      columnId: resolveColumnIdByTime(params.targetTime),
-      limit: 5,
-    })
-
-    if (candidates.length === 0) {
-      return {
-        command: null,
-        message: `没有检索到“${params.programName}”的可用节目，请确认节目名或频道。`,
-        thinking: `我把你的要求理解为“在 ${params.targetTime} 插入《${params.programName}》”，并按当前频道检索了候选节目。`,
-      }
-    }
-
-    const selection = await candidateSelectionService.selectForInsert(context, params, candidates)
-    const command = entityLinker.createInsertCommand(
-      context,
-      params,
-      selection.selectedCandidate.id,
-      selection.selectedCandidate.programName,
-    )
-
-    const preview = insertCommandExecutor.preview(command)
-    const warningText =
-      preview.warnings.length > 0 ? ` 风险提示：${preview.warnings.join('；')}` : ''
-
-    if (!preview.canExecute) {
-      return {
-        command: null,
-        message: `目标时间 ${params.targetTime} 已有节目占用，请先删除、替换，或换一个空闲时间点。`,
-        thinking: `我把你的要求理解为“在 ${params.targetTime} 插入《${selection.selectedCandidate.programName}》”，并先检查了当前时段占用情况。`,
-        explanation:
-          `${classificationReasoning} ${intent.reasoning} ` +
-          `已定位到候选节目《${selection.selectedCandidate.programName}》，但当前时段存在节目冲突，因此本次不直接执行插入。` +
-          `${warningText}`,
-        details: {
-          queryCommand: query.queryCommand,
-          selectedCandidate: selection.selectedCandidate,
-          candidateOptions: candidates.slice(0, 3),
-          selectionReason: selection.reasoning,
-          preview,
-        },
-      }
-    }
-
-    return {
-      command,
-      message: `已在 ${params.targetTime} 插入《${selection.selectedCandidate.programName}》。`,
-      thinking: `我把你的要求理解为“在 ${params.targetTime} 插入《${params.programName}》”，并在当前频道候选中找到了最匹配的节目。`,
-      explanation:
-        `${classificationReasoning} ${intent.reasoning} ` +
-        `检索条件为频道=${props.channelName}、节目名=${params.programName}。` +
-        `${selection.reasoning}${warningText}`,
-      details: {
-        queryCommand: query.queryCommand,
-        selectedCandidate: selection.selectedCandidate,
-        candidateOptions: candidates.slice(0, 3),
-        selectionReason: selection.reasoning,
-        preview,
-      },
-    }
+  if (loading.value) {
+    queuedCommands.value.push(content)
+    return
   }
 
-  if (intent.type === 'delete') {
-    const params = await paramExtractor.extractDeleteParams(context)
-    if (!params) {
-      return {
-        command: null,
-        message: '已识别为删除节目，但还不能稳定提取目标时间。建议使用“删除12点的午间30”。',
-        thinking: '我把你的要求理解为删除已编排节目，但当前还不能稳定定位目标时间。',
-      }
-    }
-
-    const resolution = await scheduleTargetResolver.resolve({
-      userInput,
-      action: 'delete',
-      channelName: props.channelName,
-      date: props.date,
-      targetTime: params.targetTime,
-      programName: params.programName,
-      items: props.currentSchedule,
-    })
-    if (resolution.status !== 'unique' || !resolution.selectedItem) {
-      if (resolution.status === 'multiple') {
-        return {
-          command: null,
-          message: `在 ${params.targetTime} 附近找到了多个可能的节目，请在下方选择具体目标。`,
-          thinking: `我把你的要求理解为“删除 ${params.targetTime} 的${params.programName || '节目'}”，但当前时间附近存在多个候选目标。`,
-          explanation: `${classificationReasoning} ${intent.reasoning}`,
-          details: {
-            targetTime: params.targetTime,
-            programName: params.programName,
-            targetResolution: {
-              status: resolution.status,
-              reasoning: resolution.reasoning,
-              matchedBy: resolution.matchedBy,
-              candidates: resolution.candidates,
-            },
-          },
-          pendingTargetSelection: {
-            action: 'delete',
-            summary: `请选择 ${params.targetTime} 要删除的节目`,
-            reasoning: resolution.reasoning,
-            targetTime: params.targetTime,
-            programName: params.programName,
-            candidates: resolution.candidates,
-            selectedItemId: null,
-            resolutionDetails: {
-              matchedBy: resolution.matchedBy,
-            },
-          },
-        }
-      }
-      return {
-        command: null,
-        message: `没有找到 ${params.targetTime} 附近可删除的节目，请确认时间点或节目名。`,
-        thinking: `我把你的要求理解为“删除 ${params.targetTime} 的${params.programName || '节目'}”，并在当前编排单中尝试定位目标。`,
-      }
-    }
-    const targetItem = resolution.selectedItem
-
-    const command: OrchestrationCommand = {
-      action: 'delete',
-      reasoning: `删除 ${params.targetTime} 对应节目《${targetItem.programName || targetItem.programCode || targetItem.id}》。`,
-      data: {
-        itemId: targetItem.id,
-      },
-    }
-
-    return {
-      command,
-      message: `将删除 ${params.targetTime} 的《${targetItem.programName || targetItem.programCode || targetItem.id}》。`,
-      thinking: `我把你的要求理解为“删除 ${params.targetTime} 的${params.programName || '节目'}”，并在当前编排单里定位到了唯一目标。`,
-      explanation: `${classificationReasoning} ${intent.reasoning}`,
-      details: {
-        targetTime: params.targetTime,
-        programName: params.programName,
-        matchedItem: targetItem,
-        targetResolution: {
-          status: resolution.status,
-          reasoning: resolution.reasoning,
-          matchedBy: resolution.matchedBy,
-          candidates: resolution.candidates,
-        },
-      },
-    }
-  }
-
-  if (intent.type === 'move') {
-    const params = await paramExtractor.extractMoveParams(context)
-    if (!params) {
-      return {
-        command: null,
-        message: '已识别为移动节目，但还不能稳定提取目标时间和移动时长。建议使用“把22点的节目向后移动1小时”。',
-        thinking: '我把你的要求理解为移动已编排节目，但当前还不能稳定提取目标时间或移动幅度。',
-      }
-    }
-
-    const resolution = await scheduleTargetResolver.resolve({
-      userInput,
-      action: 'move',
-      channelName: props.channelName,
-      date: props.date,
-      targetTime: params.targetTime,
-      items: props.currentSchedule,
-    })
-    if (resolution.status !== 'unique' || !resolution.selectedItem) {
-      if (resolution.status === 'multiple') {
-        return {
-          command: null,
-          message: `在 ${params.targetTime} 附近找到了多个可能的节目，请在下方选择具体目标。`,
-          thinking: `我把你的要求理解为“移动 ${params.targetTime} 的节目”，但当前时间附近存在多个候选目标。`,
-          explanation: `${classificationReasoning} ${intent.reasoning}`,
-          details: {
-            targetTime: params.targetTime,
-            direction: params.direction,
-            offsetSeconds: params.offsetSeconds,
-            targetResolution: {
-              status: resolution.status,
-              reasoning: resolution.reasoning,
-              matchedBy: resolution.matchedBy,
-              candidates: resolution.candidates,
-            },
-          },
-          pendingTargetSelection: {
-            action: 'move',
-            summary: `请选择 ${params.targetTime} 要移动的节目`,
-            reasoning: resolution.reasoning,
-            targetTime: params.targetTime,
-            candidates: resolution.candidates,
-            selectedItemId: null,
-            moveConfig: {
-              direction: params.direction,
-              offsetSeconds: params.offsetSeconds,
-            },
-            resolutionDetails: {
-              matchedBy: resolution.matchedBy,
-            },
-          },
-        }
-      }
-      return {
-        command: null,
-        message: `没有找到 ${params.targetTime} 附近可移动的节目，请确认目标时间点。`,
-        thinking: `我把你的要求理解为“移动 ${params.targetTime} 的节目”，并在当前编排单中尝试定位目标。`,
-      }
-    }
-    const targetItem = resolution.selectedItem
-
-    const originalStart = normalizeDateTime(props.date, targetItem.startTime)
-    const delta = params.direction === 'forward' ? params.offsetSeconds : -params.offsetSeconds
-    const newStartTime = offsetDateTime(originalStart, delta)
-    const command: OrchestrationCommand = {
-      action: 'move',
-      reasoning: `将 ${params.targetTime} 对应节目${params.direction === 'forward' ? '向后' : '向前'}移动 ${formatOffset(params.offsetSeconds)}。`,
-      data: {
-        itemId: targetItem.id,
-        newStartTime,
-      },
-    }
-
-    return {
-      command,
-      message: `已将《${targetItem.programName || targetItem.programCode || targetItem.id}》${params.direction === 'forward' ? '向后' : '向前'}移动 ${formatOffset(params.offsetSeconds)}。`,
-      thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目${params.direction === 'forward' ? '向后' : '向前'}移动 ${formatOffset(params.offsetSeconds)}”，并定位到了唯一目标。`,
-      explanation: `${classificationReasoning} ${intent.reasoning}`,
-      details: {
-        targetTime: params.targetTime,
-        matchedItem: targetItem,
-        targetResolution: {
-          status: resolution.status,
-          reasoning: resolution.reasoning,
-          matchedBy: resolution.matchedBy,
-          candidates: resolution.candidates,
-        },
-        direction: params.direction,
-        offsetSeconds: params.offsetSeconds,
-        newStartTime,
-      },
-    }
-  }
-
-  if (intent.type === 'replace') {
-    const params = await paramExtractor.extractReplaceParams(context)
-    if (!params) {
-      return {
-        command: null,
-        message:
-          '已识别为替换节目，但还不能稳定提取目标时间和替换节目名。建议使用“把10点的节目换成中国考古报道”。',
-        thinking: '我把你的要求理解为替换已编排节目，但当前还不能稳定提取目标时间或替换目标。',
-      }
-    }
-
-    const resolution = await scheduleTargetResolver.resolve({
-      userInput,
-      action: 'replace',
-      channelName: props.channelName,
-      date: props.date,
-      targetTime: params.targetTime,
-      items: props.currentSchedule,
-    })
-    if (resolution.status !== 'unique' || !resolution.selectedItem) {
-      if (resolution.status === 'multiple') {
-        return {
-          command: null,
-          message: `在 ${params.targetTime} 附近找到了多个可能的节目，请在下方选择具体目标。`,
-          thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，但当前时间附近存在多个候选目标。`,
-          explanation: `${classificationReasoning} ${intent.reasoning}`,
-          details: {
-            targetTime: params.targetTime,
-            replacementProgramName: params.programName,
-            targetResolution: {
-              status: resolution.status,
-              reasoning: resolution.reasoning,
-              matchedBy: resolution.matchedBy,
-              candidates: resolution.candidates,
-            },
-          },
-          pendingTargetSelection: {
-            action: 'replace',
-            summary: `请选择 ${params.targetTime} 要替换的节目`,
-            reasoning: resolution.reasoning,
-            targetTime: params.targetTime,
-            candidates: resolution.candidates,
-            selectedItemId: null,
-            replaceProgramName: params.programName,
-            resolutionDetails: {
-              matchedBy: resolution.matchedBy,
-            },
-          },
-        }
-      }
-      return {
-        command: null,
-        message: `没有找到 ${params.targetTime} 附近可替换的节目，请确认目标时间点。`,
-        thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，并在当前编排单中尝试定位目标。`,
-      }
-    }
-    const targetItem = resolution.selectedItem
-
-    const candidates = await candidateService.searchPrograms({
-      channelId: props.channelId,
-      programName: params.programName,
-      columnId: resolveItemColumnId(targetItem),
-      limit: 5,
-    })
-
-    if (candidates.length === 0) {
-      return {
-        command: null,
-        message: `没有检索到“${params.programName}”的可用节目，请确认节目名。`,
-        thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，并先检索了可替换候选。`,
-      }
-    }
-
-    const selectedCandidate = candidates[0]!
-    const command: OrchestrationCommand = {
-      action: 'replace',
-      reasoning: `将 ${params.targetTime} 对应节目替换为《${selectedCandidate.programName}》。`,
-      data: {
-        itemId: targetItem.id,
-        newCandidateId: selectedCandidate.id,
-      },
-    }
-
-    const preview = replaceCommandExecutor.preview(command)
-    const warningText =
-      preview.warnings.length > 0 ? ` 风险提示：${preview.warnings.join('；')}` : ''
-
-    if (!preview.canExecute) {
-      return {
-        command: null,
-        message: `替换后的节目时段会与现有编排冲突，当前无法执行替换。`,
-        thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，并先检查了替换后的时间占用情况。`,
-        explanation:
-          `${classificationReasoning} ${intent.reasoning} 已根据频道=${props.channelName}、节目名=${params.programName} 检索候选，但替换后时段会与现有节目重叠。` +
-          `${warningText}`,
-        details: {
-          targetTime: params.targetTime,
-          matchedItem: targetItem,
-          selectedCandidate,
-          candidateOptions: candidates.slice(0, 3),
-          preview,
-        },
-      }
-    }
-
-    return {
-      command,
-      message: `将把 ${params.targetTime} 的节目替换为《${selectedCandidate.programName}》。`,
-      thinking: `我把你的要求理解为“把 ${params.targetTime} 的节目换成《${params.programName}》”，并完成了目标定位和替换候选检索。`,
-      explanation:
-        `${classificationReasoning} ${intent.reasoning} 已根据频道=${props.channelName}、节目名=${params.programName} 检索候选并选中最匹配节目。${warningText}`,
-      details: {
-        targetTime: params.targetTime,
-        matchedItem: targetItem,
-        targetResolution: {
-          status: resolution.status,
-          reasoning: resolution.reasoning,
-          matchedBy: resolution.matchedBy,
-          candidates: resolution.candidates,
-        },
-        selectedCandidate,
-        candidateOptions: candidates.slice(0, 3),
-      },
-    }
-  }
-
-  return {
-    command: null,
-    message: '我还不能稳定理解这条修改指令，请尽量明确时间点、节目名称和操作类型。',
-    thinking: '我先按当前编排单和你的自然语言要求进行了理解，但这条指令还不足以安全落成原子操作。',
-    explanation: classificationReasoning,
-  }
+  await processMessage(content)
 }
 
 const normalizeClockText = (timeText: string): string => {
@@ -1155,35 +916,6 @@ const timeToSeconds = (value?: string): number | null => {
     return null
   }
   return hours * 3600 + minutes * 60 + seconds
-}
-
-const resolveColumnIdByTime = (targetTime?: string): string | undefined => {
-  const targetSeconds = timeToSeconds(targetTime)
-  if (targetSeconds === null) return undefined
-
-  const layout = getEffectiveLayoutReference(props.channelId, props.date)
-  const matchedSlot = layout?.slots.find((slot) => {
-    const startSeconds = timeToSeconds(slot.startTime)
-    const endSeconds = timeToSeconds(slot.endTime)
-    if (startSeconds === null || endSeconds === null) return false
-    return targetSeconds >= startSeconds && targetSeconds < endSeconds
-  })
-
-  return matchedSlot?.columnId
-}
-
-const resolveItemColumnId = (item?: SchedulePreviewItem | null): string | undefined => {
-  if (!item) return undefined
-  const record = item as unknown as ProgramRecord
-
-  if (typeof record.keySlot === 'string' && record.keySlot.trim()) {
-    return record.keySlot
-  }
-  if (typeof record.columnId === 'string' && record.columnId.trim()) {
-    return record.columnId
-  }
-
-  return typeof record.startTime === 'string' ? resolveColumnIdByTime(record.startTime) : undefined
 }
 
 const getMessageDetails = (message: Message): DetailMap | undefined =>
@@ -1543,14 +1275,45 @@ const buildDecisionShortExplanation = (message: Message): string | undefined => 
   return undefined
 }
 
+const resolveMessageStatusMeta = (message: Message): Pick<Message, 'statusLabel' | 'statusTone'> => {
+  if (message.statusLabel && message.statusTone) {
+    return {
+      statusLabel: message.statusLabel,
+      statusTone: message.statusTone,
+    }
+  }
+
+  if (message.stepMetric?.mode === 'elapsed') {
+    return { statusLabel: '思考中', statusTone: 'running' }
+  }
+
+  if (message.processType === 'error') {
+    return { statusLabel: '失败', statusTone: 'error' }
+  }
+
+  if (/待确认|需选择|待处理/.test(message.processTypeLabel || message.content)) {
+    return { statusLabel: '待处理', statusTone: 'warning' }
+  }
+
+  if (/已取消/.test(message.processTypeLabel || message.content)) {
+    return { statusLabel: '已取消', statusTone: 'neutral' }
+  }
+
+  return { statusLabel: '', statusTone: 'success' }
+}
+
 const decorateAssistantMessage = (message: Message): Message => {
   const next: Message = { ...message }
   const reasonTags = (next.reasonTags?.length ? next.reasonTags : buildReasonTagsForMessage(next)).slice(0, 3)
+  const statusMeta = resolveMessageStatusMeta(next)
 
   if (reasonTags.length > 0) {
     next.reasonTags = reasonTags
     next.thinking = buildDecisionShortExplanation(next)
   }
+
+  next.statusLabel = statusMeta.statusLabel
+  next.statusTone = statusMeta.statusTone
 
   return next
 }
@@ -1562,12 +1325,142 @@ const buildAssistantMessage = (input: Omit<Message, 'role'>): Message =>
     ...input,
   })
 
+const buildCompletedStepMetric = (durationMs: number): MessageStepMetric => ({
+  mode: 'duration',
+  label: '耗时',
+  durationMs,
+})
+
+const formatStepMetric = (metric: MessageStepMetric): string => {
+  if (metric.mode === 'duration') {
+    const durationMs = metric.durationMs ?? 0
+    return `${Math.max(0, durationMs / 1000).toFixed(2)}s`
+  }
+
+  const elapsedMs = metric.elapsedMs ?? 0
+  return `${Math.max(0, elapsedMs / 1000).toFixed(2)}s`
+}
+
+const startStepProgress = (content: string) => {
+  const progressMessage = reactive(buildAssistantMessage({
+    content,
+    processType: 'general',
+    processTypeLabel: '处理中',
+    stepMetric: {
+      mode: 'elapsed',
+      label: '耗时',
+      elapsedMs: 0,
+    },
+  }))
+
+  messages.value.push(progressMessage)
+
+  const startedAt = Date.now()
+  const timerId = window.setInterval(() => {
+    const elapsedMs = Date.now() - startedAt
+    progressMessage.stepMetric = {
+      mode: 'elapsed',
+      label: '耗时',
+      elapsedMs,
+    }
+  }, 10)
+  activeStepTimerIds.add(timerId)
+
+  let completed = false
+  return {
+    finish() {
+      if (completed) {
+        return buildCompletedStepMetric(0)
+      }
+      completed = true
+      window.clearInterval(timerId)
+      activeStepTimerIds.delete(timerId)
+      const durationMs = Date.now() - startedAt
+      const index = messages.value.indexOf(progressMessage)
+      if (index >= 0) {
+        messages.value.splice(index, 1)
+      }
+      return buildCompletedStepMetric(durationMs)
+    },
+  }
+}
+
+const attachStepMetricToLatestAssistantMessage = (metric: MessageStepMetric) => {
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    const candidate = messages.value[index]
+    if (!candidate || candidate.role !== 'assistant') continue
+    candidate.stepMetric = metric
+    const statusMeta = resolveMessageStatusMeta(candidate)
+    candidate.statusLabel = statusMeta.statusLabel
+    candidate.statusTone = statusMeta.statusTone
+    return
+  }
+}
+
 const isDecisionMessage = (message: Message) => (message.reasonTags?.length ?? 0) > 0
 
-const shouldShowReasonTags = (message: Message) => isDecisionMessage(message)
+const shouldShowStatusLabel = (message: Message) => Boolean(message.statusLabel?.trim())
 
-const shouldShowDefaultExplanation = (message: Message) =>
-  isDecisionMessage(message) && Boolean(message.thinking)
+const startPersistentThinking = (
+  content: string,
+  options?: {
+    startedAtMs?: number
+    sessionId?: string
+  },
+) => {
+  const startedAtMs = options?.startedAtMs ?? Date.now()
+  const sessionId = options?.sessionId ?? ''
+  const thinkingMessage = reactive(buildAssistantMessage({
+    content,
+    processType: 'planning',
+    processTypeLabel: '处理中',
+    statusLabel: '思考中',
+    statusTone: 'running',
+    stepMetric: {
+      mode: 'elapsed',
+      label: '耗时',
+      elapsedMs: Math.max(0, Date.now() - startedAtMs),
+    },
+  }))
+
+  messages.value.push(thinkingMessage)
+
+  const timerId = window.setInterval(() => {
+    thinkingMessage.stepMetric = {
+      mode: 'elapsed',
+      label: '耗时',
+      elapsedMs: Math.max(0, Date.now() - startedAtMs),
+    }
+  }, 10)
+  activeStepTimerIds.add(timerId)
+
+  return {
+    sessionId,
+    startedAtMs,
+    message: thinkingMessage,
+    stop() {
+      window.clearInterval(timerId)
+      activeStepTimerIds.delete(timerId)
+      const index = messages.value.indexOf(thinkingMessage)
+      if (index >= 0) {
+        messages.value.splice(index, 1)
+      }
+    },
+  }
+}
+
+const keepPersistentThinkingAtBottom = () => {
+  const thinkingMessage = activeThinkingController?.message
+  if (!thinkingMessage) return
+
+  const index = messages.value.indexOf(thinkingMessage)
+  if (index < 0 || index === messages.value.length - 1) {
+    return
+  }
+
+  messages.value.splice(index, 1)
+  messages.value.push(thinkingMessage)
+}
 
 const buildExpandedWhy = (message: Message): string => {
   const explanation = normalizeDecisionExplanation(message.explanation?.explanation)
@@ -1637,6 +1530,100 @@ const buildExpandedRisk = (message: Message): string | undefined => {
   }
 
   return undefined
+}
+
+const getPrimarySummary = (message: Message): string => {
+  if (message.stepMetric?.mode === 'elapsed') {
+    return ''
+  }
+
+  const content = message.content.trim()
+  if (!content) return '已更新'
+
+  return content
+}
+
+const getVisibleFacts = (message: Message): string[] => {
+  const details = getMessageDetails(message)
+  if (!details) {
+    return (message.reasonTags ?? []).slice(0, 1)
+  }
+
+  if (isOrchestrationOverviewDetails(details)) {
+    const facts = [
+      typeof details.layoutSlotCount === 'number' ? `版面时段 ${details.layoutSlotCount}` : '',
+      typeof details.completedGapCount === 'number' ? `补排 ${details.completedGapCount} 轮` : '',
+      typeof details.writtenItemCount === 'number' ? `写入 ${details.writtenItemCount} 条` : '',
+      formatValidationSummaryText(details.validationSummary),
+    ].filter(Boolean)
+
+    return facts.slice(0, 2)
+  }
+
+  if (isLayoutImportDetails(details)) {
+    const facts = [
+      typeof details.matchedWeekdayLabel === 'string' ? details.matchedWeekdayLabel : '',
+      typeof details.matchedColumnLabel === 'string' ? `列 ${details.matchedColumnLabel}` : '',
+      typeof details.matchedSheetName === 'string' ? `表 ${details.matchedSheetName}` : '',
+      typeof details.slotCount === 'number' ? `时段 ${details.slotCount}` : '',
+    ].filter(Boolean)
+
+    return facts.slice(0, 2)
+  }
+
+  const facts: string[] = []
+  if (typeof details.startTime === 'string') {
+    facts.push(formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined))
+  } else if (typeof details.targetTime === 'string') {
+    facts.push(formatDisplayTime(details.targetTime))
+  }
+
+  const matchedColumnText = formatMatchedColumnText(details)
+  if (matchedColumnText) {
+    facts.push(`栏目 ${matchedColumnText}`)
+  }
+
+  const selectedProgramName =
+    typeof details.selectedCandidateName === 'string'
+      ? details.selectedCandidateName
+      : typeof details.programName === 'string'
+        ? details.programName
+        : ''
+  if (selectedProgramName) {
+    facts.push(`节目 《${selectedProgramName}》`)
+  }
+
+  if (typeof details.candidateCount === 'number') {
+    facts.push(`候选 ${details.candidateCount}`)
+  }
+
+  if (typeof details.offsetSeconds === 'number') {
+    facts.push(`调整 ${formatOffset(details.offsetSeconds)}`)
+  }
+
+  const validationSummary = formatValidationSummaryText(details.validationSummary ?? details.summary)
+  if (validationSummary && validationSummary !== '未发现明显问题') {
+    facts.push(validationSummary)
+  }
+
+  if (facts.length === 0) {
+    return (message.reasonTags ?? []).slice(0, 1)
+  }
+
+  return Array.from(new Set(facts)).slice(0, 2)
+}
+
+const resolveLogDurationMs = (
+  log: PlanningLogEntry,
+  previousLog?: PlanningLogEntry,
+): number | null => {
+  const currentTime = new Date(log.timestamp).getTime()
+  const previousTime = previousLog ? new Date(previousLog.timestamp).getTime() : NaN
+  if (Number.isFinite(currentTime) && Number.isFinite(previousTime) && currentTime >= previousTime) {
+    const durationMs = currentTime - previousTime
+    return durationMs >= MIN_VISIBLE_MESSAGE_DURATION_MS ? durationMs : null
+  }
+  return null
 }
 
 const getExpandedSections = (message: Message): ExplanationSection[] => {
@@ -1716,18 +1703,20 @@ const getExpandedSections = (message: Message): ExplanationSection[] => {
   }
 
   const sections: ExplanationSection[] = []
-  const why = buildExpandedWhy(message)
   const basis = buildExpandedBasis(message)
   const risk = buildExpandedRisk(message)
 
-  if (why) {
-    sections.push({ title: '为什么这样做', body: why })
-  }
   if (basis) {
-    sections.push({ title: '参考了什么', body: basis, tone: 'secondary' })
+    sections.push({ title: '依据', body: basis, tone: 'secondary' })
   }
   if (risk) {
-    sections.push({ title: '风险与提醒', body: risk, tone: 'risk' })
+    sections.push({ title: '风险', body: risk, tone: 'risk' })
+  }
+  if (sections.length === 0) {
+    const why = buildExpandedWhy(message)
+    if (why) {
+      sections.push({ title: '说明', body: why })
+    }
   }
 
   return sections
@@ -1767,6 +1756,118 @@ const getPendingCommandReasonTags = () => {
 const getPendingCommandDetailItems = () =>
   pendingCommand.value ? buildDetailsSummary(pendingCommand.value.details, 'execution') : []
 
+const extractFocusTargetFromRuntimeItem = (
+  item: unknown,
+  status: MessageFocusTarget['status'] = 'active',
+): MessageFocusTarget | undefined => {
+  if (!item || typeof item !== 'object') return undefined
+
+  const record = item as Record<string, unknown>
+  const itemId = typeof record.id === 'string' ? record.id : ''
+  const startTime = typeof record.startTime === 'string' ? record.startTime : ''
+  const endTime = typeof record.endTime === 'string' ? record.endTime : ''
+
+  if (!startTime || !endTime) return undefined
+
+  return itemId
+    ? {
+        type: 'item',
+        itemId,
+        startTime,
+        endTime,
+        status,
+      }
+    : {
+        type: 'range',
+        startTime,
+        endTime,
+        status,
+      }
+}
+
+const buildPendingCommandFocusTarget = (
+  value: RuntimePendingCommand | null,
+): MessageFocusTarget | undefined => {
+  if (!value?.details) return undefined
+
+  const directTarget = extractFocusTargetFromDetails(value.details as DetailMap, 'execution', 'intent')
+  if (directTarget) {
+    return {
+      ...directTarget,
+      layer: 'intent',
+      status: directTarget.status ?? 'active',
+    }
+  }
+
+  const matchedItemTarget = extractFocusTargetFromRuntimeItem(
+    (value.details as DetailMap).matchedItem,
+    'active',
+  )
+  if (matchedItemTarget) {
+    return {
+      ...matchedItemTarget,
+      layer: 'intent',
+    }
+  }
+
+  return undefined
+}
+
+const buildPendingTargetSelectionFocusTarget = (
+  value: RuntimePendingTargetSelection | null,
+): MessageFocusTarget | undefined => {
+  if (!value) return undefined
+
+  const selectedCandidate = value.selectedItemId
+    ? value.candidates.find((candidate) => candidate.id === value.selectedItemId)
+    : null
+  const selectedTarget = extractFocusTargetFromRuntimeItem(selectedCandidate, 'active')
+  if (selectedTarget) {
+    return {
+      ...selectedTarget,
+      layer: 'intent',
+    }
+  }
+
+  if (value.candidates.length === 1) {
+    const soleTarget = extractFocusTargetFromRuntimeItem(value.candidates[0], 'active')
+    if (soleTarget) {
+      return {
+        ...soleTarget,
+        layer: 'intent',
+      }
+    }
+  }
+
+  const normalizedTargetTime = normalizeClockText(value.targetTime)
+  if (!normalizedTargetTime) return undefined
+
+  return {
+    type: 'range',
+    startTime: normalizedTargetTime,
+    endTime: normalizedTargetTime,
+    layer: 'intent',
+    status: 'active',
+  }
+}
+
+const emitFocusTarget = (focusTarget?: MessageFocusTarget) => {
+  if (!focusTarget) return
+  emit('focusRequested', focusTarget)
+}
+
+const pushAssistantMessage = (
+  message: Message,
+  options?: {
+    autoFocus?: boolean
+  },
+) => {
+  messages.value.push(message)
+  if (options?.autoFocus !== false) {
+    emitFocusTarget(message.focusTarget)
+  }
+}
+
 const resolveMatchedColumnInfo = (details?: DetailMap) => {
   const queryCommand = toDetailMap(details?.queryCommand)
   const queryCommandData = toDetailMap(queryCommand?.data)
@@ -1793,6 +1894,11 @@ const formatMatchedColumnText = (details?: DetailMap) => {
   const { columnId, columnName } = resolveMatchedColumnInfo(details)
   if (columnName && columnId) return `${columnName}（${columnId}）`
   return columnName || columnId
+}
+
+const formatMatchedColumnPhrase = (details?: DetailMap) => {
+  const matchedColumnText = formatMatchedColumnText(details)
+  return matchedColumnText ? `栏目 ${matchedColumnText}` : '当前栏目约束'
 }
 
 const formatExpectedDuration = (expectedDuration: unknown): string => {
@@ -1830,6 +1936,10 @@ const compressLogDetails = (details: DetailMap, processType: ProcessType): Detai
 const shouldDisplayLog = (log: PlanningLogEntry): boolean => {
   const details = log.details ?? {}
 
+  if (log.phase === 'planning' && typeof details.layoutSlotCount === 'number') {
+    return false
+  }
+
   if (log.phase === 'planning' && details.strategy && typeof details.initialGapCount === 'number') {
     return false
   }
@@ -1839,6 +1949,10 @@ const shouldDisplayLog = (log: PlanningLogEntry): boolean => {
   }
 
   if (log.phase === 'planning' && details.criteria && typeof details.criteria === 'object') {
+    return false
+  }
+
+  if (log.phase === 'planning' && /已锁定版面范围/.test(log.message)) {
     return false
   }
 
@@ -1895,6 +2009,7 @@ const buildRuntimeThinking = (log: PlanningLogEntry, details: DetailMap): string
       ? formatDisplayTimeRange(details.startTime, typeof details.endTime === 'string' ? details.endTime : undefined)
       : ''
   const matchedColumnText = formatMatchedColumnText(details)
+  const matchedColumnPhrase = formatMatchedColumnPhrase(details)
   const columnName = matchedColumnText
     || (typeof details.criteria === 'object' && details.criteria
       ? buildQueryCriteriaSummary(details.criteria as DetailMap).replace(/^查询：/, '')
@@ -1917,7 +2032,7 @@ const buildRuntimeThinking = (log: PlanningLogEntry, details: DetailMap): string
   }
 
   if (typeof details.candidateCount === 'number') {
-    return `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已按${columnName || '当前栏目约束'}完成候选检索。`
+    return `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已完成候选检索，正在基于${columnName || matchedColumnPhrase}继续判断候选。`
   }
 
   if (typeof details.summary === 'string') {
@@ -1955,10 +2070,10 @@ const buildRuntimeResult = (log: PlanningLogEntry, details: DetailMap): string =
   }
 
   if (typeof details.candidateCount === 'number') {
-    const matchedColumnText = formatMatchedColumnText(details)
+    const matchedColumnPhrase = formatMatchedColumnPhrase(details)
     return timeRange
-      ? `${timeRange} 已按${matchedColumnText || '当前栏目约束'}检索到 ${details.candidateCount} 个候选。`
-      : `已按${matchedColumnText || '当前栏目约束'}检索到 ${details.candidateCount} 个候选。`
+      ? `${timeRange} 已完成候选检索，命中 ${details.candidateCount} 个候选，来自${matchedColumnPhrase}。`
+      : `已完成候选检索，命中 ${details.candidateCount} 个候选，来自${matchedColumnPhrase}。`
   }
 
   if (typeof details.selectedCandidateName === 'string') {
@@ -1975,25 +2090,6 @@ const buildRuntimeResult = (log: PlanningLogEntry, details: DetailMap): string =
   return summarizeRuntimeLog(log)
 }
 
-const normalizeDateTime = (date: string, timeText: string): string => {
-  if (timeText.includes('T')) {
-    return timeText.includes('+08:00') ? timeText : `${timeText}+08:00`
-  }
-  return `${date}T${normalizeClockText(timeText)}+08:00`
-}
-
-const offsetDateTime = (dateTime: string, offsetSeconds: number): string => {
-  const shifted = new Date(dateTime).getTime() + offsetSeconds * 1000
-  const date = new Date(shifted)
-  const year = date.getFullYear()
-  const month = `${date.getMonth() + 1}`.padStart(2, '0')
-  const day = `${date.getDate()}`.padStart(2, '0')
-  const hours = `${date.getHours()}`.padStart(2, '0')
-  const minutes = `${date.getMinutes()}`.padStart(2, '0')
-  const seconds = `${date.getSeconds()}`.padStart(2, '0')
-  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`
-}
-
 const executeCommand = async (
   command: OrchestrationCommand,
   options?: {
@@ -2008,12 +2104,30 @@ const executeCommand = async (
     channelId: props.channelId,
   })
 
-  emit('commandExecuted', { success: result.success, message: result.message })
+  emit('commandExecuted', {
+    success: result.success,
+    message: result.message,
+    commandAction: command.action,
+    data: result.data,
+    affectedTimeRanges: result.affectedTimeRanges,
+    validationReport: result.validationReport,
+  })
   if (result.success) {
     ElMessage.success(result.message)
     emit('scheduleUpdated', commandExecutor.getScheduleItems())
-    messages.value.push(buildAssistantMessage({
-      content: options?.successMessage || `${summarizeCommand(command)}，执行成功。`,
+    const detailPayload = options?.details as DetailMap | undefined
+    const deletedItem =
+      command.action === 'delete'
+      && result.data
+      && typeof result.data === 'object'
+      && 'deletedItem' in result.data
+        ? result.data.deletedItem as {
+            startTime: string
+            endTime: string
+          }
+        : null
+    pushAssistantMessage(buildAssistantMessage({
+      content: options?.successMessage || `${summarizeRuntimeCommand(command)}，执行成功。`,
       thinking: options?.thinking,
       explanation: options?.explanation
         ? {
@@ -2021,17 +2135,25 @@ const executeCommand = async (
             targetId: 'execution-result',
             explanation: options.explanation,
             details: {
-              ...(options.details ?? {}),
+              ...(detailPayload ?? {}),
               validationSummary: result.validationReport?.summary,
             },
           }
         : undefined,
       processType: 'execution',
       processTypeLabel: '执行完成',
-    }))
+      focusTarget: deletedItem
+        ? undefined
+        : detailPayload
+          ? extractFocusTargetFromDetails(detailPayload, 'execution', 'result')
+          : undefined,
+    }), {
+      autoFocus: false,
+    })
   } else {
     ElMessage.error(result.error || result.message)
-    messages.value.push(buildAssistantMessage({
+    const detailPayload = options?.details as DetailMap | undefined
+    pushAssistantMessage(buildAssistantMessage({
       content: result.error || result.message,
       thinking: options?.thinking,
       explanation: options?.explanation
@@ -2039,203 +2161,100 @@ const executeCommand = async (
             type: 'command',
             targetId: 'execution-error',
             explanation: options.explanation,
-            details: options.details,
+            details: detailPayload,
           }
         : undefined,
       processType: 'error',
       processTypeLabel: '执行失败',
+      focusTarget: detailPayload ? extractFocusTargetFromDetails(detailPayload, 'error', 'issue') : undefined,
     }))
   }
 }
 
 const confirmPendingCommand = async () => {
-  if (!pendingCommand.value) return
-  const current = pendingCommand.value
-  pendingCommand.value = null
-  await executeCommand(current.command, {
-    successMessage: `${current.summary}，已按确认执行。`,
-    thinking: '我已根据你确认的修改目标和风险提示继续执行本次操作。',
-    explanation: current.reasoning,
-    details: current.details,
-  })
+  if (!pendingCommand.value || !bridgeSessionId.value) return
+  const stepProgress = startStepProgress('思考中')
+  try {
+    const result = await openClawBridge.confirm(bridgeSessionId.value)
+    await applyBridgeResult(result)
+    attachStepMetricToLatestAssistantMessage(stepProgress.finish())
+  } catch (error) {
+    messages.value.push(buildAssistantMessage({
+      content: error instanceof Error ? error.message : '确认执行失败，请稍后重试。',
+      processType: 'error',
+      processTypeLabel: '执行异常',
+      stepMetric: stepProgress.finish(),
+    }))
+  }
 }
 
 const confirmPendingTargetSelection = async () => {
-  if (!pendingTargetSelection.value?.selectedItemId) return
-  const current = pendingTargetSelection.value
-  pendingTargetSelection.value = null
-
-  const selectedItem = current.candidates.find((item) => item.id === current.selectedItemId)
-  if (!selectedItem) {
+  if (!pendingTargetSelection.value?.selectedItemId || !bridgeSessionId.value) return
+  const stepProgress = startStepProgress('思考中')
+  try {
+    const result = await openClawBridge.selectTarget(
+      bridgeSessionId.value,
+      pendingTargetSelection.value.selectedItemId,
+    )
+    await applyBridgeResult(result)
+    attachStepMetricToLatestAssistantMessage(stepProgress.finish())
+  } catch (error) {
     messages.value.push(buildAssistantMessage({
-      content: '未找到你选择的目标节目，请重新发起操作。',
-      thinking: '我尝试根据你刚才确认的候选目标继续执行，但当前找不到对应记录。',
+      content: error instanceof Error ? error.message : '确认目标失败，请稍后重试。',
       processType: 'error',
       processTypeLabel: '执行异常',
+      stepMetric: stepProgress.finish(),
     }))
-    return
-  }
-
-  if (current.action === 'delete') {
-    const command: OrchestrationCommand = {
-      action: 'delete',
-      reasoning: `删除 ${current.targetTime} 对应节目《${selectedItem.programName || selectedItem.programCode || selectedItem.id}》。`,
-      data: {
-        itemId: selectedItem.id,
-      },
-    }
-
-    pendingCommand.value = {
-      command,
-      summary: summarizeCommand(command),
-      reasoning: current.reasoning,
-      details: {
-        matchedItem: selectedItem,
-        targetTime: current.targetTime,
-        programName: current.programName,
-        targetResolution: current.resolutionDetails,
-      },
-    }
-    return
-  }
-
-  if (current.action === 'move' && current.moveConfig) {
-    const originalStart = normalizeDateTime(props.date, selectedItem.startTime)
-    const delta = current.moveConfig.direction === 'forward' ? current.moveConfig.offsetSeconds : -current.moveConfig.offsetSeconds
-    const newStartTime = offsetDateTime(originalStart, delta)
-    const command: OrchestrationCommand = {
-      action: 'move',
-      reasoning: `将 ${current.targetTime} 对应节目${current.moveConfig.direction === 'forward' ? '向后' : '向前'}移动 ${formatOffset(current.moveConfig.offsetSeconds)}。`,
-      data: {
-        itemId: selectedItem.id,
-        newStartTime,
-      },
-    }
-
-    await executeCommand(command, {
-      successMessage: `已将《${selectedItem.programName || selectedItem.programCode || selectedItem.id}》${current.moveConfig.direction === 'forward' ? '向后' : '向前'}移动 ${formatOffset(current.moveConfig.offsetSeconds)}。`,
-      thinking: '我已根据你选择的目标节目继续完成移动操作。',
-      explanation: current.reasoning,
-      details: {
-        matchedItem: selectedItem,
-        targetTime: current.targetTime,
-        direction: current.moveConfig.direction,
-        offsetSeconds: current.moveConfig.offsetSeconds,
-        newStartTime,
-        targetResolution: current.resolutionDetails,
-      },
-    })
-    return
-  }
-
-  if (current.action === 'replace' && current.replaceProgramName) {
-    const candidates = await candidateService.searchPrograms({
-      channelId: props.channelId,
-      programName: current.replaceProgramName,
-      columnId: resolveItemColumnId(selectedItem),
-      limit: 5,
-    })
-
-    if (candidates.length === 0) {
-      messages.value.push(buildAssistantMessage({
-        content: `没有检索到“${current.replaceProgramName}”的可用节目，请确认节目名。`,
-        thinking: `我已根据你确认的目标节目继续检索《${current.replaceProgramName}》的替换候选，但当前没有命中结果。`,
-        processType: 'general',
-        processTypeLabel: '未执行',
-      }))
-      return
-    }
-
-    const selectedCandidate = candidates[0]!
-    const command: OrchestrationCommand = {
-      action: 'replace',
-      reasoning: `将 ${current.targetTime} 对应节目替换为《${selectedCandidate.programName}》。`,
-      data: {
-        itemId: selectedItem.id,
-        newCandidateId: selectedCandidate.id,
-      },
-    }
-
-    const preview = replaceCommandExecutor.preview(command)
-    if (!preview.canExecute) {
-      messages.value.push(buildAssistantMessage({
-        content: '替换后的节目时段会与现有编排冲突，当前无法执行替换。',
-        thinking: '我已根据你确认的目标节目继续检索替换候选，并检查了替换后的时间占用情况。',
-        processType: 'general',
-        processTypeLabel: '未执行',
-        explanation: {
-          type: 'command',
-          targetId: 'replace-preview',
-          explanation: current.reasoning,
-          details: {
-            matchedItem: selectedItem,
-            replacementProgramName: current.replaceProgramName,
-            selectedCandidate,
-            candidateOptions: candidates.slice(0, 3),
-            preview,
-            targetResolution: current.resolutionDetails,
-          },
-        },
-      }))
-      pendingTargetSelection.value = null
-      return
-    }
-
-    pendingCommand.value = {
-      command,
-      summary: summarizeCommand(command),
-      reasoning: current.reasoning,
-      details: {
-        matchedItem: selectedItem,
-        targetTime: current.targetTime,
-        replacementProgramName: current.replaceProgramName,
-        selectedCandidate,
-        candidateOptions: candidates.slice(0, 3),
-        targetResolution: current.resolutionDetails,
-      },
-    }
   }
 }
 
-const cancelPendingCommand = () => {
+const cancelPendingCommand = async () => {
   if (!pendingCommand.value) return
-  messages.value.push(buildAssistantMessage({
-    content: `${pendingCommand.value.summary}，已取消执行。`,
-    thinking: '我已根据你的选择停止这次高风险修改，不会对当前编排单做任何变更。',
-    processType: 'general',
-    processTypeLabel: '已取消',
-  }))
-  pendingCommand.value = null
+  const stepProgress = startStepProgress('思考中')
+  try {
+    if (bridgeSessionId.value) {
+      await openClawBridge.cancel(bridgeSessionId.value)
+    }
+    messages.value.push(buildAssistantMessage({
+      content: `${pendingCommand.value.summary}，已取消执行。`,
+      thinking: '我已根据你的选择停止这次高风险修改，不会对当前编排单做任何变更。',
+      processType: 'general',
+      processTypeLabel: '已取消',
+      stepMetric: stepProgress.finish(),
+    }))
+    pendingCommand.value = null
+  } catch (error) {
+    messages.value.push(buildAssistantMessage({
+      content: error instanceof Error ? error.message : '取消执行失败，请稍后重试。',
+      processType: 'error',
+      processTypeLabel: '执行异常',
+      stepMetric: stepProgress.finish(),
+    }))
+  }
 }
 
-const cancelPendingTargetSelection = () => {
+const cancelPendingTargetSelection = async () => {
   if (!pendingTargetSelection.value) return
-  messages.value.push(buildAssistantMessage({
-    content: `${pendingTargetSelection.value.summary}，已取消选择。`,
-    thinking: '我已停止这次目标选择，不会继续执行后续修改。',
-    processType: 'general',
-    processTypeLabel: '已取消',
-  }))
-  pendingTargetSelection.value = null
-}
-
-const requiresConfirmation = (command: OrchestrationCommand): boolean =>
-  ['delete', 'replace'].includes(command.action)
-
-const summarizeCommand = (command: OrchestrationCommand): string => {
-  switch (command.action) {
-    case 'delete':
-      return '删除已编排节目'
-    case 'replace':
-      return '替换已编排节目'
-    case 'move':
-      return '修改节目开始时间'
-    case 'insert':
-      return '插入节目'
-    case 'update_field':
-      return '修改节目字段'
-    default:
-      return `执行 ${command.action} 命令`
+  const stepProgress = startStepProgress('思考中')
+  try {
+    if (bridgeSessionId.value) {
+      await openClawBridge.cancel(bridgeSessionId.value)
+    }
+    messages.value.push(buildAssistantMessage({
+      content: `${pendingTargetSelection.value.summary}，已取消选择。`,
+      thinking: '我已停止这次目标选择，不会继续执行后续修改。',
+      processType: 'general',
+      processTypeLabel: '已取消',
+      stepMetric: stepProgress.finish(),
+    }))
+    pendingTargetSelection.value = null
+  } catch (error) {
+    messages.value.push(buildAssistantMessage({
+      content: error instanceof Error ? error.message : '取消目标选择失败，请稍后重试。',
+      processType: 'error',
+      processTypeLabel: '执行异常',
+      stepMetric: stepProgress.finish(),
+    }))
   }
 }
 
@@ -2250,11 +2269,154 @@ const scrollToBottom = async () => {
   }
 }
 
-const buildLogMessage = (log: PlanningLogEntry): Message => {
+const extractFocusTargetFromDetails = (
+  details: DetailMap,
+  processType: ProcessType,
+  layer?: MessageFocusTarget['layer'],
+): MessageFocusTarget | undefined => {
+  const status: MessageFocusTarget['status'] = processType === 'error' ? 'error' : 'active'
+  const startTime = typeof details.startTime === 'string' ? details.startTime : ''
+  const endTime = typeof details.endTime === 'string' ? details.endTime : ''
+  const itemId = typeof details.itemId === 'string' ? details.itemId : undefined
+  const gapId = typeof details.gapId === 'string' ? details.gapId : undefined
+
+  if (itemId && startTime && endTime) {
+    return {
+      type: 'item',
+      itemId,
+      startTime,
+      endTime,
+      layer,
+      status,
+      error: typeof details.error === 'string' ? details.error : undefined,
+    }
+  }
+
+  if (gapId && startTime && endTime) {
+    return {
+      type: 'gap',
+      gapId,
+      startTime,
+      endTime,
+      layer,
+      status,
+      error: typeof details.error === 'string' ? details.error : undefined,
+    }
+  }
+
+  const matchedItemTarget = extractFocusTargetFromRuntimeItem(details.matchedItem, status)
+  if (matchedItemTarget) {
+    return {
+      ...matchedItemTarget,
+      layer,
+      error: typeof details.error === 'string' ? details.error : undefined,
+    }
+  }
+
+  const sourceTimeRange = toDetailMap(details.sourceTimeRange)
+  if (typeof sourceTimeRange?.start === 'string' && typeof sourceTimeRange?.end === 'string') {
+    return {
+      type: 'range',
+      startTime: sourceTimeRange.start,
+      endTime: sourceTimeRange.end,
+      layer,
+      status,
+      error: typeof details.error === 'string' ? details.error : undefined,
+    }
+  }
+
+  const proposedTimeRange = toDetailMap(details.proposedTimeRange)
+  if (typeof proposedTimeRange?.start === 'string' && typeof proposedTimeRange?.end === 'string') {
+    return {
+      type: 'range',
+      startTime: proposedTimeRange.start,
+      endTime: proposedTimeRange.end,
+      layer,
+      status,
+      error: typeof details.error === 'string' ? details.error : undefined,
+    }
+  }
+
+  if (typeof details.targetTime === 'string') {
+    return {
+      type: 'range',
+      startTime: details.targetTime,
+      endTime: details.targetTime,
+      layer,
+      status,
+      error: typeof details.error === 'string' ? details.error : undefined,
+    }
+  }
+
+  const issues = Array.isArray(details.issues) ? details.issues : []
+  const primaryIssue = issues[0]
+  if (primaryIssue && typeof primaryIssue === 'object') {
+    const issueRecord = primaryIssue as Record<string, unknown>
+    const location = toDetailMap(issueRecord.location)
+    const issueItemId = typeof location?.itemId === 'string' ? location.itemId : undefined
+    const issueTimeRange = toDetailMap(location?.timeRange)
+
+    if (
+      issueItemId
+      && typeof issueTimeRange?.start === 'string'
+      && typeof issueTimeRange?.end === 'string'
+    ) {
+      return {
+        type: 'item',
+        itemId: issueItemId,
+        startTime: issueTimeRange.start,
+        endTime: issueTimeRange.end,
+        layer,
+        status,
+        error: typeof issueRecord.message === 'string' ? issueRecord.message : undefined,
+      }
+    }
+
+    if (typeof issueTimeRange?.start === 'string' && typeof issueTimeRange?.end === 'string') {
+      return {
+        type: 'range',
+        startTime: issueTimeRange.start,
+        endTime: issueTimeRange.end,
+        layer,
+        status,
+        error: typeof issueRecord.message === 'string' ? issueRecord.message : undefined,
+      }
+    }
+  }
+
+  const firstGapRange = Array.isArray(details.gapRanges) ? details.gapRanges[0] : undefined
+  if (
+    firstGapRange
+    && typeof firstGapRange === 'object'
+    && typeof firstGapRange.startTime === 'string'
+    && typeof firstGapRange.endTime === 'string'
+  ) {
+    return {
+      type: 'range',
+      startTime: firstGapRange.startTime,
+      endTime: firstGapRange.endTime,
+      layer,
+      status,
+      error: typeof details.error === 'string' ? details.error : undefined,
+    }
+  }
+
+  return undefined
+}
+
+const canFocusMessage = (message: Message) => message.role !== 'user' && Boolean(message.focusTarget)
+
+const handleMessageFocus = (message: Message) => {
+  if (!message.focusTarget) return
+  emitFocusTarget(message.focusTarget)
+}
+
+const buildLogMessage = (log: PlanningLogEntry, previousLog?: PlanningLogEntry): Message => {
   const details = log.details ?? {}
   const processType = mapLogToProcessType(log)
   const explanationDetails = compressLogDetails(details, processType)
   const mergeMeta = getRuntimeMergeMeta(log)
+  const durationMs = resolveLogDurationMs(log, previousLog)
 
   return buildAssistantMessage({
     content: buildRuntimeResult(log, details),
@@ -2269,11 +2431,18 @@ const buildLogMessage = (log: PlanningLogEntry): Message => {
     processTypeLabel: mapRuntimeLogToProcessLabel(log),
     mergeKey: mergeMeta.key,
     mergeKind: mergeMeta.kind,
+    stepMetric: durationMs === null ? undefined : buildCompletedStepMetric(durationMs),
+    focusTarget: extractFocusTargetFromDetails(
+      details,
+      processType,
+      processType === 'error' ? 'issue' : 'process',
+    ),
   })
 }
 
 const appendSystemLogMessage = (message: Message) => {
   if (tryMergeRuntimeMessage(message)) {
+    keepPersistentThinkingAtBottom()
     trimRuntimeProgressMessages()
     return
   }
@@ -2289,6 +2458,7 @@ const appendSystemLogMessage = (message: Message) => {
   }
 
   messages.value.push(message)
+  keepPersistentThinkingAtBottom()
   trimRuntimeProgressMessages()
 }
 
@@ -2340,6 +2510,11 @@ const tryMergeRuntimeMessage = (message: Message): boolean => {
       explanation: buildFriendlyLogExplanation(mergedLog, mergedDetails),
       details: mergedDetails,
     },
+    focusTarget: extractFocusTargetFromDetails(
+      mergedDetails,
+      message.processType ?? 'general',
+      message.processType === 'error' ? 'issue' : 'process',
+    ),
   })
 
   for (let i = chainIndexes.length - 1; i >= 1; i -= 1) {
@@ -2419,7 +2594,8 @@ const summarizeRuntimeLog = (log: PlanningLogEntry): string => {
   }
 
   if (typeof details.candidateCount === 'number') {
-    return `查询结果：${details.candidateCount} 个`
+    const matchedColumnPhrase = formatMatchedColumnPhrase(details)
+    return `候选检索完成，命中 ${details.candidateCount} 个，来自${matchedColumnPhrase}`
   }
 
   if (details.criteria && typeof details.criteria === 'object') {
@@ -2472,7 +2648,7 @@ const summarizeRuntimeLog = (log: PlanningLogEntry): string => {
     return `处理失败：${details.error}`
   }
 
-  return `编排过程：${log.message}`
+  return log.message
 }
 
 const formatPhaseLabel = (phase: string) => {
@@ -2559,6 +2735,25 @@ const getRuntimeMergeMeta = (log: PlanningLogEntry): { key?: string; kind: Messa
 }
 
 watch(
+  () => pendingCommand.value,
+  (value) => {
+    emitFocusTarget(buildPendingCommandFocusTarget(value))
+  },
+)
+
+watch(
+  () => ({
+    summary: pendingTargetSelection.value?.summary ?? '',
+    selectedItemId: pendingTargetSelection.value?.selectedItemId ?? '',
+    targetTime: pendingTargetSelection.value?.targetTime ?? '',
+    candidateIds: pendingTargetSelection.value?.candidates.map((candidate) => candidate.id).join('|') ?? '',
+  }),
+  () => {
+    emitFocusTarget(buildPendingTargetSelectionFocusTarget(pendingTargetSelection.value))
+  },
+)
+
+watch(
   () => messages.value.length,
   () => {
     void scrollToBottom()
@@ -2571,14 +2766,16 @@ watch(
     const logs = props.orchestrationLogs ?? []
     if (logs.length === 0) return
 
-    const unseenLogs = logs.filter((log) => !displayedLogIds.value.includes(log.id))
-    if (unseenLogs.length === 0) return
-
-    for (const log of unseenLogs) {
+    let appended = false
+    logs.forEach((log, index) => {
+      if (displayedLogIds.value.includes(log.id)) return
       displayedLogIds.value.push(log.id)
-      if (!shouldDisplayLog(log)) continue
-      appendSystemLogMessage(buildLogMessage(log))
-    }
+      if (!shouldDisplayLog(log)) return
+      appendSystemLogMessage(buildLogMessage(log, index > 0 ? logs[index - 1] : undefined))
+      appended = true
+    })
+
+    if (!appended) return
 
     if (displayedLogIds.value.length > MAX_DISPLAYED_LOG_IDS) {
       displayedLogIds.value.splice(0, displayedLogIds.value.length - MAX_DISPLAYED_LOG_IDS)
@@ -2595,6 +2792,11 @@ watch(
   () => [props.channelId, props.date],
   () => {
     syncImportedLayoutState()
+    unsubscribeBridgeSession?.()
+    unsubscribeBridgeSession = null
+    bridgeSessionId.value = ''
+    pendingCommand.value = null
+    pendingTargetSelection.value = null
   },
   { immediate: true },
 )
@@ -2604,8 +2806,39 @@ watch(
     isOrchestrating: props.isOrchestrating,
     sessionId: props.orchestrationSession?.id ?? '',
     status: props.orchestrationSession?.status ?? '',
+    processingRange:
+      props.orchestrationSession?.gaps.processing
+        ? `${props.orchestrationSession.gaps.processing.startTime}_${props.orchestrationSession.gaps.processing.endTime}`
+        : '',
   }),
-  ({ isOrchestrating, sessionId, status }) => {
+  ({ isOrchestrating, sessionId, status, processingRange }) => {
+    void processingRange
+    if (isOrchestrating && props.orchestrationSession) {
+      const content = '思考中'
+      const startedAtMs = new Date(props.orchestrationSession.createdAt).getTime()
+      const shouldRestartThinking = (
+        !activeThinkingController
+        || activeThinkingController.sessionId !== sessionId
+        || activeThinkingController.startedAtMs !== startedAtMs
+      )
+
+      if (shouldRestartThinking) {
+        activeThinkingController?.stop()
+        activeThinkingController = startPersistentThinking(
+          content,
+          {
+            startedAtMs,
+            sessionId,
+          },
+        )
+      } else if (activeThinkingController) {
+        activeThinkingController.message.content = content
+      }
+    } else if (activeThinkingController) {
+      activeThinkingController.stop()
+      activeThinkingController = null
+    }
+
     if (
       isOrchestrating ||
       !sessionId ||
@@ -2628,6 +2861,15 @@ watch(
   },
   { immediate: true },
 )
+
+onBeforeUnmount(() => {
+  unsubscribeBridgeSession?.()
+  unsubscribeBridgeSession = null
+  activeThinkingController?.stop()
+  activeThinkingController = null
+  activeStepTimerIds.forEach((timerId) => window.clearInterval(timerId))
+  activeStepTimerIds.clear()
+})
 </script>
 
 <style scoped lang="scss">
@@ -2643,11 +2885,11 @@ watch(
 .messages-container {
   flex: 1;
   overflow-y: auto;
-  padding: 18px 18px 10px;
+  padding: 18px 18px 14px;
 }
 
 .message-item {
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .message-item.is-user {
@@ -2672,26 +2914,40 @@ watch(
 .system-row {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid rgba(251, 146, 60, 0.1);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.76);
-  box-shadow: 0 2px 8px rgba(120, 53, 15, 0.05);
+  gap: 6px;
+  padding: 8px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.system-row.is-focusable .system-summary-text {
+  text-decoration: underline;
+  text-decoration-color: rgba(245, 158, 11, 0.28);
+  text-underline-offset: 2px;
 }
 
 .system-summary-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  align-items: start;
   gap: 10px;
   min-width: 0;
+}
+
+.system-summary-row.is-focusable {
+  cursor: pointer;
+}
+
+.system-summary-row.is-focusable:hover .system-summary-text {
+  color: #9a3412;
 }
 
 .system-summary-text {
   min-width: 0;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.45;
   color: #223046;
   white-space: normal;
   word-break: break-word;
@@ -2701,7 +2957,50 @@ watch(
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 3px;
+}
+
+.system-mainline {
+  display: flex;
+  align-items: baseline;
   gap: 6px;
+  min-width: 0;
+}
+
+.system-summary-side {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.system-status-text {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.system-status-text.is-running {
+  color: #9a3412;
+}
+
+.system-status-text.is-success {
+  color: #475569;
+}
+
+.system-status-text.is-warning {
+  color: #92400e;
+}
+
+.system-status-text.is-error {
+  color: #991b1b;
+}
+
+.system-status-text.is-neutral {
+  color: #475569;
 }
 
 .reason-tag-row {
@@ -2750,48 +3049,32 @@ watch(
   padding: 0;
   font-size: 12px;
   justify-self: end;
+  color: #64748b;
+  min-height: auto;
 }
 
-.process-pill.process-planning,
-.message-content.process-planning .explanation-card {
-  background: #f5f0ff;
-  border-color: #dccdff;
-  color: #6b46c1;
+.step-timer-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 56px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #64748b;
 }
 
-.process-pill.process-query,
-.message-content.process-query .explanation-card {
-  background: #eef7ff;
-  border-color: #cde6ff;
-  color: #1d4ed8;
+.step-timer-chip.is-running {
+  color: #9a3412;
 }
 
-.process-pill.process-selection,
-.message-content.process-selection .explanation-card {
-  background: #ecfdf3;
-  border-color: #c7f3d7;
-  color: #15803d;
-}
-
-.process-pill.process-execution,
-.message-content.process-execution .explanation-card {
-  background: #fff7ed;
-  border-color: #fed7aa;
-  color: #c2410c;
-}
-
-.process-pill.process-validation,
-.message-content.process-validation .explanation-card {
-  background: #eff6ff;
-  border-color: #bfdbfe;
-  color: #1e40af;
-}
-
-.process-pill.process-error,
-.message-content.process-error .explanation-card {
-  background: #fef2f2;
-  border-color: #fecaca;
-  color: #b91c1c;
+.step-timer-value {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 .message-text {
@@ -2807,38 +3090,43 @@ watch(
 
 .explanation-card {
   margin-top: 2px;
-  border: 1px solid #e6ecf5;
-  border-radius: 12px;
-  padding: 12px;
-  background: rgba(255, 255, 255, 0.88);
+  border: 0;
+  border-radius: 0;
+  padding: 4px 0 0;
+  background: transparent;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
 .explanation-section {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 .explanation-title {
+  flex: 0 0 auto;
+  min-width: 28px;
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-weight: 600;
+  letter-spacing: 0;
   color: #78716c;
-}
-
-.explanation-content {
-  font-size: 13px;
   line-height: 1.7;
 }
 
-.explanation-content.is-secondary {
+.explanation-content {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #334155;
+}
+
+.explanation-section.is-secondary .explanation-content {
   color: #475569;
 }
 
-.explanation-content.is-risk {
+.explanation-section.is-risk .explanation-content {
   color: #b45309;
 }
 
@@ -2851,39 +3139,37 @@ watch(
 .candidate-comparison-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .candidate-comparison-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: start;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(226, 232, 240, 0.95);
-  background: rgba(248, 250, 252, 0.96);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: stretch;
+  padding: 7px 0;
+  border-radius: 0;
+  border: 0;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.85);
+  background: transparent;
 }
 
 .candidate-comparison-item.is-selected {
-  border-color: rgba(251, 146, 60, 0.24);
-  background: rgba(255, 247, 237, 0.98);
+  background: transparent;
 }
 
-.candidate-comparison-main {
+.candidate-comparison-name-line {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   min-width: 0;
 }
 
 .candidate-comparison-name {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   color: #1f2937;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1.5;
   word-break: break-word;
 }
@@ -2891,13 +3177,13 @@ watch(
 .candidate-comparison-badge {
   display: inline-flex;
   align-items: center;
-  min-height: 20px;
-  padding: 0 8px;
-  border-radius: 999px;
-  background: rgba(251, 146, 60, 0.14);
+  min-height: auto;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
   color: #9a3412;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .candidate-comparison-meta {
@@ -2909,14 +3195,12 @@ watch(
 .candidate-comparison-note {
   color: #475569;
   font-size: 12px;
-  line-height: 1.6;
-  text-align: right;
-  max-width: 180px;
+  line-height: 1.55;
 }
 
 .details-panel {
-  border-top: 1px solid rgba(148, 163, 184, 0.18);
-  padding-top: 10px;
+  border-top: 1px solid rgba(226, 232, 240, 0.75);
+  padding-top: 8px;
 }
 
 .details-toggle,
@@ -2927,7 +3211,7 @@ watch(
 .details-summary-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   margin-top: 10px;
 }
 
@@ -2937,15 +3221,16 @@ watch(
 
 .detail-summary-item {
   display: grid;
-  grid-template-columns: 84px 1fr;
-  gap: 10px;
+  grid-template-columns: 68px 1fr;
+  gap: 8px;
   align-items: start;
 }
 
 .detail-summary-label {
   color: #78716c;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
+  line-height: 1.6;
 }
 
 .detail-summary-value {
@@ -2972,10 +3257,11 @@ watch(
 
 .pending-command-panel {
   margin: 0 18px 12px;
-  border: 1px solid #f5c77b;
-  border-radius: 18px;
-  background: linear-gradient(180deg, #fffaf0 0%, #fff6e6 100%);
-  box-shadow: 0 10px 24px rgba(191, 101, 18, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-left: 3px solid rgba(245, 158, 11, 0.9);
+  border-radius: 10px;
+  background: rgba(255, 251, 235, 0.7);
+  box-shadow: none;
 }
 
 .pending-command-header {
@@ -2983,35 +3269,92 @@ watch(
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 16px 18px 8px;
+  padding: 12px 14px 6px;
 }
 
 .pending-command-title {
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 700;
-  color: #9a3412;
+  color: #92400e;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .pending-command-summary {
-  margin-top: 4px;
-  color: #7c2d12;
-  line-height: 1.6;
+  margin-top: 3px;
+  color: #4b5563;
+  line-height: 1.5;
 }
 
 .pending-command-body {
-  padding: 0 18px 12px;
+  padding: 0 14px 10px;
 }
 
 .pending-command-reasoning {
-  color: #6b3b14;
-  line-height: 1.7;
+  color: #6b7280;
+  line-height: 1.55;
+  font-size: 12px;
 }
 
 .pending-command-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
-  padding: 0 18px 16px;
+  gap: 8px;
+  padding: 0 14px 12px;
+}
+
+.layout-draft-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: min(52vh, 560px);
+}
+
+.layout-draft-panel .pending-command-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.layout-draft-segment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(251, 146, 60, 0.12);
+}
+
+.layout-draft-segment-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 0;
+  border-bottom: 1px dashed rgba(226, 232, 240, 0.9);
+}
+
+.layout-draft-segment-item:last-child {
+  border-bottom: 0;
+}
+
+.layout-draft-segment-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.layout-draft-segment-time {
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.layout-draft-segment-label {
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
 }
 
 .empty-state {
@@ -3096,12 +3439,11 @@ watch(
   }
 
   .candidate-comparison-item {
-    grid-template-columns: 1fr;
+    padding: 8px 0;
   }
 
   .candidate-comparison-note {
-    max-width: none;
-    text-align: left;
+    line-height: 1.6;
   }
 }
 </style>

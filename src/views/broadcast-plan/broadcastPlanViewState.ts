@@ -1,5 +1,6 @@
 import type { LayoutReferenceItem } from './layoutReferenceData'
 import type { ScheduleItem } from './scheduleData'
+import type { LayoutDraft } from '@/types/orchestration'
 
 type ReferenceItemDeps = {
   normalizeDemoDisplayName: (name?: string) => string
@@ -40,6 +41,40 @@ export const buildReferenceItems = (
     isReference: true,
     code18: reference.code18 || '',
   }))
+}
+
+export const buildLayoutDraftItems = (
+  draft: LayoutDraft,
+  deps: ReferenceItemDeps,
+): ScheduleItem[] => {
+  const sortedSlots = [...draft.layoutReference.slots].sort((left, right) =>
+    left.startTime.localeCompare(right.startTime),
+  )
+
+  return sortedSlots.map((slot, index): ScheduleItem => {
+    const column = draft.columns.find((item) => item.columnId === slot.columnId)
+    const startTime = slot.startTime.split('T')[1]?.slice(0, 8) ?? draft.coverage.start
+    const endTime = slot.endTime.split('T')[1]?.slice(0, 8) ?? draft.coverage.end
+    const label = column?.semanticLabel ?? column?.columnName ?? `时段${index + 1}`
+
+    return {
+      id: `draft-${slot.id}`,
+      scheduleId: '',
+      startTime,
+      endTime,
+      programType: column?.defaultProgramType,
+      instanceName: deps.normalizeDemoDisplayName(label),
+      materialStatus: 'ready',
+      businessType: 'program',
+      programName: deps.normalizeDemoDisplayName(label),
+      sourceType: 'imported',
+      remark: column?.queryHints?.join(' / ') ?? '',
+      sortOrder: index,
+      duration: deps.getTimeDiff(startTime, endTime),
+      isReference: true,
+      keySlot: label,
+    }
+  })
 }
 
 export const selectDisplayItems = (

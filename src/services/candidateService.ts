@@ -27,6 +27,7 @@ export interface ProgramSearchParams {
   columnId?: string
   programTypes?: string[]
   limit?: number
+  columnStrategy?: 'strict' | 'prefer_channel'
 }
 
 type SelectionMode = 'sequential' | 'rerun' | 'default'
@@ -100,7 +101,12 @@ export class CandidateService {
       .filter((candidate) => this.matchesDuration(candidate, criteria))
       .filter((candidate) => this.matchesProgramType(candidate, criteria.programTypePreference))
       .filter((candidate) => this.matchesUsageState(candidate, criteria.excludeUsed))
-    const sorted = this.sortCandidates(filtered, {
+    const keywordMatched = criteria.searchKeywords?.length
+      ? filtered.filter((candidate) => this.matchesSearchKeywords(candidate, criteria.searchKeywords ?? []))
+      : filtered
+    const effectiveCandidates = keywordMatched.length > 0 ? keywordMatched : filtered
+
+    const sorted = this.sortCandidates(effectiveCandidates, {
       channelId: criteria.channelId,
       columnId: criteria.columnId,
       gap,
@@ -132,7 +138,28 @@ export class CandidateService {
       ? new Set(getEffectiveProgramsByColumn(params.channelId, params.columnId).map((item) => item.programId))
       : null
 
-    const filtered = this.candidates
+    const filtered = this.filterProgramSearchCandidates(params, keyword, allowedProgramIds)
+    if (filtered.length > 0 || !allowedProgramIds || params.columnStrategy !== 'prefer_channel') {
+      return this.sortCandidates(filtered, {
+        channelId: params.channelId,
+        columnId: params.columnId,
+        keyword,
+      }).slice(0, limit)
+    }
+
+    const channelFallback = this.filterProgramSearchCandidates(params, keyword, null)
+    return this.sortCandidates(channelFallback, {
+      channelId: params.channelId,
+      keyword,
+    }).slice(0, limit)
+  }
+
+  private filterProgramSearchCandidates(
+    params: ProgramSearchParams,
+    keyword: string,
+    allowedProgramIds: Set<string> | null,
+  ): ProgramCandidate[] {
+    return this.candidates
       .filter((candidate) => candidate.channelId === params.channelId)
       .filter((candidate) => !allowedProgramIds || allowedProgramIds.has(candidate.programId))
       .filter((candidate) => !params.programTypes?.length || this.matchesProgramType(candidate, params.programTypes))
@@ -142,12 +169,6 @@ export class CandidateService {
         return haystack.includes(keyword)
       })
       .filter((candidate) => !this.isScheduledProgramCode(candidate.programCode))
-
-    return this.sortCandidates(filtered, {
-      channelId: params.channelId,
-      columnId: params.columnId,
-      keyword,
-    }).slice(0, limit)
   }
 
   private scoreCandidate(candidate: ProgramCandidate, gap: GapInfo, criteria: CandidateQueryCriteria): number {
@@ -155,8 +176,31 @@ export class CandidateService {
       ? 60
       : 100 - Math.abs(candidate.duration - gap.duration) / 60
     const typeScore = criteria.programTypePreference?.includes(candidate.programType) ? 25 : 0
+    const keywordScore = this.buildKeywordScore(candidate, criteria.searchKeywords ?? [])
     const rerunScore = this.buildRerunScore(candidate)
-    return durationScore + typeScore + rerunScore
+    return durationScore + typeScore + keywordScore + rerunScore
+  }
+
+  private matchesSearchKeywords(candidate: ProgramCandidate, searchKeywords: string[]): boolean {
+    if (searchKeywords.length === 0) {
+      return true
+    }
+
+    const haystack = `${candidate.programName} ${candidate.programCode}`.toLowerCase()
+    return searchKeywords.some((keyword) => {
+      const normalized = keyword.trim().toLowerCase()
+      return normalized.length > 0 && haystack.includes(normalized)
+    })
+  }
+
+  private buildKeywordScore(candidate: ProgramCandidate, searchKeywords: string[]): number {
+    return searchKeywords.reduce((score, keyword) => {
+      const normalized = keyword.trim().toLowerCase()
+      if (!normalized) {
+        return score
+      }
+      return candidate.programName.toLowerCase().includes(normalized) ? score + 12 : score
+    }, 0)
   }
 
   private scoreProgramSearch(candidate: ProgramCandidate, keyword: string): number {

@@ -79,7 +79,9 @@ describe('ValidationEngine', () => {
     }))
 
     expect(report.summary.criticalCount).toBe(1)
-    expect(report.issues.some((issue) => issue.type === 'overlap')).toBe(true)
+    const overlapIssue = report.issues.find((issue) => issue.type === 'overlap')
+    expect(overlapIssue).toBeTruthy()
+    expect(overlapIssue?.location.relatedItemIds).toEqual(['item-a', 'item-b'])
     expect(report.isValid).toBe(false)
   })
 

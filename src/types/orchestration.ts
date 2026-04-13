@@ -6,25 +6,31 @@
 import type { ChatMessage } from './llm'
 
 // ==================== 任务判别相关 ====================
-
-/** 任务模式类型 */
+/** 浠诲姟妯″紡绫诲瀷 */
 export type TaskMode =
-  | 'full_generate'      // 从零生成完整编排单
-  | 'partial_generate'   // 对当前空窗自动补排
-  | 'micro_edit'         // 局部增删改查
-  | 'validate_only'      // 只执行校验
-  | 'repair_only'        // 只执行修复
-  | 'clarify'            // 语义不明确，需澄清
+  | 'full_generate'
+  | 'partial_generate'
+  | 'micro_edit'
+  | 'validate_only'
+  | 'repair_only'
+  | 'clarify'
+  | 'layout_prepare'
+  | 'layout_refine'
+  | 'layout_commit'
 
-/** 任务判别结果 */
+/** 浠诲姟鍒ゅ埆缁撴灉 */
 export interface TaskClassification {
   mode: TaskMode
-  confidence: number           // 置信度 0-1
-  reasoning: string            // 判别理由
+  confidence: number           // 缃俊搴?0-1
+  reasoning: string            // 鍒ゅ埆鐞嗙敱
   suggestedParams?: {
-    targetGaps?: string[]      // 目标空窗ID列表
-    targetItems?: string[]     // 目标条目ID列表
-    userIntent?: string        // 解析后的用户意图
+    targetGaps?: string[]      // 鐩爣绌虹獥ID鍒楄〃
+    targetItems?: string[]     // 鐩爣鏉＄洰ID鍒楄〃
+    userIntent?: string        // 瑙ｆ瀽鍚庣殑鐢ㄦ埛鎰忓浘
+    targetTimeRange?: { start: string; end: string }
+    ignoreExistingLayout?: boolean
+    semanticLabel?: string
+    programTypeHint?: string
   }
 }
 
@@ -201,10 +207,10 @@ export interface CandidateQueryCriteria {
   channelId: string
   columnId: string
   programTypePreference?: string[]
+  searchKeywords?: string[]
   excludeUsed: boolean
 }
-
-/** 候选检索命令 */
+/** 鍊欓€夋绱㈠懡浠?*/
 export interface QueryCandidatesCommand extends BaseCommand {
   action: 'query_candidates'
   data: {
@@ -212,6 +218,8 @@ export interface QueryCandidatesCommand extends BaseCommand {
     criteria: CandidateQueryCriteria
   }
 }
+
+
 
 /** 单条选择命令 */
 export interface FillItemCommand extends BaseCommand {
@@ -381,6 +389,7 @@ export type ValidationSeverity = 'critical' | 'warning' | 'info'
 /** 校验问题位置 */
 export interface ValidationLocation {
   itemId?: string
+  relatedItemIds?: string[]
   gapId?: string
   timeRange?: { start: string; end: string }
   field?: string
@@ -597,16 +606,19 @@ export interface ColumnDefinition {
   channelId: string
   defaultProgramType: string
   isSequential?: boolean
+  semanticLabel?: string
+  queryHints?: string[]
+  source?: 'generated' | 'imported' | 'default'
 }
 
-/** 版面参考 */
+/** 鐗堥潰鍙傝€?*/
 export interface LayoutReference {
   id: string
   name: string
   slots: LayoutSlot[]
 }
 
-/** 版面时段 */
+/** 鐗堥潰鏃舵 */
 export interface LayoutSlot {
   id: string
   channelId: string
@@ -615,7 +627,64 @@ export interface LayoutSlot {
   columnId: string
 }
 
-/** 历史编排参考 */
+export interface LayoutDraftSpecSegment {
+  id?: string
+  label: string
+  startTime: string
+  endTime: string
+  programType: string
+  queryHints?: string[]
+  sequential?: boolean
+}
+
+export interface LayoutDraftSpec {
+  coverage: {
+    start: string
+    end: string
+  }
+  segments: LayoutDraftSpecSegment[]
+}
+
+export interface GeneratedColumnDefinition extends ColumnDefinition {
+  source: 'generated' | 'imported' | 'default'
+}
+
+export interface LayoutDraft {
+  id: string
+  channelId: string
+  date: string
+  version: number
+  source: 'generated' | 'uploaded' | 'channel_default'
+  userIntent: string
+  coverage: {
+    start: string
+    end: string
+  }
+  layoutReference: LayoutReference
+  columns: GeneratedColumnDefinition[]
+  warnings?: string[]
+}
+
+export interface DraftFeasibilitySegmentReport {
+  segmentId: string
+  label: string
+  startTime: string
+  endTime: string
+  status: 'ready' | 'warning' | 'blocked'
+  matchedCandidateCount: number
+  reasons: string[]
+}
+
+export interface DraftFeasibilityReport {
+  ok: boolean
+  summary: {
+    readyCount: number
+    warningCount: number
+    blockedCount: number
+  }
+  segments: DraftFeasibilitySegmentReport[]
+}
+
 export interface HistoryReference {
   dates: string[]
   schedules: ScheduleSummary[]

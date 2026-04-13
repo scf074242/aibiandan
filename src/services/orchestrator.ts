@@ -96,6 +96,8 @@ const DEFAULT_CONFIG: OrchestratorConfig = {
   planningConcurrency: 1,
 }
 
+const AD_INSERTION_PACING_MS = 3000
+
 export class Orchestrator extends EventEmitter {
   private readonly llmClient: LLMClient
   private readonly taskClassifier: TaskClassifier
@@ -425,13 +427,14 @@ export class Orchestrator extends EventEmitter {
           this.session!.gaps.completed.push(plan.gap.id)
           this.session!.execution.totalCommands += 1
           this.session!.execution.successfulCommands += 1
+          this.syncSessionGapStateFromManager()
           this.emit('gap-complete', { gap: plan.gap, item: executionResult.item })
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error'
           this.gapManager.markFailed(plan.gap.id, message)
-          this.session!.gaps.failed.push(plan.gap.id)
           this.session!.execution.totalCommands += 1
           this.session!.execution.failedCommands += 1
+          this.syncSessionGapStateFromManager()
           this.log('error', 'execution', `空窗 ${plan.gap.id} 处理失败`, {
             gapId: plan.gap.id,
             startTime: plan.gap.startTime,
@@ -442,16 +445,14 @@ export class Orchestrator extends EventEmitter {
         }
 
         processed += 1
-        this.session!.gaps.pending = this.gapManager.queryRemainingGaps()
+        this.syncSessionGapStateFromManager()
       }
     }
 
     if (!this.isCancelled && this.gapManager && allowAdFill) {
       const filledCount = await this.fillRemainingGapsWithAds(generationContext, options?.targetSlotIds)
       processed += filledCount
-      if (filledCount > 0) {
-        this.session!.gaps.pending = this.gapManager.queryRemainingGaps()
-      }
+      this.syncSessionGapStateFromManager()
     }
 
     if (!this.isCancelled && this.gapManager?.hasRemainingGaps()) {
@@ -674,6 +675,8 @@ export class Orchestrator extends EventEmitter {
       gapId: gap.id,
       startTime: gap.startTime,
       endTime: gap.endTime,
+      criteria: queryCommand.data.criteria,
+      targetSlotLabel: thought?.targetSlotLabel,
       candidateCount: candidatesResult.candidates.length,
       topCandidates: candidatesResult.candidates.slice(0, 3).map((item) => ({
         id: item.id,
@@ -854,6 +857,7 @@ export class Orchestrator extends EventEmitter {
           }
 
           currentItems = this.atomicCapabilities.getAllItems()
+          this.recalculateGapsFromCurrentItems(currentItems, generationContext)
           insertedCount += 1
           slotChanged = true
           this.session!.execution.totalCommands += 1
@@ -878,6 +882,7 @@ export class Orchestrator extends EventEmitter {
             })),
           })
 
+          await this.waitWithCancellation(AD_INSERTION_PACING_MS)
           await this.yieldToBrowser()
 
           break
@@ -941,6 +946,45 @@ export class Orchestrator extends EventEmitter {
 
   private combineDateTime(date: string, time: string): string {
     return time.includes('T') ? time : `${date}T${time}+08:00`
+  }
+
+  private recalculateGapsFromCurrentItems(
+    items: ScheduleItemSnapshot[],
+    generationContext?: Awaited<ReturnType<ReturnType<typeof getDataService>['getGenerationContext']>> | null,
+  ): void {
+    if (!this.gapManager || !this.session || !generationContext) return
+
+    this.gapManager.calculateGapsFromItems(
+      items,
+      generationContext.constraints.fixedItems,
+      this.combineDateTime(this.session.date, generationContext.channel.broadcastRules.defaultStartTime),
+      this.combineDateTime(this.session.date, generationContext.channel.broadcastRules.defaultEndTime),
+    )
+
+    const typedLayoutSlots = (generationContext.layoutReference?.slots ?? [])
+      .map((slot) => {
+        const column = getEffectiveColumnDefinition(slot.columnId)
+        if (!column) return null
+        return {
+          startTime: slot.startTime,
+          endTime: slot.endTime,
+          programType: column.defaultProgramType,
+          preferredProgramTypes: [column.defaultProgramType],
+        }
+      })
+      .filter((slot): slot is NonNullable<typeof slot> => Boolean(slot))
+
+    this.gapManager.alignGapsToLayoutBands(typedLayoutSlots)
+    this.syncSessionGapStateFromManager()
+  }
+
+  private syncSessionGapStateFromManager(): void {
+    if (!this.session || !this.gapManager) return
+
+    this.session.gaps.pending = this.gapManager.queryRemainingGaps()
+    this.session.gaps.failed = this.gapManager.getActiveGaps()
+      .filter((gap) => gap.status === 'failed')
+      .map((gap) => gap.id)
   }
 
   private resolveRelevantLayoutSlotIds(gaps: GapInfo[], layoutReference?: LayoutReference | null): string[] {
@@ -1025,6 +1069,19 @@ export class Orchestrator extends EventEmitter {
     await new Promise<void>((resolve) => {
       setTimeout(() => resolve(), 0)
     })
+  }
+
+  private async waitWithCancellation(durationMs: number, stepMs = 100): Promise<void> {
+    if (durationMs <= 0) return
+
+    let remainingMs = durationMs
+    while (!this.isCancelled && remainingMs > 0) {
+      const currentStep = Math.min(stepMs, remainingMs)
+      await new Promise<void>((resolve) => {
+        setTimeout(() => resolve(), currentStep)
+      })
+      remainingMs -= currentStep
+    }
   }
 }
 

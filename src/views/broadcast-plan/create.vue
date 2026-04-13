@@ -79,7 +79,7 @@
             </div>
             <div class="timeline-header-right">
               <span class="stats-text">
-                共 {{ displayItems.length }} 个节目，总时长 {{ totalDurationText }}
+                共 {{ displayItems.length }} {{ displayItemUnitLabel }}，总时长 {{ totalDurationText }}
               </span>
               <el-tag
                 v-if="unlinkedItemCount > 0"
@@ -124,6 +124,7 @@
                     v-for="gap in displayGapEntries"
                     :key="gap.id"
                     class="continuity-item"
+                    @click="handleFocusGapEntry(gap)"
                   >
                     <div class="continuity-text">
                       缺失时间：{{ formatTime4(gap.from) }} - {{ formatTime4(gap.to) }}
@@ -142,10 +143,44 @@
                         class="gap-fix-btn"
                         type="primary"
                         size="small"
-                        @click="openAddItemForGap(gap)"
+                        @click.stop="openAddItemForGap(gap)"
                       >
                         补齐
                       </el-button>
+                    </div>
+                  </div>
+                </div>
+              </el-popover>
+              <el-popover
+                v-if="overlapConflicts.length > 0"
+                placement="bottom-end"
+                :width="320"
+                trigger="click"
+                popper-class="continuity-popper"
+              >
+                <template #reference>
+                  <el-tag
+                    type="danger"
+                    effect="light"
+                    size="small"
+                    class="header-alert-tag"
+                  >
+                    <el-icon><WarningFilled /></el-icon>
+                    时间冲突 {{ overlapConflicts.length }} 处
+                  </el-tag>
+                </template>
+                <div class="continuity-popover">
+                  <div
+                    v-for="conflict in overlapConflicts"
+                    :key="conflict.id"
+                    class="continuity-item is-clickable"
+                    @click="handleFocusConflict(conflict)"
+                  >
+                    <div class="continuity-text">
+                      {{ formatTime4(conflict.startTime) }} - {{ formatTime4(conflict.endTime) }} 存在重叠
+                    </div>
+                    <div class="continuity-actions">
+                      <el-tag type="danger" effect="light" size="small">定位</el-tag>
                     </div>
                   </div>
                 </div>
@@ -172,11 +207,15 @@
               </span>
             </div>
           </div>
-
           <!-- 时间轴主体 -->
           <div class="timeline-body" ref="timelineBodyRef">
             <!-- 表格内容 -->
-            <div class="timeline-content" ref="timelineContentRef" @scroll="handleTimelineContentScroll">
+            <div
+              class="timeline-content"
+              ref="timelineContentRef"
+              @scroll="handleTimelineContentScroll"
+              @click="handleTimelineAreaClick"
+            >
               <div class="timeline-table-header">
                 <div class="header-cell index-cell">序号</div>
                 <div class="header-cell start-time-cell">起始时间</div>
@@ -200,7 +239,33 @@
               </div>
 
               <!-- 节目列表 -->
-              <div class="schedule-items-wrapper" @click="handleEmptyAreaClick">
+              <div ref="scheduleItemsWrapperRef" class="schedule-items-wrapper" @click="handleEmptyAreaClick">
+                <div
+                  v-if="floatingFocusMarkerVisible"
+                  class="floating-focus-marker"
+                  :class="{
+                    'is-point': focusRuntime.isPointAnchor.value,
+                    'is-success': focusRuntime.currentLayer.value === 'result',
+                    'is-error': focusRuntime.currentLayer.value === 'issue',
+                  }"
+                  :style="floatingFocusMarkerStyle"
+                />
+                <div
+                  v-if="focusBannerVisible"
+                  class="focus-range-marker"
+                  :class="{
+                    'is-success': focusRuntime.status.value === 'success',
+                    'is-error': focusRuntime.status.value === 'error',
+                  }"
+                  :style="focusMarkerStyle"
+                />
+                <div
+                  v-for="conflict in overlapConflictMarkers"
+                  :key="conflict.id"
+                  class="conflict-range-marker"
+                  :style="{ top: `${conflict.top}px` }"
+                  @click.stop="handleFocusConflict(conflict)"
+                />
                 <div v-if="displayItems.length === 0" class="empty-state">
                   <el-empty description="暂无节目安排">
                     <el-button
@@ -217,13 +282,19 @@
                   v-for="(item, index) in displayItems"
                   :key="item.id"
                   class="schedule-item-row"
+                  :ref="(element) => registerItemRowRef(item.id, element)"
+                  :data-item-id="item.id"
                   :class="{
                     'is-program': item.businessType === 'program',
                     'is-ad': item.businessType === 'ad',
                     'is-promo': item.businessType === 'promo',
                     'is-reference': item.isReference,
                     'is-unlinked': item.isUnlinkedProduct || shouldWarnEmptyMaterialFields(item),
-                    'is-section-disabled': !canEditSection(item) && !item.isReference
+                    'is-section-disabled': !canEditSection(item) && !item.isReference,
+                    'is-focus-active': isFocusActive(item.id),
+                    'is-focus-recent': isFocusRecent(item.id),
+                    'is-focus-error': isFocusError(item.id),
+                    'is-time-conflict': isTimeConflictItem(item.id),
                   }"
                   @click="handleItemClick(item)"
                 >
@@ -399,7 +470,10 @@
             @schedule-updated="handleChatScheduleUpdated"
             @orchestrate-requested="handleChatOrchestrateRequested"
             @cancel-requested="handleCancelOrchestration"
+            @focus-requested="handleChatFocusRequested"
+            @layout-draft-updated="handleChatLayoutDraftUpdated"
           />
+          <OpenClawDemoPanel :adapter="openClawHostAdapter" />
         </div>
       </div>
     </div>
@@ -426,7 +500,7 @@ defineOptions({
   name: 'BroadcastPlanCreate',
 })
 
-import { ref, computed, onMounted, nextTick, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, nextTick, watch, onBeforeUnmount, type CSSProperties } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft,
@@ -475,6 +549,16 @@ import {
 } from './broadcastPlanViewState'
 import { useBroadcastPlanEditor } from './useBroadcastPlanEditor'
 import { useBroadcastPlanOrchestration } from './useBroadcastPlanOrchestration'
+import { useBroadcastPlanFocus, type FocusAnchor } from './useBroadcastPlanFocus'
+
+type OverlapConflict = {
+  id: string
+  message: string
+  primaryItemId: string
+  secondaryItemId: string
+  startTime: string
+  endTime: string
+}
 
 // AI 编排相关导入
 import { getAtomicCapabilities } from '@/services/atomicCapabilities'
@@ -482,8 +566,12 @@ import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
 import { getManualCommandAdapter } from '@/services/manualCommandAdapter'
 import { getCandidateService } from '@/services/candidateService'
 import { getDataService } from '@/services/orchestration/dataService'
+import { getOpenClawHostAdapter } from '@/services/openclaw/openClawHostAdapter'
 import type { GapProcessingStatus } from '@/types/orchestration'
+import type { LayoutDraft, ValidationReport, ValidationIssue } from '@/types/orchestration'
 import ChatPanel from '@/components/dialogue/ChatPanel.vue'
+import OpenClawDemoPanel from './components/OpenClawDemoPanel.vue'
+import { getScheduleValidationService } from '@/services/scheduleValidationService'
 
 const route = useRoute()
 const router = useRouter()
@@ -607,18 +695,328 @@ const fillLiveStudios = () => {
   })
 }
 
+const FOCUS_ROW_HEIGHT = 42
+
+const focusRuntime = useBroadcastPlanFocus()
+const timelineBodyRef = ref<HTMLElement | null>(null)
 const timelineContentRef = ref<HTMLElement | null>(null)
+const scheduleItemsWrapperRef = ref<HTMLElement | null>(null)
 const scrollTrackRef = ref<HTMLElement | null>(null)
 const contentScrollWidth = ref(0)
 const contentClientWidth = ref(0)
 let isSyncingScroll = false
 let resizeRaf = 0
+let focusScrollResetTimer = 0
+let isProgrammaticTimelineScroll = false
+let lastTimelineScrollTop = 0
+const itemRowRefs = new Map<string, HTMLElement>()
+const itemRowRefVersion = ref(0)
+
+const setProgrammaticTimelineScroll = () => {
+  isProgrammaticTimelineScroll = true
+  if (focusScrollResetTimer) {
+    window.clearTimeout(focusScrollResetTimer)
+  }
+  focusScrollResetTimer = window.setTimeout(() => {
+    isProgrammaticTimelineScroll = false
+    focusScrollResetTimer = 0
+  }, 320)
+}
+
+const registerItemRowRef = (itemId: string, element: Element | { $el?: Element } | null) => {
+  const resolvedElement = element instanceof HTMLElement
+    ? element
+    : element && '$el' in element && element.$el instanceof HTMLElement
+      ? element.$el
+      : null
+
+  if (resolvedElement) {
+    itemRowRefs.set(itemId, resolvedElement)
+    itemRowRefVersion.value += 1
+    return
+  }
+  if (itemRowRefs.delete(itemId)) {
+    itemRowRefVersion.value += 1
+  }
+}
+
+const scrollTimelineTo = (top: number) => {
+  if (!timelineContentRef.value) return
+  setProgrammaticTimelineScroll()
+  timelineContentRef.value.scrollTo({
+    top: Math.max(0, top),
+    behavior: 'smooth',
+  })
+}
+
+const scrollToItemRow = (itemId: string): boolean => {
+  const row = itemRowRefs.get(itemId)
+  const container = timelineContentRef.value
+  if (!row || !container) return false
+  scrollTimelineTo(row.offsetTop - container.clientHeight * 0.3)
+  return true
+}
+
+const findFocusInsertionIndex = (startTime: string) => {
+  const targetSeconds = timeToSeconds(startTime)
+  const foundIndex = displayItems.value.findIndex((item) => timeToSeconds(item.startTime) >= targetSeconds)
+  return foundIndex === -1 ? displayItems.value.length : foundIndex
+}
+
+const scrollToTimeRange = (startTime: string) => {
+  const container = timelineContentRef.value
+  if (!container) return false
+  const index = findFocusInsertionIndex(startTime)
+  scrollTimelineTo(index * FOCUS_ROW_HEIGHT - container.clientHeight * 0.3)
+  return true
+}
+
+const focusBannerVisible = computed(() => {
+  void itemRowRefVersion.value
+  const activeTarget = focusRuntime.active.value
+  if (!activeTarget) return false
+  if (!focusRuntime.showSummary.value || focusRuntime.isPointAnchor.value) return false
+  if (activeTarget.type === 'item') return false
+  if (focusOverlapItemIds.value.size > 0) return false
+  return true
+})
+
+const focusOverlapItemIds = computed(() => {
+  const activeTarget = focusRuntime.active.value
+  if (!activeTarget) return new Set<string>()
+
+  const activeStart = timeToSeconds(activeTarget.startTime)
+  const activeEnd = timeToSeconds(activeTarget.endTime)
+  if (activeStart === null || activeEnd === null) return new Set<string>()
+
+  return new Set(
+    displayItems.value
+      .filter((item) => {
+        const itemStart = timeToSeconds(item.startTime)
+        const itemEnd = timeToSeconds(item.endTime)
+        if (itemStart === null || itemEnd === null) return false
+        if (activeStart === activeEnd) {
+          return (itemStart <= activeStart && itemEnd > activeStart) || itemStart === activeStart
+        }
+        return itemStart < activeEnd && itemEnd > activeStart
+      })
+      .map((item) => item.id),
+  )
+})
+
+const focusMarkerStyle = computed<CSSProperties>(() => {
+  const activeTarget = focusRuntime.active.value
+  if (!activeTarget) return {}
+  const index = findFocusInsertionIndex(activeTarget.startTime)
+  return {
+    top: `${Math.max(0, index * FOCUS_ROW_HEIGHT + 2)}px`,
+    height: `${FOCUS_ROW_HEIGHT - 4}px`,
+  }
+})
+
+const floatingFocusMarkerVisible = computed(() => {
+  void itemRowRefVersion.value
+  const activeTarget = focusRuntime.active.value
+  const currentLayer = focusRuntime.currentLayer.value
+  if (!activeTarget || !currentLayer) return false
+  if (focusRuntime.showSummary.value) return false
+  if (activeTarget.type === 'item' && itemRowRefs.has(activeTarget.itemId)) return false
+  if (focusOverlapItemIds.value.size > 0) return false
+  return true
+})
+
+const floatingFocusMarkerStyle = computed<CSSProperties>(() => {
+  const activeTarget = focusRuntime.active.value
+  if (!activeTarget) return {}
+  const index = findFocusInsertionIndex(activeTarget.startTime)
+  return {
+    top: `${Math.max(0, index * FOCUS_ROW_HEIGHT + 2)}px`,
+    height: `${FOCUS_ROW_HEIGHT - 4}px`,
+  }
+})
+
+const overlapConflicts = computed<OverlapConflict[]>(() => {
+  const issues = currentValidationReport.value?.issues ?? []
+  return issues
+    .filter((issue): issue is ValidationIssue => issue.type === 'overlap')
+    .map((issue) => {
+      const relatedItemIds = issue.location.relatedItemIds ?? []
+      const [primaryItemId = issue.location.itemId || '', secondaryItemId = ''] = relatedItemIds
+      return {
+        id: issue.id,
+        message: issue.message,
+        primaryItemId,
+        secondaryItemId,
+        startTime: normalizeClockText(issue.location.timeRange?.start || ''),
+        endTime: normalizeClockText(issue.location.timeRange?.end || ''),
+      }
+    })
+    .filter((conflict) => Boolean(conflict.primaryItemId && conflict.secondaryItemId && conflict.startTime && conflict.endTime))
+})
+
+const overlapConflictItemIds = computed(() =>
+  new Set(overlapConflicts.value.flatMap((conflict) => [conflict.primaryItemId, conflict.secondaryItemId])),
+)
+
+const overlapConflictMarkers = computed(() => {
+  void itemRowRefVersion.value
+  return overlapConflicts.value
+    .map((conflict) => {
+      const secondaryRow = itemRowRefs.get(conflict.secondaryItemId)
+      if (!secondaryRow) return null
+      return {
+        ...conflict,
+        top: Math.max(0, secondaryRow.offsetTop - 10),
+      }
+    })
+    .filter((conflict): conflict is OverlapConflict & { top: number } => Boolean(conflict))
+})
+
+const isFocusActive = (itemId: string) =>
+  Boolean(
+    focusRuntime.currentLayer.value
+    && focusRuntime.currentLayer.value !== 'result'
+    && focusRuntime.status.value === 'active'
+    && (
+      focusRuntime.isActiveItem(itemId)
+      || focusOverlapItemIds.value.has(itemId)
+    ),
+  )
+
+const isFocusRecent = (itemId: string) =>
+  focusRuntime.isRecentItem(itemId)
+  || (focusRuntime.currentLayer.value === 'result' && focusOverlapItemIds.value.has(itemId))
+
+const isFocusError = (itemId: string) => {
+  const activeTarget = focusRuntime.active.value
+  return Boolean(
+    focusRuntime.status.value === 'error'
+      && (
+        (activeTarget?.type === 'item' && activeTarget.itemId === itemId)
+        || focusOverlapItemIds.value.has(itemId)
+      ),
+  )
+}
+
+const isTimeConflictItem = (itemId: string) => overlapConflictItemIds.value.has(itemId)
+
+const handleLocateActiveFocus = async () => {
+  if (!focusRuntime.enabled.value || !focusRuntime.active.value) return
+  await nextTick()
+  const activeTarget = focusRuntime.active.value
+  if (!activeTarget) return
+  if (activeTarget.type === 'item' && scrollToItemRow(activeTarget.itemId)) return
+  scrollToTimeRange(activeTarget.startTime)
+}
+
+const handleResumeFocusFollow = async () => {
+  focusRuntime.resumeAutoFollow()
+  await handleLocateActiveFocus()
+}
+
+const handleFocusGapEntry = async (gap: GapEntry) => {
+  focusRuntime.focusAnchor(
+    gap.source === 'runtime'
+      ? {
+          type: 'gap',
+          gapId: gap.id,
+          startTime: gap.from,
+          endTime: gap.to,
+        }
+      : {
+          type: 'range',
+          startTime: gap.from,
+          endTime: gap.to,
+        },
+    gap.status === 'failed' ? 'error' : 'active',
+    gap.error,
+    gap.status === 'failed' ? 'issue' : 'process',
+  )
+  await handleLocateActiveFocus()
+}
+
+const handleChatFocusRequested = async (payload: {
+  type: 'item' | 'gap' | 'range'
+  itemId?: string
+  gapId?: string
+  startTime: string
+  endTime: string
+  layer?: 'intent' | 'process' | 'issue' | 'result'
+  status?: 'active' | 'success' | 'error'
+  error?: string
+}) => {
+  const normalizedStartTime = normalizeClockText(payload.startTime)
+  const normalizedEndTime = normalizeClockText(payload.endTime)
+  const anchor: FocusAnchor = payload.type === 'item' && payload.itemId
+    ? {
+      type: 'item',
+      itemId: payload.itemId,
+      startTime: normalizedStartTime,
+      endTime: normalizedEndTime,
+    }
+    : payload.type === 'gap' && payload.gapId
+      ? {
+      type: 'gap',
+      gapId: payload.gapId,
+      startTime: normalizedStartTime,
+      endTime: normalizedEndTime,
+      }
+      : {
+      type: 'range',
+      startTime: normalizedStartTime,
+      endTime: normalizedEndTime,
+      }
+
+  const layer = payload.layer ?? (payload.status === 'error' ? 'issue' : 'intent')
+  if (layer === 'process') {
+    focusRuntime.focusProcess(anchor, payload.status === 'success' ? 'success' : 'active')
+  } else if (layer === 'issue') {
+    focusRuntime.focusIssue(anchor, payload.error)
+  } else if (layer === 'result') {
+    focusRuntime.showResult(anchor)
+  } else {
+    focusRuntime.focusIntent(anchor)
+  }
+
+  await handleLocateActiveFocus()
+}
+
+const handleChatLayoutDraftUpdated = (payload: {
+  draft: LayoutDraft | null
+}) => {
+  if (payload.draft) {
+    showLayoutReference.value = false
+  }
+}
+
+const handleDeleteExecuted = (payload: {
+  deletedItem: { id: string; programName: string; startTime: string; endTime: string }
+  affectedTimeRange?: { start: string; end: string }
+}) => {
+  void payload
+  focusRuntime.clearDeletedEcho()
+  focusRuntime.clearActive()
+}
+
+const handleFocusConflict = async (conflict: OverlapConflict) => {
+  focusRuntime.focusIssue({
+    type: 'range',
+    startTime: conflict.startTime,
+    endTime: conflict.endTime,
+  }, conflict.message)
+  await handleLocateActiveFocus()
+}
+
+const refreshValidationReport = () => {
+  currentValidationReport.value = validationService.validateCurrentSchedule(scheduleDate.value, currentChannelId.value)
+}
 
 const updateScrollMetrics = () => {
   nextTick(() => {
     if (!timelineContentRef.value) return
     contentScrollWidth.value = timelineContentRef.value.scrollWidth
     contentClientWidth.value = timelineContentRef.value.clientWidth
+    lastTimelineScrollTop = timelineContentRef.value.scrollTop
     if (scrollTrackRef.value) {
       scrollTrackRef.value.scrollLeft = timelineContentRef.value.scrollLeft
     }
@@ -628,10 +1026,21 @@ const updateScrollMetrics = () => {
 const handleTimelineContentScroll = (event: Event) => {
   if (isSyncingScroll) return
   const target = event.target as HTMLElement
+  const verticalChanged = target.scrollTop !== lastTimelineScrollTop
+  lastTimelineScrollTop = target.scrollTop
+  if (target === timelineContentRef.value && verticalChanged && !isProgrammaticTimelineScroll) {
+    focusRuntime.pauseAutoFollow()
+  }
   if (!scrollTrackRef.value || scrollTrackRef.value === target) return
   isSyncingScroll = true
   scrollTrackRef.value.scrollLeft = target.scrollLeft
   isSyncingScroll = false
+}
+
+const handleTimelineAreaClick = () => {
+  focusRuntime.pauseAutoFollow()
+  focusRuntime.clearDeletedEcho()
+  focusRuntime.clearActive()
 }
 
 const handleResize = () => {
@@ -658,14 +1067,14 @@ const showLayoutReference = ref(false)
 
 // AI 编排相关状态
 const aiSidebarVisible = ref(true)
-const aiUserInput = ref('')
-
 const atomicCapabilities = getAtomicCapabilities()
 const scheduleCommandBus = getScheduleCommandBus()
 const manualCommandAdapter = getManualCommandAdapter()
 const candidateService = getCandidateService()
 const dataService = getDataService()
+const validationService = getScheduleValidationService()
 let syncAtomicItemsRaf = 0
+const currentValidationReport = ref<ValidationReport | null>(null)
 
 const currentBroadcastWindow = ref({
   startTime: '06:00:00',
@@ -729,9 +1138,11 @@ const referenceItems = computed<ScheduleItem[]>(() => {
 })
 
 // 显示的项目（实际编排或版面参考）
-const displayItems = computed<ScheduleItem[]>(() =>
-  selectDisplayItems(showLayoutReference.value, referenceItems.value, sortedItems.value),
-)
+const displayItems = computed<ScheduleItem[]>(() => {
+  return selectDisplayItems(showLayoutReference.value, referenceItems.value, sortedItems.value)
+})
+
+const displayItemUnitLabel = computed(() => '个节目')
 
 const unlinkedItemCount = computed(() => countUnlinkedItems(scheduleItems.value))
 
@@ -783,7 +1194,10 @@ const resolveManualCandidateId = async (item: Partial<ScheduleItem>): Promise<st
 }
 
 const timeDiscontinuities = computed<TimeDiscontinuity[]>(() => {
-  return buildTimeDiscontinuities(sortedItems.value, timeToSeconds)
+  return buildTimeDiscontinuities(sortedItems.value, timeToSeconds, {
+    startTime: currentBroadcastWindow.value.startTime,
+    endTime: currentBroadcastWindow.value.endTime,
+  })
 })
 
 const runtimeGapEntries = computed<GapEntry[]>(() => {
@@ -804,7 +1218,6 @@ const {
   handleChatOrchestrateRequested,
   handleChatScheduleUpdated,
 } = useBroadcastPlanOrchestration({
-  aiUserInput,
   currentChannelId,
   currentChannelName,
   scheduleDate,
@@ -813,6 +1226,29 @@ const {
   syncPageItemsToAtomic,
   syncAtomicItemsToPage,
   syncAtomicItemsToPageDeferred,
+  focusRuntime,
+  normalizeClockText,
+})
+
+const openClawHostAdapter = getOpenClawHostAdapter({
+  getContext: () => ({
+    channelId: currentChannelId.value,
+    channelName: currentChannelName.value,
+    date: scheduleDate.value,
+    currentSchedule: chatScheduleItems.value,
+    gapCount: displayGapCount.value,
+  }),
+  onOrchestrationRequest: handleChatOrchestrateRequested,
+  getOrchestrationSnapshot: () => ({
+    channelId: currentChannelId.value,
+    channelName: currentChannelName.value,
+    date: scheduleDate.value,
+    status: orchestratorRuntime.status.value,
+    isRunning: orchestratorRuntime.isRunning.value,
+    sessionId: orchestratorRuntime.session.value?.id,
+    latestLog: orchestratorRuntime.logs.value.at(-1)?.message,
+    progress: orchestratorRuntime.progress.value as Record<string, unknown> | null,
+  }),
 })
 
 const getGapEntryStatusText = (status: GapProcessingStatus) => {
@@ -847,7 +1283,7 @@ const {
   gapDialogDefaults,
   openAddItemForGap,
   handleAddItem,
-  handleItemClick,
+  handleItemClick: handleEditorItemClick,
   handleEmptyAreaClick,
   handleDeleteItemById,
   handleSaveItem,
@@ -869,7 +1305,13 @@ const {
   timeToSeconds,
   scheduleCommandBus,
   manualCommandAdapter,
+  onDeleteExecuted: handleDeleteExecuted,
 })
+
+const handleItemClick = (item: ScheduleItem) => {
+  focusRuntime.pauseAutoFollow()
+  handleEditorItemClick(item)
+}
 
 // 最大排序号
 const maxSortOrder = computed(() => {
@@ -879,7 +1321,9 @@ const maxSortOrder = computed(() => {
 
 // 总时长文本
 const totalDurationText = computed(() => {
-  const items = showLayoutReference.value ? referenceItems.value : scheduleItems.value
+  const items = showLayoutReference.value
+    ? referenceItems.value
+    : scheduleItems.value
   const total = items.reduce((sum, item) => sum + (item.duration || 0), 0)
   const hours = Math.floor(total / 60)
   const minutes = total % 60
@@ -1021,8 +1465,20 @@ onMounted(async () => {
 
   window.addEventListener('resize', handleResize, { passive: true })
   syncPageItemsToAtomic()
+  refreshValidationReport()
   await syncCurrentBroadcastWindow()
   updateScrollMetrics()
+  openClawHostAdapter.install()
+  openClawHostAdapter.publishOrchestrationState({
+    channelId: currentChannelId.value,
+    channelName: currentChannelName.value,
+    date: scheduleDate.value,
+    status: orchestratorRuntime.status.value,
+    isRunning: orchestratorRuntime.isRunning.value,
+    sessionId: orchestratorRuntime.session.value?.id,
+    latestLog: orchestratorRuntime.logs.value.at(-1)?.message,
+    progress: orchestratorRuntime.progress.value as Record<string, unknown> | null,
+  })
 })
 
 watch(
@@ -1042,11 +1498,63 @@ watch(
 )
 
 watch(
+  () => ({
+    locateVersion: focusRuntime.locateVersion.value,
+    autoFollow: focusRuntime.autoFollow.value,
+    activeType: focusRuntime.active.value?.type || '',
+    activeId: focusRuntime.active.value?.type === 'item'
+      ? focusRuntime.active.value.itemId
+      : focusRuntime.active.value?.type === 'gap'
+        ? focusRuntime.active.value.gapId
+        : `${focusRuntime.active.value?.startTime || ''}-${focusRuntime.active.value?.endTime || ''}`,
+    displaySignature: displayItems.value.map((item) => item.id).join('|'),
+  }),
+  async (snapshot) => {
+    if (!snapshot.autoFollow || !snapshot.activeType) return
+    await handleLocateActiveFocus()
+  },
+)
+
+watch(
   () => scheduleItems.value,
   () => {
     if (!orchestratorRuntime.isRunning.value) {
       syncPageItemsToAtomic()
     }
+    refreshValidationReport()
+  },
+  { deep: true },
+)
+
+watch(
+  () => [currentChannelId.value, scheduleDate.value],
+  () => {
+    refreshValidationReport()
+  },
+)
+
+watch(
+  () => ({
+    channelId: currentChannelId.value,
+    channelName: currentChannelName.value,
+    date: scheduleDate.value,
+    status: orchestratorRuntime.status.value,
+    isRunning: orchestratorRuntime.isRunning.value,
+    sessionId: orchestratorRuntime.session.value?.id || '',
+    latestLog: orchestratorRuntime.logs.value.at(-1)?.message || '',
+    progress: orchestratorRuntime.progress.value,
+  }),
+  (snapshot) => {
+    openClawHostAdapter.publishOrchestrationState({
+      channelId: snapshot.channelId,
+      channelName: snapshot.channelName,
+      date: snapshot.date,
+      status: snapshot.status,
+      isRunning: snapshot.isRunning,
+      sessionId: snapshot.sessionId || undefined,
+      latestLog: snapshot.latestLog || undefined,
+      progress: snapshot.progress as Record<string, unknown> | null,
+    })
   },
   { deep: true },
 )
@@ -1054,6 +1562,11 @@ watch(
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
   if (resizeRaf) cancelAnimationFrame(resizeRaf)
+  if (focusScrollResetTimer) {
+    window.clearTimeout(focusScrollResetTimer)
+  }
+  focusRuntime.dispose()
+  openClawHostAdapter.dispose()
 })
 </script>
 
@@ -1214,6 +1727,14 @@ onBeforeUnmount(() => {
     gap: var(--xnews-spacing-3);
   }
 
+  .continuity-item.is-clickable {
+    cursor: pointer;
+  }
+
+  .continuity-item.is-clickable:hover .continuity-text {
+    color: #9a3412;
+  }
+
   .continuity-text {
     flex: 1;
     min-width: 0;
@@ -1315,6 +1836,7 @@ onBeforeUnmount(() => {
 .schedule-items-wrapper {
   flex: 1;
   min-width: 2200px;
+  position: relative;
 
   .empty-state {
     height: 400px;
@@ -1745,6 +2267,11 @@ onBeforeUnmount(() => {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+
+    :deep(.chat-panel) {
+      flex: 1;
+      min-height: 0;
+    }
   }
 }
 
@@ -2098,6 +2625,7 @@ onBeforeUnmount(() => {
 }
 
 .schedule-item-row {
+  position: relative;
   height: 42px;
 }
 
@@ -2135,6 +2663,36 @@ onBeforeUnmount(() => {
   box-shadow: inset 4px 0 0 0 rgba(220, 38, 38, 0.75);
 }
 
+.schedule-item-row.is-focus-active,
+.schedule-item-row.is-focus-recent,
+.schedule-item-row.is-focus-error {
+  animation: none;
+  box-shadow: none;
+}
+
+.schedule-item-row.is-focus-active::after,
+.schedule-item-row.is-focus-recent::after,
+.schedule-item-row.is-focus-error::after {
+  content: '';
+  position: absolute;
+  inset: 2px 6px;
+  border-radius: 8px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.schedule-item-row.is-focus-active::after {
+  border: 2px dashed rgba(245, 158, 11, 0.95);
+}
+
+.schedule-item-row.is-focus-recent::after {
+  border: 2px dashed rgba(22, 163, 74, 0.9);
+}
+
+.schedule-item-row.is-focus-error::after {
+  border: 2px dashed rgba(220, 38, 38, 0.95);
+}
+
 .schedule-item-row .index-cell,
 .schedule-item-row .start-time-cell,
 .schedule-item-row .end-time-cell {
@@ -2155,6 +2713,70 @@ onBeforeUnmount(() => {
 .schedule-item-row:hover .episode-name,
 .schedule-item-row:hover .time-text {
   color: #9a3412;
+}
+
+.focus-range-marker,
+.floating-focus-marker {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  z-index: 4;
+  border-radius: 8px;
+  border: 2px dashed rgba(245, 158, 11, 0.92);
+  background: transparent;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.focus-range-marker.is-success,
+.floating-focus-marker.is-success {
+  border-color: rgba(22, 163, 74, 0.92);
+}
+
+.focus-range-marker.is-error,
+.floating-focus-marker.is-error {
+  border-color: rgba(220, 38, 38, 0.92);
+}
+
+.deleted-echo-marker,
+.conflict-range-marker {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+}
+
+.deleted-echo-marker {
+  border-top: 1px dashed rgba(220, 38, 38, 0.52);
+  border-bottom: 1px dashed rgba(220, 38, 38, 0.52);
+  background: linear-gradient(90deg, rgba(254, 242, 242, 0.92), rgba(255, 255, 255, 0.82));
+  pointer-events: none;
+}
+
+.conflict-range-marker {
+  cursor: pointer;
+  left: 6px;
+  right: 6px;
+  z-index: 4;
+  height: 38px;
+  border-radius: 8px;
+  border: 2px dashed rgba(220, 38, 38, 0.92);
+  background: transparent;
+  box-sizing: border-box;
+}
+
+.schedule-item-row.is-time-conflict {
+  background-color: rgba(254, 226, 226, 0.68);
+  box-shadow: inset 4px 0 0 0 rgba(220, 38, 38, 0.7);
+}
+
+.schedule-item-row.is-time-conflict:hover {
+  background-color: rgba(254, 202, 202, 0.78);
 }
 
 .ai-orchestration-btn {

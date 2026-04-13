@@ -9,6 +9,9 @@ export interface InsertExecutionResult {
   message: string
   error?: string
   validationReport?: ValidationReport
+  data?: unknown
+  affectedItems?: string[]
+  affectedTimeRanges?: { start: string; end: string }[]
 }
 
 export class InsertCommandExecutor {
@@ -98,6 +101,9 @@ export class InsertCommandExecutor {
         success: true,
         message: `已插入节目 ${candidate.programName}，但校验发现 ${validationReport.summary.totalIssues} 个问题`,
         validationReport,
+        data: materializeResult.items,
+        affectedItems: materializeResult.items.map((item) => item.id),
+        affectedTimeRanges: materializeResult.items.map((item) => ({ start: item.startTime, end: item.endTime })),
       }
     }
 
@@ -105,6 +111,9 @@ export class InsertCommandExecutor {
       success: true,
       message: `已在 ${insertTime} 插入节目 ${candidate.programName}`,
       validationReport,
+      data: materializeResult.items,
+      affectedItems: materializeResult.items.map((item) => item.id),
+      affectedTimeRanges: materializeResult.items.map((item) => ({ start: item.startTime, end: item.endTime })),
     }
   }
 

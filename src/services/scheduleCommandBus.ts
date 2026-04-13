@@ -13,6 +13,9 @@ export interface CommandBusResult {
   success: boolean
   message: string
   validationReport?: ValidationReport
+  data?: unknown
+  affectedItems?: string[]
+  affectedTimeRanges?: { start: string; end: string }[]
   error?: string
 }
 
@@ -36,6 +39,9 @@ export class ScheduleCommandBus {
       success: result.success,
       message: result.message,
       error: result.error,
+      data: result.data,
+      affectedItems: result.affectedItems,
+      affectedTimeRanges: result.affectedTimeRanges,
       validationReport,
     }
   }

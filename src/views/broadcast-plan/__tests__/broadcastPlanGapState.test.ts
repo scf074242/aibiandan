@@ -42,6 +42,75 @@ describe('broadcastPlanGapState', () => {
     ])
   })
 
+  it('会把播出开始前和结束后的空档也识别为空窗', () => {
+    const gaps = buildTimeDiscontinuities([
+      {
+        id: 'item-1',
+        startTime: '06:15:00',
+        endTime: '06:30:00',
+        sortOrder: 1,
+      },
+      {
+        id: 'item-2',
+        startTime: '06:45:00',
+        endTime: '07:00:00',
+        sortOrder: 2,
+      },
+    ], timeToSeconds, {
+      startTime: '06:00:00',
+      endTime: '07:30:00',
+    })
+
+    expect(gaps).toEqual([
+      {
+        id: 'broadcast-start-item-1',
+        from: '06:00:00',
+        to: '06:15:00',
+        prevId: '',
+        nextId: 'item-1',
+        prevSortOrder: 0,
+        nextSortOrder: 1,
+      },
+      {
+        id: 'item-1-item-2',
+        from: '06:30:00',
+        to: '06:45:00',
+        prevId: 'item-1',
+        nextId: 'item-2',
+        prevSortOrder: 1,
+        nextSortOrder: 2,
+      },
+      {
+        id: 'item-2-broadcast-end',
+        from: '07:00:00',
+        to: '07:30:00',
+        prevId: 'item-2',
+        nextId: '',
+        prevSortOrder: 2,
+        nextSortOrder: 3,
+      },
+    ])
+  })
+
+  it('在没有任何节目时会把整个播出时段识别为空窗', () => {
+    const gaps = buildTimeDiscontinuities([], timeToSeconds, {
+      startTime: '06:00:00',
+      endTime: '23:59:59',
+    })
+
+    expect(gaps).toEqual([
+      {
+        id: 'broadcast-start-broadcast-end',
+        from: '06:00:00',
+        to: '23:59:59',
+        prevId: '',
+        nextId: '',
+        prevSortOrder: 0,
+        nextSortOrder: 1,
+      },
+    ])
+  })
+
   it('会忽略重叠和连续时段', () => {
     const gaps = buildTimeDiscontinuities([
       {

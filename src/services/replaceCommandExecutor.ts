@@ -8,6 +8,9 @@ export interface ReplaceExecutionResult {
   message: string
   error?: string
   validationReport?: ValidationReport
+  data?: unknown
+  affectedItems?: string[]
+  affectedTimeRanges?: { start: string; end: string }[]
 }
 
 export interface ReplacePreviewResult {
@@ -113,6 +116,9 @@ export class ReplaceCommandExecutor {
       success: true,
       message: `已替换节目为 ${candidate.programName}`,
       validationReport,
+      data: result.data,
+      affectedItems: result.affectedItems,
+      affectedTimeRanges: result.affectedTimeRanges,
     }
   }
 

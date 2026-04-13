@@ -44,6 +44,7 @@ export class QueryIntentService {
           : columnInstances.length > 0
             ? Array.from(new Set(columnPrograms.map((program) => program.programType)))
             : gap.constraints.allowedTypes,
+      searchKeywords: thought.searchKeywords,
       excludeUsed: true,
     }
   }

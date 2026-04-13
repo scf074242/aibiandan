@@ -36,11 +36,23 @@ export interface TokenUsageStats {
   requestCount: number
 }
 
+export interface LLMRequestTrace {
+  label: string
+  attemptCount: number
+  durationMs: number
+  timeoutMs: number
+  success: boolean
+  error?: string
+  startedAt: string
+}
+
 // 聊天选项
 export interface ChatOptions {
   temperature?: number
   maxTokens?: number
   timeout?: number
+  maxRetries?: number
+  traceLabel?: string
 }
 
 // Command 类型

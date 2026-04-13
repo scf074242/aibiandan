@@ -8,6 +8,7 @@ import type {
   ChatMessage,
   LLMResponse,
   ChatOptions,
+  LLMRequestTrace,
   TokenUsageStats,
 } from '@/types/llm'
 import { loadLLMConfig, validateLLMConfig } from './llmConfig'
@@ -21,6 +22,7 @@ export class LLMClient {
     totalTokens: 0,
     requestCount: 0,
   }
+  private recentRequestTraces: LLMRequestTrace[] = []
 
   constructor(config?: Partial<LLMConfig>) {
     this.config = config ? { ...loadLLMConfig(), ...config } : loadLLMConfig()

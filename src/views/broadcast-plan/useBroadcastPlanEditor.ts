@@ -11,6 +11,7 @@ import {
 import type { GapDialogDefaults } from './broadcastPlanEditorHelpers'
 import type { ManualCommandAdapter } from '@/services/manualCommandAdapter'
 import type { ScheduleCommandBus } from '@/services/scheduleCommandBus'
+import type { ScheduleItemSnapshot } from '@/types/orchestration'
 
 type UseBroadcastPlanEditorOptions = {
   isViewMode: { value: boolean }
@@ -30,6 +31,10 @@ type UseBroadcastPlanEditorOptions = {
   timeToSeconds: (time: string) => number
   scheduleCommandBus: ScheduleCommandBus
   manualCommandAdapter: ManualCommandAdapter
+  onDeleteExecuted?: (payload: {
+    deletedItem: ScheduleItemSnapshot
+    affectedTimeRange?: { start: string; end: string }
+  }) => void
 }
 
 export const useBroadcastPlanEditor = (options: UseBroadcastPlanEditorOptions) => {
@@ -117,6 +122,15 @@ export const useBroadcastPlanEditor = (options: UseBroadcastPlanEditorOptions) =
 
     options.syncAtomicItemsToPage()
     gapDialogDefaults.value = null
+    const deletedItem = result.data && typeof result.data === 'object' && 'deletedItem' in result.data
+      ? (result.data.deletedItem as ScheduleItemSnapshot | undefined)
+      : undefined
+    if (deletedItem) {
+      options.onDeleteExecuted?.({
+        deletedItem,
+        affectedTimeRange: result.affectedTimeRanges?.[0],
+      })
+    }
     ElMessage.success(result.message)
   }
 

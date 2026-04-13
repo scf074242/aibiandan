@@ -56,10 +56,48 @@ export class OrchestrationStrategyService {
         min: Math.max(60, Math.floor(gap.duration * 0.5)),
         max: gap.duration,
       },
-      searchKeywords: [],
+      searchKeywords: this.buildSearchKeywords(column?.queryHints, column?.semanticLabel ?? column?.columnName, inferredTypes),
       allowFiller: strategy.allowFiller,
       sequentialPreference: strategy.sequentialPreference,
     }
+  }
+
+  private buildSearchKeywords(
+    queryHints: string[] | undefined,
+    slotLabel: string | undefined,
+    inferredTypes: string[],
+  ): string[] {
+    const typeFallbackMap: Record<string, string[]> = {
+      drama: ['电视剧', '剧场'],
+      news: ['新闻'],
+      news_magazine: ['资讯', '栏目'],
+      commentary: ['评论', '观察'],
+      health: ['健康', '养生'],
+      entertainment: ['娱乐', '综艺'],
+      kids: ['少儿', '动画'],
+      documentary: ['纪录片', '纪实'],
+    }
+
+    const keywords = new Set<string>()
+    ;(queryHints ?? []).forEach((keyword) => {
+      const normalized = keyword.trim()
+      if (normalized) {
+        keywords.add(normalized)
+      }
+    })
+
+    const normalizedLabel = slotLabel?.trim()
+    if (normalizedLabel) {
+      keywords.add(normalizedLabel)
+    }
+
+    inferredTypes.forEach((type) => {
+      for (const keyword of typeFallbackMap[type] ?? []) {
+        keywords.add(keyword)
+      }
+    })
+
+    return Array.from(keywords)
   }
 
   private findLayoutMatch(gap: GapInfo, context: GenerationContext) {

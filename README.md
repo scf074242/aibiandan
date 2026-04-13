@@ -108,3 +108,8 @@ cmd /c node_modules\.bin\eslint.cmd . --cache
 3. [docs/module-map.md](/C:/Users/sucongfei/Documents/trae_projects/bigbiandan2/docs/module-map.md)
 4. [docs/tech-debt.md](/C:/Users/sucongfei/Documents/trae_projects/bigbiandan2/docs/tech-debt.md)
 5. [docs/testing-baseline.md](/C:/Users/sucongfei/Documents/trae_projects/bigbiandan2/docs/testing-baseline.md)
+
+## 新增文档
+
+- [docs/layout-draft-workflow.md](/C:/Users/sucongfei/Documents/trae_projects/bigbiandan2/docs/layout-draft-workflow.md)
+  自然语言版面草案、草案微调、开始编排的完整工作流说明

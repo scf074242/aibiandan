@@ -181,6 +181,7 @@ export class ValidationEngine {
           `节目“${current.programName}”与“${next.programName}”发生重叠`,
           {
             itemId: current.id,
+            relatedItemIds: [current.id, next.id],
             timeRange: { start: next.startTime, end: current.endTime },
           },
           '请调整节目时间，消除重叠。',

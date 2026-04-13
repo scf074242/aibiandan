@@ -42,7 +42,53 @@ describe('CandidateService', () => {
     await getAtomicCapabilities().clearAll()
   })
 
-  it('顺播栏目优先推荐下一集/期', async () => {
+  it('queryCandidates 会优先按 searchKeywords 命中候选节目', async () => {
+    const service = getCandidateService()
+    const result = await service.queryCandidates(
+      createGap({
+        startTime: iso('07:00:00'),
+        endTime: iso('08:00:00'),
+        duration: 3600,
+      }),
+      {
+        targetTimeRange: { start: iso('07:00:00'), end: iso('08:00:00') },
+        expectedDuration: { min: 3300, max: 3900 },
+        channelId: 'dragon',
+        columnId: '',
+        programTypePreference: ['news_magazine', 'news'],
+        searchKeywords: ['看东方'],
+        excludeUsed: true,
+      },
+    )
+
+    expect(result.candidates.length).toBeGreaterThan(0)
+    expect(result.candidates[0]?.programName).toContain('看东方')
+  })
+
+  it('queryCandidates 在关键词无命中时会回退到类型匹配结果', async () => {
+    const service = getCandidateService()
+    const result = await service.queryCandidates(
+      createGap({
+        startTime: iso('07:00:00'),
+        endTime: iso('08:00:00'),
+        duration: 3600,
+      }),
+      {
+        targetTimeRange: { start: iso('07:00:00'), end: iso('08:00:00') },
+        expectedDuration: { min: 3300, max: 3900 },
+        channelId: 'dragon',
+        columnId: '',
+        programTypePreference: ['news_magazine', 'news'],
+        searchKeywords: ['不存在的栏目标签'],
+        excludeUsed: true,
+      },
+    )
+
+    expect(result.candidates.length).toBeGreaterThan(0)
+    expect(result.candidates.some((candidate) => ['news_magazine', 'news'].includes(candidate.programType))).toBe(true)
+  })
+
+  it('顺播栏目会优先推荐下一集', async () => {
     const atomicCapabilities = getAtomicCapabilities()
     await atomicCapabilities.replaceAllItems([
       createScheduledItem(),
@@ -119,7 +165,7 @@ describe('CandidateService', () => {
     expect((result.candidates[0] as { selectionMode?: string } | undefined)?.selectionMode).toBe('rerun')
   })
 
-  it('searchPrograms 会过滤掉已排节目并保留名称匹配结果', async () => {
+  it('searchPrograms 会过滤已排节目并保留名称匹配结果', async () => {
     const atomicCapabilities = getAtomicCapabilities()
     await atomicCapabilities.replaceAllItems([
       createScheduledItem({
@@ -142,5 +188,28 @@ describe('CandidateService', () => {
 
     expect(result.every((candidate) => candidate.programName.includes('看东方'))).toBe(true)
     expect(result.some((candidate) => candidate.programCode === '002601010001')).toBe(false)
+  })
+
+  it('原子操作检索在栏目未命中时会回退到当前频道候选', async () => {
+    const service = getCandidateService()
+
+    const strictResult = await service.searchPrograms({
+      channelId: 'dragon',
+      columnId: '107',
+      programName: '看东方',
+      limit: 5,
+    })
+
+    const fallbackResult = await service.searchPrograms({
+      channelId: 'dragon',
+      columnId: '107',
+      columnStrategy: 'prefer_channel',
+      programName: '看东方',
+      limit: 5,
+    })
+
+    expect(strictResult).toHaveLength(0)
+    expect(fallbackResult.length).toBeGreaterThan(0)
+    expect(fallbackResult.every((candidate) => candidate.programName.includes('看东方'))).toBe(true)
   })
 })
