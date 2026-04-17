@@ -31,6 +31,7 @@ export interface TaskClassification {
     ignoreExistingLayout?: boolean
     semanticLabel?: string
     programTypeHint?: string
+    segments?: LayoutIntentSegment[]
   }
 }
 
@@ -634,6 +635,14 @@ export interface LayoutDraftSpecSegment {
   endTime: string
   programType: string
   queryHints?: string[]
+  sequential?: boolean
+}
+
+export interface LayoutIntentSegment {
+  start: string
+  end: string
+  semanticLabel?: string
+  programTypeHint?: string
   sequential?: boolean
 }
 

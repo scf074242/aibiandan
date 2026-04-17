@@ -37,7 +37,7 @@ export class CandidateSelectionService {
       // Fall through to deterministic selection.
     }
 
-    return this.selectFallback(candidates, params.programName)
+    return this.selectFallback(candidates, params.programName ?? params.rawProgramText ?? '')
   }
 
   async selectForGap(
@@ -116,6 +116,7 @@ export class CandidateSelectionService {
 
   private scoreCandidateForName(candidate: ProgramCandidate, targetName: string): number {
     const normalizedTarget = targetName.trim().toLowerCase()
+    if (!normalizedTarget) return 0
     const normalizedName = candidate.programName.trim().toLowerCase()
     const exactMatch = normalizedName === normalizedTarget ? 100 : 0
     const prefixMatch = normalizedName.startsWith(normalizedTarget) ? 30 : 0

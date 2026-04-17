@@ -108,4 +108,35 @@ describe('Orchestrator', () => {
     expect(statuses).toContain('failed')
     expect(errors).toHaveLength(1)
   })
+
+  it('phase1Planning 超时后会回退到默认策略而不是一直阻塞', async () => {
+    vi.useFakeTimers()
+    try {
+      const llmClient = {
+        chat: vi.fn(() => new Promise<never>(() => {})),
+      } as unknown as LLMClient
+      const taskClassifier = {} as unknown as TaskClassifier
+      const orchestrator = new Orchestrator(llmClient, taskClassifier, {
+        planningLlmTimeoutMs: 20,
+      })
+      const logs: PlanningLogEntry[] = []
+
+      orchestrator.createSession('dragon', '2026-04-03')
+      orchestrator.on('log', ({ entry }) => {
+        logs.push(entry)
+      })
+
+      const planningPromise = (orchestrator as unknown as { phase1Planning: () => Promise<void> }).phase1Planning()
+      await vi.advanceTimersByTimeAsync(25)
+      await planningPromise
+
+      expect(logs.some((entry) => (
+        entry.level === 'warn'
+        && entry.phase === 'planning'
+        && entry.message.includes('回退到默认编排策略')
+      ))).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

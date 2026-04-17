@@ -117,6 +117,34 @@ describe('OpenClawBridge', () => {
     expect(commit.status).toBe('accepted')
   })
 
+  it('已有节目后发起全天编排也会直接进入版面草案阶段', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-4b',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '帮我全天编排',
+      currentSchedule: [
+        {
+          id: 'item-0900',
+          programName: '看东方 早高峰版',
+          startTime: '09:00:00',
+          endTime: '10:00:00',
+          duration: 3600,
+          programType: 'news_magazine',
+        },
+      ],
+      gapCount: 2,
+      history: [],
+    })
+
+    expect(prepare.status).toBe('accepted')
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(prepare.message).toBeUndefined()
+  })
+
   it('当前存在草案时会把替换类自然语言理解为版面微调', async () => {
     const bridge = new OpenClawBridge()
 

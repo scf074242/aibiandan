@@ -1,8 +1,8 @@
 import type { ChatMessage } from '@/types/llm'
-import type { LayoutDraft, ScheduleState } from '@/types/orchestration'
+import type { LayoutDraft, LayoutIntentSegment, ScheduleState } from '@/types/orchestration'
 import type { LLMClient } from './llm/llmClient'
 
-export type LayoutIntentMode = 'layout_prepare' | 'layout_refine' | 'layout_commit' | 'clarify'
+export type LayoutIntentMode = 'layout_prepare' | 'layout_refine' | 'layout_commit' | 'atomic_fallback' | 'clarify'
 
 export interface LayoutIntentRecognition {
   mode: LayoutIntentMode
@@ -12,6 +12,7 @@ export interface LayoutIntentRecognition {
   targetTimeRange?: { start: string; end: string }
   semanticLabel?: string
   programTypeHint?: string
+  segments?: LayoutIntentSegment[]
 }
 
 export interface LayoutIntentRecognizerInput {
@@ -124,6 +125,21 @@ const matchesLayoutPrepareVerb = (input: string): boolean => {
   return ['排入', '编入', '铺成', '安排成', '都排', '全部排入', '全部编入', '整体排成'].some((keyword) => input.includes(keyword))
 }
 
+const looksLikeAtomicFallback = (input: string, options: { hasContent: boolean }): boolean => {
+  const hasAtomicVerb = ['移动', '删除', '插入', '添加', '替换', '改', '调整', '顺一下', '挪一下', '后移', '前移', '顺延', '延后', '提前']
+    .some((keyword) => input.includes(keyword))
+  const hasAtomicAnchor = /(\d{1,2})(点半|点(\d{1,2})分?|[:：]\d{2})/.test(input)
+    || /《[^》]+》/.test(input)
+    || ['那个', '那条', '那段', '后面', '前面', '刚才', '这个节目', '这条节目'].some((keyword) => input.includes(keyword))
+  const hasLayoutCue = ['版面', '栏目', '剧场', '时段', '上午', '下午', '晚间', '晚上', '全天', '整天', '全日']
+    .some((keyword) => input.includes(keyword))
+  const hasExplicitRange = /(到|至|-)/.test(input) && /(\d{1,2})(点半|点(\d{1,2})分?|[:：]\d{2})/.test(input)
+  if (hasExplicitRange && options.hasContent) {
+    return false
+  }
+  return hasAtomicVerb && hasAtomicAnchor && !hasLayoutCue
+}
+
 const extractSemanticLabel = (input: string): string | undefined => {
   const normalized = input
     .replace(/^(?:不参考当前版面参考|不要参考当前版面参考|不参考当前版面|不要参考当前版面|不参考版面|不要参考版面|忽略当前版面参考|忽略当前版面)[,，、\s]*/u, '')
@@ -139,6 +155,22 @@ const extractSemanticLabel = (input: string): string | undefined => {
     .replace(/(?:节目|版面|内容)+$/u, '')
     .trim()
 
+  return cleaned || undefined
+}
+
+const stripLayoutPrefix = (input: string): string => input
+  .replace(/^(?:不参考当前版面参考|不要参考当前版面参考|不参考当前版面|不要参考当前版面|不参考当前频道版面|不要参考当前频道版面|不参考版面|不要参考版面|忽略当前版面|忽略当前版面参考|忽略现有版面)[,，、\s]*/u, '')
+  .replace(/^(?:上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全天|整天|全日)/u, '')
+  .replace(/^(?:\d{1,2}:\d{2}|\d{1,2}(?::\d{1,2})?点(?:半)?)(?:到|至|-)(?:\d{1,2}:\d{2}|\d{1,2}(?::\d{1,2})?点(?:半)?)/u, '')
+  .replace(/^(?:全部|都|统一|整体)+/u, '')
+  .replace(/^(?:改成|换成|替换成|替换为|改为|调整为|统一成|变成|排入|编入|铺成|安排成|做成)+/u, '')
+  .replace(/(?:节目|栏目|版面|内容)+$/u, '')
+  .trim()
+
+const extractSegmentSemanticLabel = (input: string): string | undefined => {
+  const fromVerb = extractSemanticLabel(input)
+  if (fromVerb) return fromVerb
+  const cleaned = stripLayoutPrefix(input)
   return cleaned || undefined
 }
 
@@ -169,6 +201,35 @@ const extractProgramTypeHint = (semanticLabel: string | undefined, input: string
     return 'documentary'
   }
   return undefined
+}
+
+const extractStructuredSegments = (input: string): LayoutIntentSegment[] | undefined => {
+  const parts = input
+    .split(/[，,；;、]/u)
+    .map((part) => normalizeInput(part))
+    .filter(Boolean)
+
+  if (parts.length < 2) return undefined
+
+  const segments = parts
+    .map((part): LayoutIntentSegment | null => {
+      const range = extractTimeRange(part)
+      const semanticLabel = extractSegmentSemanticLabel(part)
+      const programTypeHint = extractProgramTypeHint(semanticLabel, part)
+      if (!range || (!semanticLabel && !programTypeHint)) {
+        return null
+      }
+      return {
+        start: range.start,
+        end: range.end,
+        semanticLabel,
+        programTypeHint,
+        sequential: programTypeHint === 'drama' || /剧场|电视剧|连续剧/u.test(semanticLabel ?? ''),
+      }
+    })
+    .filter((segment): segment is LayoutIntentSegment => Boolean(segment))
+
+  return segments.length >= 2 ? segments : undefined
 }
 
 const isVagueLayoutRequest = (
@@ -232,11 +293,14 @@ export class LayoutIntentRecognizer {
     fallback: LayoutIntentRecognition,
   ): boolean {
     const normalized = normalizeInput(input.userInput)
+    if (looksLikeDirectOrchestrationIntent(normalized)) {
+      return false
+    }
+    if (fallback.mode === 'atomic_fallback') {
+      return false
+    }
     if (input.currentLayoutDraft) {
       return true
-    }
-    if (fallback.mode === 'clarify' && looksLikeDirectOrchestrationIntent(normalized)) {
-      return false
     }
     if (fallback.mode !== 'clarify') {
       return true
@@ -246,6 +310,7 @@ export class LayoutIntentRecognizer {
 
   private ruleBasedRecognize(input: LayoutIntentRecognizerInput): LayoutIntentRecognition {
     const normalized = normalizeInput(input.userInput)
+    const structuredSegments = extractStructuredSegments(input.userInput)
     const targetTimeRange = extractTimeRange(normalized)
     const semanticLabel = extractSemanticLabel(normalized)
     const programTypeHint = extractProgramTypeHint(semanticLabel, normalized)
@@ -258,6 +323,31 @@ export class LayoutIntentRecognizer {
         mode: 'layout_commit',
         confidence: 0.95,
         reasoning: '检测到用户正在确认当前版面草案并准备开始编排。',
+        ignoreExistingLayout,
+        targetTimeRange,
+        semanticLabel,
+        programTypeHint,
+      }
+    }
+
+    if (looksLikeDirectOrchestrationIntent(normalized)) {
+      return {
+        mode: 'layout_prepare',
+        confidence: 0.92,
+        reasoning: '检测到用户正在发起编排或补排流程，按产品规则应先生成可确认的版面草案。',
+        ignoreExistingLayout,
+        targetTimeRange: targetTimeRange ?? (input.scheduleState.isEmpty ? { start: '06:00:00', end: '23:59:59' } : undefined),
+        semanticLabel,
+        programTypeHint,
+        segments: structuredSegments,
+      }
+    }
+
+    if (looksLikeAtomicFallback(normalized, { hasContent })) {
+      return {
+        mode: 'atomic_fallback',
+        confidence: 0.9,
+        reasoning: '当前输入更像是在调整具体节目条目，但信息还不足以形成可执行的原子命令。',
         ignoreExistingLayout,
         targetTimeRange,
         semanticLabel,
@@ -294,6 +384,25 @@ export class LayoutIntentRecognizer {
     }
 
     if (
+      structuredSegments
+      && structuredSegments.length >= 2
+    ) {
+      return {
+        mode: 'layout_prepare',
+        confidence: 0.93,
+        reasoning: '检测到用户正在一次性描述多个时段的版面需求，应先生成多段版面草案。',
+        ignoreExistingLayout,
+        targetTimeRange: {
+          start: structuredSegments[0]!.start,
+          end: structuredSegments.at(-1)!.end,
+        },
+        semanticLabel: structuredSegments[0]?.semanticLabel,
+        programTypeHint: structuredSegments[0]?.programTypeHint,
+        segments: structuredSegments,
+      }
+    }
+
+    if (
       hasContent
       && (ignoreExistingLayout || hasScope || matchesLayoutPrepareVerb(normalized) || normalized.includes('版面'))
     ) {
@@ -305,6 +414,7 @@ export class LayoutIntentRecognizer {
         targetTimeRange,
         semanticLabel,
         programTypeHint,
+        segments: structuredSegments,
       }
     }
 
@@ -316,19 +426,22 @@ export class LayoutIntentRecognizer {
       targetTimeRange,
       semanticLabel,
       programTypeHint,
+      segments: structuredSegments,
     }
   }
 
   private buildPrompt(input: LayoutIntentRecognizerInput): ChatMessage[] {
     const currentDraftSummary = summarizeDraft(input.currentLayoutDraft)
     const systemPrompt = [
-      '你是广播节目版面意图识别器，只负责识别版面草案相关意图，不负责识别插入、删除、移动、替换这类原子节目单命令。',
-      '请只在以下模式中选择一个：layout_prepare、layout_refine、layout_commit、clarify。',
+      '你是广播节目版面意图识别器，主要负责识别版面草案相关意图。',
+      '如果输入明显更像在调整具体节目条目，但信息不足以直接形成插入、删除、移动、替换命令，请返回 atomic_fallback。',
+      '请只在以下模式中选择一个：layout_prepare、layout_refine、layout_commit、atomic_fallback、clarify。',
       '业务短语是开放的，不要把“下午剧场”“新闻栏目”“城市剧场”这类短语硬套成固定词表，请尽量原样保留到 semanticLabel。',
       '如果用户明确表示“不参考当前版面/忽略版面”，请把 ignoreExistingLayout 设为 true。',
       '如果用户只提到了分类标签，比如“电视剧”“新闻”，也要给出 programTypeHint。',
       '如果输入仍然过于模糊，就返回 clarify，不要过度猜测。',
-      '只输出 JSON，格式为：{"mode":"layout_prepare","confidence":0.92,"reasoning":"...","ignoreExistingLayout":false,"targetTimeRange":{"start":"13:00:00","end":"18:00:00"},"semanticLabel":"下午剧场","programTypeHint":"drama"}',
+      '如果用户一次性描述了多个时段，请输出 segments 数组，每个元素包含 start、end、semanticLabel、programTypeHint。',
+      '只输出 JSON，格式为：{"mode":"layout_prepare","confidence":0.92,"reasoning":"...","ignoreExistingLayout":false,"targetTimeRange":{"start":"13:00:00","end":"18:00:00"},"semanticLabel":"下午剧场","programTypeHint":"drama","segments":[{"start":"06:00:00","end":"12:00:00","semanticLabel":"新闻","programTypeHint":"news"}]}',
     ].join('\n')
 
     const userPrompt = [
@@ -355,7 +468,7 @@ export class LayoutIntentRecognizer {
         return null
       }
       const parsed = JSON.parse(match[0]) as Partial<LayoutIntentRecognition>
-      if (!parsed.mode || !['layout_prepare', 'layout_refine', 'layout_commit', 'clarify'].includes(parsed.mode)) {
+      if (!parsed.mode || !['layout_prepare', 'layout_refine', 'layout_commit', 'atomic_fallback', 'clarify'].includes(parsed.mode)) {
         return null
       }
       return {
@@ -366,6 +479,9 @@ export class LayoutIntentRecognizer {
         targetTimeRange: parsed.targetTimeRange,
         semanticLabel: parsed.semanticLabel,
         programTypeHint: parsed.programTypeHint,
+        segments: Array.isArray((parsed as { segments?: unknown[] }).segments)
+          ? ((parsed as { segments?: LayoutIntentSegment[] }).segments?.filter((segment) => segment?.start && segment?.end) ?? [])
+          : undefined,
       }
     } catch {
       return null
@@ -383,6 +499,7 @@ export class LayoutIntentRecognizer {
         targetTimeRange: parsed.targetTimeRange ?? fallback.targetTimeRange,
         semanticLabel: parsed.semanticLabel ?? fallback.semanticLabel,
         programTypeHint: parsed.programTypeHint ?? fallback.programTypeHint,
+        segments: parsed.segments?.length ? parsed.segments : fallback.segments,
         ignoreExistingLayout: parsed.ignoreExistingLayout || fallback.ignoreExistingLayout,
       }
     }
@@ -396,6 +513,7 @@ export class LayoutIntentRecognizer {
       targetTimeRange: parsed.targetTimeRange ?? fallback.targetTimeRange,
       semanticLabel: parsed.semanticLabel ?? fallback.semanticLabel,
       programTypeHint: parsed.programTypeHint ?? fallback.programTypeHint,
+      segments: parsed.segments?.length ? parsed.segments : fallback.segments,
       ignoreExistingLayout: parsed.ignoreExistingLayout || fallback.ignoreExistingLayout,
     }
   }

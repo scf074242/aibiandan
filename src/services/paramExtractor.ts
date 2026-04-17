@@ -3,7 +3,10 @@ import type { DialogueContext } from './dialogueContext'
 
 export interface InsertParams {
   targetTime: string
-  programName: string
+  programName?: string
+  rawProgramText?: string
+  semanticLabel?: string
+  programTypeHint?: string
 }
 
 export interface MoveParams {
@@ -37,28 +40,30 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和 programName，并且只返回 JSON。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime，以及可选的 programName、rawProgramText、semanticLabel、programTypeHint，并且只返回 JSON。',
           },
           {
             role: 'user',
             content:
               `用户指令: ${context.userInput}\n` +
               this.buildContextPrompt(context) +
-              '输出格式: {"targetTime":"09:00:00","programName":"看东方"}',
+              '输出格式: {"targetTime":"09:00:00","programName":"看东方","rawProgramText":"看东方","semanticLabel":"新闻资讯","programTypeHint":"news_magazine"}',
           },
         ],
         { temperature: 0, maxTokens: 120 },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
-      if (!match) return null
+      if (!match) return ruleBased ?? null
       const parsed = JSON.parse(match[0]) as Partial<InsertParams>
-      if (!parsed.targetTime || !parsed.programName) return null
-      const extracted = {
+      if (!parsed.targetTime) return ruleBased ?? null
+      return this.normalizeInsertParams({
         targetTime: this.normalizeTime(parsed.targetTime),
-        programName: parsed.programName.trim(),
-      }
-      return extracted
+        programName: parsed.programName,
+        rawProgramText: parsed.rawProgramText,
+        semanticLabel: parsed.semanticLabel,
+        programTypeHint: parsed.programTypeHint,
+      })
     } catch {
       return ruleBased ?? null
     }
@@ -90,9 +95,9 @@ export class ParamExtractor {
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
-      if (!match) return null
+      if (!match) return ruleBased ?? null
       const parsed = JSON.parse(match[0]) as Partial<MoveParams>
-      if (!parsed.targetTime || !parsed.direction || !parsed.offsetSeconds) return null
+      if (!parsed.targetTime || !parsed.direction || !parsed.offsetSeconds) return ruleBased ?? null
       const extracted: MoveParams = {
         targetTime: this.normalizeTime(parsed.targetTime),
         direction: parsed.direction === 'backward' ? 'backward' : 'forward',
@@ -130,9 +135,9 @@ export class ParamExtractor {
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
-      if (!match) return null
+      if (!match) return ruleBased ?? null
       const parsed = JSON.parse(match[0]) as Partial<DeleteParams>
-      if (!parsed.targetTime) return null
+      if (!parsed.targetTime) return ruleBased ?? null
       const extracted = {
         targetTime: this.normalizeTime(parsed.targetTime),
         programName: parsed.programName?.trim(),
@@ -169,14 +174,14 @@ export class ParamExtractor {
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
-      if (!match) return null
+      if (!match) return ruleBased ?? null
       const parsed = JSON.parse(match[0]) as {
         targetTime?: string
         replacementProgramName?: string
         programName?: string
       }
       const programName = parsed.replacementProgramName ?? parsed.programName
-      if (!parsed.targetTime || !programName) return null
+      if (!parsed.targetTime || !programName) return ruleBased ?? null
       const extracted = {
         targetTime: this.normalizeTime(parsed.targetTime),
         programName: programName.trim(),
@@ -192,47 +197,111 @@ export class ParamExtractor {
     const timeMatch =
       normalized.match(/在?(\d{1,2})点(?:(\d{1,2})分)?/) ||
       normalized.match(/在?(\d{1,2})[:：](\d{2})/)
-    const programMatch = normalized.match(/(?:插入节目|插入|添加节目|安排节目)(.+)$/)
+    const insertVerbMatched = /(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目)/.test(normalized)
+    const programMatch = normalized.match(/(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目)(.*)$/)
 
-    if (!timeMatch || !programMatch?.[1]) return null
+    if (!timeMatch || !insertVerbMatched) return null
 
-    return {
+    return this.normalizeInsertParams({
       targetTime: this.normalizeTime(`${timeMatch[1] ?? '09'}:${timeMatch[2] ?? '00'}`),
-      programName: programMatch[1].replace(/[，。？?]/g, '').trim(),
-    }
+      rawProgramText: programMatch?.[1],
+    })
   }
 
   private ruleBasedExtractMove(userInput: string): MoveParams | null {
     const normalized = userInput.replace(/\s+/g, '')
-    const timeMatch =
-      normalized.match(/(\d{1,2})点(?:(\d{1,2})分)?的节目/) ||
-      normalized.match(/(\d{1,2})[:：](\d{2})的节目/)
+    if (!/(移动|后移|前移|顺延|延后|提前)/.test(normalized)) return null
 
+    const timeMatch = this.findTimeExpression(normalized)
+    const offset = this.extractOffsetFromNormalized(normalized)
+    if (!timeMatch || !offset) return null
+
+    return {
+      targetTime: timeMatch.targetTime,
+      direction: offset.direction,
+      offsetSeconds: offset.offsetSeconds,
+    }
+  }
+
+  private ruleBasedExtractDelete(userInput: string): DeleteParams | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    if (!/(删除|删掉|移除|去掉)/.test(normalized)) return null
+
+    const timeMatch = this.findTimeExpression(normalized)
+    if (!timeMatch) return null
+
+    const quotedProgramName = normalized.match(/《([^》]+)》/)?.[1]?.trim()
+    const programFragment = quotedProgramName
+      ?? this.normalizeProgramSelection(normalized.slice(timeMatch.index + timeMatch.matchedText.length))
+      ?? this.normalizeProgramSelection(normalized.slice(0, timeMatch.index).replace(/^(?:删除|删掉|移除|去掉)/, ''))
+
+    return {
+      targetTime: timeMatch.targetTime,
+      programName: programFragment,
+    }
+  }
+
+  private ruleBasedExtractReplace(userInput: string): ReplaceParams | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const timeMatch = this.findTimeExpression(normalized)
+    const replacementMatch = normalized.match(/(?:替换成|替换为|换成|改成|改为)(.+)$/)
+    if (!timeMatch || !replacementMatch?.[1]) return null
+
+    const replacementProgramName = this.normalizeProgramSelection(replacementMatch[1])
+    if (!replacementProgramName) return null
+
+    return {
+      targetTime: timeMatch.targetTime,
+      programName: replacementProgramName,
+    }
+  }
+
+  private findTimeExpression(normalized: string): { targetTime: string; matchedText: string; index: number } | null {
+    const patterns = [
+      /(\d{1,2})[:：](\d{2})/,
+      /(\d{1,2})点半/,
+      /(\d{1,2})点(?:(\d{1,2})分?)?/,
+    ]
+
+    for (const pattern of patterns) {
+      const match = pattern.exec(normalized)
+      if (!match?.[0] || typeof match.index !== 'number') continue
+      if (pattern.source.includes('点半')) {
+        return {
+          targetTime: this.normalizeTime(`${match[1]}:30`),
+          matchedText: match[0],
+          index: match.index,
+        }
+      }
+
+      return {
+        targetTime: this.normalizeTime(`${match[1]}:${match[2] ?? '00'}`),
+        matchedText: match[0],
+        index: match.index,
+      }
+    }
+
+    return null
+  }
+
+  private extractOffsetFromNormalized(normalized: string): { direction: 'forward' | 'backward'; offsetSeconds: number } | null {
     const hourOffsetMatch =
       normalized.match(/([前后])移(\d{1,2})小时/) ||
       normalized.match(/(提前|延后|顺延)(\d{1,2})小时/)
-    const minuteOffsetMatch =
-      normalized.match(/([前后])移(\d{1,2})分钟/) ||
-      normalized.match(/(提前|延后|顺延)(\d{1,2})分钟/)
-
-    if (!timeMatch) return null
-
-    const hours = timeMatch[1] ?? '00'
-    const minutes = timeMatch[2] ?? '00'
-
     if (hourOffsetMatch) {
       const directionToken = hourOffsetMatch[1] ?? ''
       return {
-        targetTime: this.normalizeTime(`${hours}:${minutes}`),
         direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
         offsetSeconds: Number(hourOffsetMatch[2] ?? '1') * 3600,
       }
     }
 
+    const minuteOffsetMatch =
+      normalized.match(/([前后])移(\d{1,2})分钟/) ||
+      normalized.match(/(提前|延后|顺延)(\d{1,2})分钟/)
     if (minuteOffsetMatch) {
       const directionToken = minuteOffsetMatch[1] ?? ''
       return {
-        targetTime: this.normalizeTime(`${hours}:${minutes}`),
         direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
         offsetSeconds: Number(minuteOffsetMatch[2] ?? '1') * 60,
       }
@@ -241,49 +310,16 @@ export class ParamExtractor {
     return null
   }
 
-  private ruleBasedExtractDelete(userInput: string): DeleteParams | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    const timePatterns = [
-      /(?:删除|删掉|移除)(\d{1,2})点半的?(.+)?/,
-      /(?:删除|删掉|移除)(\d{1,2})点(?:(\d{1,2})分)?的?(.+)?/,
-      /(?:删除|删掉|移除)(\d{1,2})[:：](\d{2})的?(.+)?/,
-    ]
-
-    for (const pattern of timePatterns) {
-      const match = normalized.match(pattern)
-      if (!match?.[1]) continue
-
-      if (pattern.source.includes('点半')) {
-        const programName = (match[2] || '').replace(/[，。？?]/g, '').replace(/节目/g, '').replace(/^的/, '').trim()
-        return {
-          targetTime: this.normalizeTime(`${match[1]}:30`),
-          programName: programName || undefined,
-        }
-      }
-
-      const minutes = match[2] ?? '00'
-      const programName = (match[3] || '').replace(/[，。？?]/g, '').replace(/节目/g, '').replace(/^的/, '').trim()
-      return {
-        targetTime: this.normalizeTime(`${match[1]}:${minutes}`),
-        programName: programName || undefined,
-      }
-    }
-
-    return null
-  }
-
-  private ruleBasedExtractReplace(userInput: string): ReplaceParams | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    const timeMatch =
-      normalized.match(/把(\d{1,2})点(?:(\d{1,2})分)?的节目(?:换成|替换成|改成|替换为|改为)(.+)$/) ||
-      normalized.match(/把(\d{1,2})[:：](\d{2})的节目(?:换成|替换成|改成|替换为|改为)(.+)$/)
-
-    if (!timeMatch?.[1] || !timeMatch[3]) return null
-
-    return {
-      targetTime: this.normalizeTime(`${timeMatch[1]}:${timeMatch[2] ?? '00'}`),
-      programName: timeMatch[3].replace(/[，。？?]/g, '').trim(),
-    }
+  private normalizeProgramSelection(value?: string): string | undefined {
+    if (!value) return undefined
+    const normalized = value
+      .replace(/[，。！？!?]/g, '')
+      .replace(/^(?:的|节目|栏目|补充说明[:：]?|要删除的|删除的|这条|那条|这个|那个)+/, '')
+      .replace(/(?:补充说明[:：]?)+$/g, '')
+      .trim()
+    if (!normalized) return undefined
+    if (/^(节目|栏目|这条|那条|这个节目|那个节目|补充说明[:：]?)$/.test(normalized)) return undefined
+    return this.normalizeProgramName(normalized)
   }
 
   private buildContextPrompt(context: DialogueContext): string {
@@ -330,6 +366,131 @@ export class ParamExtractor {
     const minutes = (match[2] ?? '00').padStart(2, '0')
     const seconds = (match[3] ?? '00').padStart(2, '0')
     return `${hours}:${minutes}:${seconds}`
+  }
+
+  private normalizeInsertParams(params: InsertParams): InsertParams {
+    const targetTime = this.normalizeTime(params.targetTime)
+    const rawProgramText = this.normalizeProgramFragment(params.rawProgramText)
+    const explicitProgramName = this.normalizeProgramName(params.programName)
+    const quotedProgramName = rawProgramText?.match(/《([^》]+)》/)?.[1]?.trim()
+    const inferredProgramName = explicitProgramName || this.normalizeProgramName(quotedProgramName)
+    const programTypeHint = this.normalizeProgramTypeHint(
+      params.programTypeHint ?? this.inferProgramTypeHint(rawProgramText ?? inferredProgramName),
+    )
+    const semanticLabel = this.normalizeSemanticLabel(
+      params.semanticLabel ?? this.inferSemanticLabel(rawProgramText ?? inferredProgramName, programTypeHint),
+    )
+
+    if (inferredProgramName && !this.isGenericProgramRequest(inferredProgramName)) {
+      return {
+        targetTime,
+        programName: inferredProgramName,
+        rawProgramText: rawProgramText ?? inferredProgramName,
+        semanticLabel,
+        programTypeHint,
+      }
+    }
+
+    if (rawProgramText && !this.isGenericProgramRequest(rawProgramText)) {
+      return {
+        targetTime,
+        programName: rawProgramText,
+        rawProgramText,
+        semanticLabel,
+        programTypeHint,
+      }
+    }
+
+    return {
+      targetTime,
+      rawProgramText,
+      semanticLabel,
+      programTypeHint,
+    }
+  }
+
+  private normalizeProgramName(value?: string): string | undefined {
+    if (!value) return undefined
+    const normalized = value
+      .replace(/^《/, '')
+      .replace(/》$/, '')
+      .replace(/[，。！？!?]/g, '')
+      .trim()
+    return normalized || undefined
+  }
+
+  private normalizeProgramFragment(value?: string): string | undefined {
+    if (!value) return undefined
+    const normalized = value
+      .replace(/^(一档|一个|一条|一期|一部|个|条|档|期|部)/, '')
+      .replace(/^(适合的|合适的|当前的)/, '')
+      .replace(/^(节目名|节目|栏目)\s*/, '')
+      .replace(/[，。！？!?]/g, '')
+      .trim()
+    return normalized || undefined
+  }
+
+  private normalizeProgramTypeHint(value?: string): string | undefined {
+    if (!value) return undefined
+    const normalized = value.trim().toLowerCase()
+    return normalized || undefined
+  }
+
+  private normalizeSemanticLabel(value?: string): string | undefined {
+    if (!value) return undefined
+    const normalized = value.trim()
+    return normalized || undefined
+  }
+
+  private isGenericProgramRequest(value?: string): boolean {
+    if (!value) return true
+    const normalized = value.replace(/\s+/g, '')
+    if (!normalized) return true
+    if (/^(节目|栏目|内容|片子|合适的节目|当前的节目)$/.test(normalized)) return true
+    return /^(新闻|资讯|电视剧|剧场|综艺|纪录片|纪实|少儿|动画|评论|访谈|养生|健康|娱乐|电影|短剧)(节目|栏目|内容)?$/.test(normalized)
+  }
+
+  private inferProgramTypeHint(value?: string): string | undefined {
+    if (!value) return undefined
+    const normalized = value.replace(/\s+/g, '')
+    const mappings: Array<{ pattern: RegExp; type: string }> = [
+      { pattern: /(新闻|快报|联播)/, type: 'news' },
+      { pattern: /(资讯|观察|Eye)/i, type: 'news_magazine' },
+      { pattern: /(电视剧|剧场|短剧|剧情)/, type: 'drama' },
+      { pattern: /(综艺|娱乐)/, type: 'entertainment' },
+      { pattern: /(养生|健康)/, type: 'health' },
+      { pattern: /(评论|访谈|观点)/, type: 'commentary' },
+      { pattern: /(少儿|动画|童)/, type: 'kids' },
+      { pattern: /(纪录片|纪实)/, type: 'documentary' },
+    ]
+    return mappings.find((item) => item.pattern.test(normalized))?.type
+  }
+
+  private inferSemanticLabel(value?: string, programTypeHint?: string): string | undefined {
+    if (value) {
+      const normalized = value.replace(/\s+/g, '')
+      if (/(新闻|快报|联播)/.test(normalized)) return '新闻'
+      if (/(资讯|观察|Eye)/i.test(normalized)) return '资讯'
+      if (/(电视剧|剧场|短剧|剧情)/.test(normalized)) return '剧场'
+      if (/(综艺|娱乐)/.test(normalized)) return '娱乐'
+      if (/(养生|健康)/.test(normalized)) return '养生'
+      if (/(评论|访谈|观点)/.test(normalized)) return '评论'
+      if (/(少儿|动画|童)/.test(normalized)) return '少儿'
+      if (/(纪录片|纪实)/.test(normalized)) return '纪实'
+    }
+
+    const typeToLabel: Record<string, string> = {
+      news: '新闻',
+      news_magazine: '资讯',
+      drama: '剧场',
+      entertainment: '娱乐',
+      health: '养生',
+      commentary: '评论',
+      kids: '少儿',
+      documentary: '纪实',
+    }
+
+    return programTypeHint ? typeToLabel[programTypeHint] : undefined
   }
 }
 

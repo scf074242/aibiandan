@@ -92,14 +92,14 @@ export class TaskClassifier {
     }
 
     if (this.shouldPrepareLayout(normalized) || this.shouldRefineLayout(normalized)) {
-      factors.push('操作对象为版面结构，可能影响后续整段编排结果')
+      factors.push('操作对象是版面结构，可能影响后续整段编排结果')
       if (level !== 'high') {
         level = 'medium'
       }
     }
 
     if (!input.scheduleState.isEmpty && this.hasAny(normalized, ['生成', '重排', '重新编排'])) {
-      factors.push('当前节目单已有内容，重编排可能覆盖已有结果')
+      factors.push('当前节目单已有内容，重新编排可能覆盖已有结果')
       level = 'high'
     }
 
@@ -151,8 +151,10 @@ export class TaskClassifier {
 
     if (
       (this.matchesActualLayoutScope(normalized) && this.matchesActualLayoutContent(normalized))
-      || (this.matchesActualLayoutContent(normalized)
-        && (this.matchesActualLayoutPrepareVerb(normalized) || this.matchesExplicitIgnoreCurrentLayout(normalized)))
+      || (
+        this.matchesActualLayoutContent(normalized)
+        && (this.matchesActualLayoutPrepareVerb(normalized) || this.matchesExplicitIgnoreCurrentLayout(normalized))
+      )
     ) {
       return {
         mode: 'layout_prepare',
@@ -195,27 +197,15 @@ export class TaskClassifier {
       }
     }
 
-    if (normalized.includes('帮我全天编排') || normalized.includes('全天编排') || normalized.includes('整天编排')) {
+    if (this.shouldStartOrchestrationFromLayout(normalized, scheduleState)) {
       return {
-        mode: 'full_generate',
+        mode: 'layout_prepare',
         confidence: 0.92,
-        reasoning: '用户明确希望对整天节目单发起编排，应先进入版面准备阶段。',
-      }
-    }
-
-    if (normalized.includes('帮我填充全天节目') || normalized.includes('填充全天节目')) {
-      return {
-        mode: scheduleState.gapCount > 0 ? 'partial_generate' : 'full_generate',
-        confidence: 0.9,
-        reasoning: '用户明确希望补齐整天节目内容，应先准备版面，再进入后续编排。',
-      }
-    }
-
-    if (scheduleState.isEmpty && this.hasGenerateIntent(normalized)) {
-      return {
-        mode: 'full_generate',
-        confidence: 0.9,
-        reasoning: '节目单为空，且用户表达了直接编排节目单的意图。',
+        reasoning: '用户正在发起编排或补排流程，按产品规则应先生成待确认的版面草案。',
+        suggestedParams: {
+          userIntent: userInput.trim() || '生成版面草案',
+          targetTimeRange: targetTimeRange ?? (scheduleState.isEmpty ? { start: '06:00:00', end: '23:59:59' } : undefined),
+        },
       }
     }
 
@@ -229,19 +219,19 @@ export class TaskClassifier {
 
     if (this.hasRepairIntent(normalized)) {
       return {
-        mode: 'repair_only',
-        confidence: 0.85,
-        reasoning: '用户明确要求修复已知问题。',
+        mode: 'validate_only',
+        confidence: 0.88,
+        reasoning: '用户提到了修复，但当前产品流程会先输出问题分析结果，再决定后续处理方案。',
       }
     }
 
     if (this.hasEditIntent(normalized)) {
       return {
-        mode: 'micro_edit',
-        confidence: 0.8,
-        reasoning: '用户表达了对现有节目单做增删改动的意图。',
+        mode: 'clarify',
+        confidence: 0.9,
+        reasoning: '用户像是在调整具体节目条目，但当前描述还没有形成可执行的原子命令，需要补充更精确的时间点或节目名称。',
         suggestedParams: {
-          userIntent: this.extractEditIntent(normalized),
+          userIntent: `请补充更精确的节目调整信息：${this.extractEditIntent(normalized)}`,
           targetTimeRange,
         },
       }
@@ -249,9 +239,12 @@ export class TaskClassifier {
 
     if (scheduleState.gapCount > 0 && this.hasStrongFillIntent(normalized)) {
       return {
-        mode: 'partial_generate',
-        confidence: 0.8,
-        reasoning: '当前存在空窗，且用户明确要求补齐空窗。',
+        mode: 'layout_prepare',
+        confidence: 0.9,
+        reasoning: '用户明确要求补齐当前空窗，按产品流程应先生成待确认的版面草案。',
+        suggestedParams: {
+          userIntent: userInput.trim() || '补齐当前空窗',
+        },
       }
     }
 
@@ -296,20 +289,18 @@ export class TaskClassifier {
     const { scheduleState, userInput, history } = input
 
     const systemPrompt = `你是电视播单系统的任务分类助手。请根据用户输入和当前节目单状态，把任务归类为以下模式之一：
-1. full_generate：直接对节目单执行全天编排
-2. partial_generate：直接补齐当前空窗
-3. micro_edit：直接编辑已有节目单
-4. validate_only：仅做校验
-5. repair_only：仅做修复
-6. clarify：信息不足，需要追问
-7. layout_prepare：先准备版面草案，再让用户确认
-8. layout_refine：微调当前版面草案
-9. layout_commit：用户确认当前版面草案，可以开始编排
+1. layout_prepare：先准备版面草案，再让用户确认
+2. layout_refine：微调当前版面草案
+3. layout_commit：用户确认当前版面草案，可以开始编排
+4. validate_only：仅做校验或问题分析
+5. clarify：信息不足，需要追问
 
 识别原则：
+- 原子节目单命令（插入、删除、移动、替换）已经在上游处理，这里不要再返回 micro_edit。
+- 用户提到“全天编排”“补齐空窗”“填充节目单”这类启动编排的话术时，也要先返回 layout_prepare，而不是直接执行编排。
 - 如果用户在描述“某个时段按某类内容铺排版面”，优先判断为 layout_prepare 或 layout_refine。
+- 如果用户像是在调整具体节目条目，但缺少足够的时间点、节目名或动作参数，返回 clarify。
 - 如果用户表达过于模糊，例如既没有范围也没有内容偏好，返回 clarify。
-- 只有在用户明确是在操作节目单而不是版面时，才返回 micro_edit。
 
 请只输出 JSON：
 {
@@ -324,18 +315,17 @@ export class TaskClassifier {
 }`
 
     const userPrompt = `【当前节目单状态】
-- 频道：${scheduleState.channelName} (${scheduleState.channelId})
-- 日期：${scheduleState.date}
-- 节目单状态：${scheduleState.isEmpty ? '空表' : '已有内容'}
-- 已编排条目数：${scheduleState.itemCount}
-- 当前空窗数：${scheduleState.gapCount}
-- 是否有选中时间段：${scheduleState.hasSelectedTimeRange ? '是' : '否'}
+- 频道: ${scheduleState.channelName} (${scheduleState.channelId})
+- 日期: ${scheduleState.date}
+- 节目单状态: ${scheduleState.isEmpty ? '空表' : '已有内容'}
+- 已编排条目数: ${scheduleState.itemCount}
+- 当前空窗数: ${scheduleState.gapCount}
+- 是否有选中时间段: ${scheduleState.hasSelectedTimeRange ? '是' : '否'}
 
 【用户输入】
 ${userInput}
 
-${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
-`
+${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
 
     return [
       { role: 'system', content: systemPrompt },
@@ -351,28 +341,18 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
       }
 
       const result = JSON.parse(jsonMatch[0])
-      const validModes: TaskMode[] = [
-        'full_generate',
-        'partial_generate',
-        'micro_edit',
-        'validate_only',
-        'repair_only',
-        'clarify',
-        'layout_prepare',
-        'layout_refine',
-        'layout_commit',
-      ]
+      const validModes: TaskMode[] = ['validate_only', 'repair_only', 'clarify', 'layout_prepare', 'layout_refine', 'layout_commit', 'full_generate', 'partial_generate', 'micro_edit']
 
       if (!validModes.includes(result.mode)) {
         throw new Error(`Invalid mode: ${result.mode}`)
       }
 
-      return {
+      return this.normalizeLegacyLlmClassification({
         mode: result.mode,
         confidence: typeof result.confidence === 'number' ? result.confidence : 0.5,
         reasoning: result.reasoning || '',
         suggestedParams: result.suggestedParams,
-      }
+      })
     } catch (error) {
       console.error('Failed to parse classification response:', error)
       return {
@@ -435,7 +415,7 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
   }
 
   private hasEditIntent(input: string): boolean {
-    return this.hasAny(input, ['插入', '删除', '替换', '移动', '修改', '调整', '改成', '换成', '添加'])
+    return this.hasAny(input, ['插入', '删除', '替换', '移动', '修改', '调整', '改成', '换成', '添加', '顺一下', '挪一下'])
   }
 
   private hasStrongFillIntent(input: string): boolean {
@@ -466,11 +446,32 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
     return this.hasAny(input, ['补', '填', '填补', '补一补', '补一个', '空白位置', '空位'])
   }
 
+  private shouldStartOrchestrationFromLayout(input: string, scheduleState: ScheduleState): boolean {
+    if (
+      input.includes('帮我全天编排')
+      || input.includes('全天编排')
+      || input.includes('整天编排')
+      || input.includes('帮我填充全天节目')
+      || input.includes('填充全天节目')
+    ) {
+      return true
+    }
+
+    if (scheduleState.gapCount > 0 && this.hasStrongFillIntent(input)) {
+      return true
+    }
+
+    return scheduleState.isEmpty && this.hasGenerateIntent(input)
+  }
+
   private shouldPrepareLayout(input: string): boolean {
     const hasScope = this.hasLayoutScope(input)
     const hasContent = this.hasLayoutContent(input)
     const hasLayoutVerb = this.hasAny(input, [
       '版面',
+      '单独排版',
+      '独立排版',
+      '局部排版',
       '不要参考已有版面',
       '不参考已有版面',
       '按',
@@ -502,7 +503,7 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
   }
 
   private isVagueLayoutRequest(input: string): boolean {
-    const hasLayoutWord = this.hasAny(input, ['版面', '排单', '排一下', '下单排单'])
+    const hasLayoutWord = this.hasAny(input, ['版面', '排单', '排一个', '下一版排单', '单独排版'])
     if (!hasLayoutWord) {
       return false
     }
@@ -517,12 +518,13 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
   }
 
   private hasLayoutContent(input: string): boolean {
-    return this.matchesActualLayoutContent(input) || LAYOUT_CONTENT_KEYWORDS.some((keyword) => input.includes(keyword))
+    return this.matchesActualLayoutContent(input)
+      || LAYOUT_CONTENT_KEYWORDS.some((keyword) => input.includes(keyword))
   }
 
   private containsExplicitTimeRange(input: string): boolean {
-    return /(\d{1,2})(:\d{1,2})?点?(到|-|至)(\d{1,2})(:\d{1,2})?点?/.test(input)
-      || /(\d{1,2}:\d{2})(到|-|至)(\d{1,2}:\d{2})/.test(input)
+    return /(\d{1,2})(:\d{1,2})?(点|点半)(到|至|-)(\d{1,2})(:\d{1,2})?(点|点半)/.test(input)
+      || /(\d{1,2}:\d{2})(到|至|-)(\d{1,2}:\d{2})/.test(input)
   }
 
   private extractEditIntent(input: string): string {
@@ -556,43 +558,12 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
       }
     }
 
-    const actualPointRange = input.match(/(\d{1,2})(?::(\d{1,2}))?(?:点|點)?(?:到|至|-)(\d{1,2})(?::(\d{1,2}))?(?:点|點)?/)
+    const actualPointRange = input.match(/(\d{1,2})(?::(\d{1,2}))?(?:点|点半)(?:到|至|-)(\d{1,2})(?::(\d{1,2}))?(?:点|点半)/)
     if (actualPointRange) {
       return {
         start: this.normalizeClock(`${actualPointRange[1]}:${actualPointRange[2] ?? '00'}`),
         end: this.normalizeClock(`${actualPointRange[3]}:${actualPointRange[4] ?? '00'}`),
       }
-    }
-    const colonRange = input.match(/(\d{1,2}:\d{2})(?:分)?(?:到|-|至)(\d{1,2}:\d{2})/)
-    if (colonRange) {
-      return {
-        start: this.normalizeClock(colonRange[1]!),
-        end: this.normalizeClock(colonRange[2]!),
-      }
-    }
-
-    const pointRange = input.match(/(\d{1,2})(?::(\d{1,2}))?点(?:到|-|至)(\d{1,2})(?::(\d{1,2}))?点?/)
-    if (pointRange) {
-      return {
-        start: this.normalizeClock(`${pointRange[1]}:${pointRange[2] ?? '00'}`),
-        end: this.normalizeClock(`${pointRange[3]}:${pointRange[4] ?? '00'}`),
-      }
-    }
-
-    if (input.includes('上午')) {
-      return { start: '06:00:00', end: '12:00:00' }
-    }
-    if (input.includes('中午') || input.includes('午间')) {
-      return { start: '12:00:00', end: '14:00:00' }
-    }
-    if (input.includes('下午')) {
-      return { start: '13:00:00', end: '18:00:00' }
-    }
-    if (input.includes('晚间') || input.includes('晚上')) {
-      return { start: '18:00:00', end: '23:00:00' }
-    }
-    if (input.includes('深夜') || input.includes('凌晨')) {
-      return { start: '23:00:00', end: '23:59:59' }
     }
 
     if (input.includes('上午')) {
@@ -616,7 +587,7 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
 
   private extractActualLayoutLabel(input: string): string | null {
     const normalized = input
-      .replace(/^(?:不参考当前版面参考|不要参考当前版面参考|不参考当前版面|不要参考当前版面|忽略当前版面参考)[,，、]*/u, '')
+      .replace(/^(?:不参考当前版面参考|不要参考当前版面参考|不参考当前版面|不要参考当前版面|忽略当前版面参考)[,，、\s]*/u, '')
       .trim()
     const verbMatch = normalized.match(/(?:排入|编入|改成|换成|替换成|替换为|调整为|改为|统一成|变成)(.+)$/u)
     if (!verbMatch && !/(电视剧|剧场|新闻|资讯|评论|健康|娱乐|综艺|少儿|纪录|电影|栏目)/u.test(normalized)) {
@@ -659,17 +630,25 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
   }
 
   private matchesActualLayoutPrepareVerb(input: string): boolean {
-    return ['版面', '全部排入', '排入', '都排', '统一成', '编入', '铺成', '按', '不参考当前版面参考', '不参考当前版面']
-      .some((keyword) => input.includes(keyword))
+    return [
+      '版面',
+      '单独排版',
+      '独立排版',
+      '局部排版',
+      '全部排入',
+      '排入',
+      '都排',
+      '统一成',
+      '编入',
+      '铺成',
+      '按',
+      '不参考当前版面参考',
+      '不参考当前版面',
+    ].some((keyword) => input.includes(keyword))
   }
 
   private matchesActualLayoutRefineVerb(input: string): boolean {
     return ['改成', '换成', '调整为', '改为', '替换成', '变成'].some((keyword) => input.includes(keyword))
-  }
-
-  private matchesActualLayoutCommitVerb(input: string): boolean {
-    return ['开始编排', '开始排', '确认版面', '采用这个版面', '按这个版面', '按该版面']
-      .some((keyword) => input.includes(keyword))
   }
 
   private matchesActualLayoutContext(input: string): boolean {
@@ -698,6 +677,37 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}
     const hour = Math.max(0, Math.min(23, Number(hourText)))
     const minute = Math.max(0, Math.min(59, Number(minuteText)))
     return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:00`
+  }
+
+  private normalizeLegacyLlmClassification(result: TaskClassification): TaskClassification {
+    if (result.mode === 'full_generate' || result.mode === 'partial_generate') {
+      return {
+        mode: 'layout_prepare',
+        confidence: result.confidence,
+        reasoning: `${result.reasoning || 'LLM 判断为直接编排'}；按当前产品流程已转成先准备版面草案。`,
+        suggestedParams: result.suggestedParams,
+      }
+    }
+
+    if (result.mode === 'repair_only') {
+      return {
+        mode: 'validate_only',
+        confidence: result.confidence,
+        reasoning: `${result.reasoning || 'LLM 判断为修复请求'}；当前先进入问题分析，再决定后续处理。`,
+        suggestedParams: result.suggestedParams,
+      }
+    }
+
+    if (result.mode === 'micro_edit') {
+      return {
+        mode: 'clarify',
+        confidence: result.confidence,
+        reasoning: `${result.reasoning || 'LLM 判断为局部节目调整'}；但当前描述未形成可执行的原子命令，需要进一步补充节目或时间信息。`,
+        suggestedParams: result.suggestedParams,
+      }
+    }
+
+    return result
   }
 }
 

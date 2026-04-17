@@ -1,5 +1,5 @@
 import type { ChatMessage } from '@/types/llm'
-import type { LayoutDraft, LayoutDraftSpec, LayoutDraftSpecSegment } from '@/types/orchestration'
+import type { LayoutDraft, LayoutDraftSpec, LayoutDraftSpecSegment, LayoutIntentSegment } from '@/types/orchestration'
 import type { LLMClient } from '@/services/llm/llmClient'
 
 export interface LayoutDraftGenerationInput {
@@ -10,6 +10,7 @@ export interface LayoutDraftGenerationInput {
   coverage?: { start: string; end: string }
   semanticLabel?: string
   programTypeHint?: string
+  segments?: LayoutIntentSegment[]
 }
 
 export interface LayoutDraftRefineInput extends LayoutDraftGenerationInput {
@@ -554,7 +555,43 @@ export class LayoutDraftService {
     }
   }
 
+  private buildSpecSegmentsFromStructuredIntent(segments: LayoutIntentSegment[]): LayoutDraftSpecSegment[] {
+    return segments
+      .map((segment, index) => {
+        const guess = resolveProgramGuess(segment.semanticLabel ?? segment.programTypeHint ?? '', {
+          semanticLabel: segment.semanticLabel,
+          programTypeHint: segment.programTypeHint,
+        })
+        return {
+          id: `draft-segment-${index + 1}`,
+          label: segment.semanticLabel?.trim() || guess.label,
+          startTime: normalizeClock(segment.start),
+          endTime: normalizeClock(segment.end),
+          programType: segment.programTypeHint ?? guess.programType,
+          queryHints: guess.queryHints,
+          sequential: segment.sequential ?? guess.sequential,
+        }
+      })
+      .sort((left, right) => left.startTime.localeCompare(right.startTime))
+  }
+
+  private resolveStructuredCoverage(input: LayoutDraftGenerationInput, segments: LayoutIntentSegment[]): { start: string; end: string } {
+    if (input.coverage) return input.coverage
+    const ordered = [...segments].sort((left, right) => left.start.localeCompare(right.start))
+    return {
+      start: normalizeClock(ordered[0]!.start),
+      end: normalizeClock(ordered.at(-1)!.end),
+    }
+  }
+
   private buildFallbackSpec(input: LayoutDraftGenerationInput): LayoutDraftSpec {
+    if (input.segments?.length) {
+      return {
+        coverage: this.resolveStructuredCoverage(input, input.segments),
+        segments: this.buildSpecSegmentsFromStructuredIntent(input.segments),
+      }
+    }
+
     const normalized = normalizeInput(input.userInput)
     const coverage = input.coverage ?? extractTimeRange(normalized) ?? { ...DEFAULT_COVERAGE }
     const guess = resolveProgramGuess(normalized, {
@@ -582,10 +619,6 @@ export class LayoutDraftService {
     const normalized = normalizeInput(input.userInput)
     const semanticLabel = extractRefineSemanticLabel(input.userInput, input.semanticLabel)
     const singleTimePoint = extractSingleTimePoint(normalized)
-    const guess = resolveProgramGuess(normalized, {
-      semanticLabel,
-      programTypeHint: input.programTypeHint,
-    })
 
     const existingSegments: LayoutDraftSpecSegment[] = input.currentDraft.layoutReference.slots.map((slot) => {
       const column = input.currentDraft.columns.find((item) => item.columnId === slot.columnId)
@@ -598,6 +631,26 @@ export class LayoutDraftService {
         queryHints: column?.queryHints,
         sequential: column?.isSequential,
       }
+    })
+
+    if (input.segments?.length) {
+      let nextSegments = [...existingSegments]
+      const replacements = this.buildSpecSegmentsFromStructuredIntent(input.segments)
+      replacements.forEach((replacement) => {
+        nextSegments = replaceRange(nextSegments, {
+          start: replacement.startTime,
+          end: replacement.endTime,
+        }, replacement)
+      })
+      return {
+        coverage: input.currentDraft.coverage,
+        segments: nextSegments,
+      }
+    }
+
+    const guess = resolveProgramGuess(normalized, {
+      semanticLabel,
+      programTypeHint: input.programTypeHint,
     })
 
     const matchedSegments = matchSegmentsForRefine(existingSegments, {
@@ -637,7 +690,7 @@ export class LayoutDraftService {
   }
 
   private buildGeneratePrompt(input: LayoutDraftGenerationInput): ChatMessage[] {
-    const coverage = input.coverage ?? DEFAULT_COVERAGE
+    const coverage = input.coverage ?? (input.segments?.length ? this.resolveStructuredCoverage(input, input.segments) : DEFAULT_COVERAGE)
     return [
       {
         role: 'system',
@@ -657,6 +710,7 @@ export class LayoutDraftService {
 日期：${input.date}
 默认覆盖范围：${coverage.start} - ${coverage.end}
 用户需求：${input.userInput}
+${input.segments?.length ? `结构化时段需求：${JSON.stringify(input.segments)}` : ''}
 ${input.semanticLabel ? `LLM 识别出的版面标签：${input.semanticLabel}` : ''}
 ${input.programTypeHint ? `LLM 识别出的类型提示：${input.programTypeHint}` : ''}`,
       },
@@ -697,6 +751,7 @@ ${JSON.stringify(
         )}
 
 用户新要求：${input.userInput}
+${input.segments?.length ? `结构化时段需求：${JSON.stringify(input.segments)}` : ''}
 ${input.semanticLabel ? `LLM 识别出的版面标签：${input.semanticLabel}` : ''}
 ${input.programTypeHint ? `LLM 识别出的类型提示：${input.programTypeHint}` : ''}`,
       },

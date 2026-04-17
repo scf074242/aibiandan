@@ -1,0 +1,273 @@
+import type {
+  RuntimeInsertRecommendationCandidate,
+  RuntimePendingAtomicClarification,
+  RuntimePendingInsertRecommendation,
+  RuntimePendingTargetSelection,
+  RuntimeScheduleItem,
+} from './demoRuntimeFacade'
+
+export type RuntimeAtomicAction = 'insert' | 'move' | 'delete' | 'replace'
+export type RuntimePendingAtomicPhase = 'clarifying' | 'selecting_target' | 'recommending_insert'
+export type RuntimeAtomicMissingField =
+  | 'target_time'
+  | 'program_name'
+  | 'offset'
+  | 'direction'
+  | 'replacement_program'
+  | 'selection'
+
+export interface RuntimeAtomicSlotBag {
+  targetTime?: string
+  targetTimeHint?: string
+  programName?: string
+  rawProgramText?: string
+  semanticLabel?: string
+  programTypeHint?: string
+  direction?: 'forward' | 'backward'
+  offsetSeconds?: number
+  replacementProgramName?: string
+}
+
+export interface RuntimePendingAtomicContext {
+  action: RuntimeAtomicAction | null
+  phase: RuntimePendingAtomicPhase
+  summary: string
+  reasoning: string
+  originalUserInput: string
+  collectedUserInput: string
+  slots: RuntimeAtomicSlotBag
+  missingFields: RuntimeAtomicMissingField[]
+  followUpQuestion: string
+  targetCandidates?: RuntimeScheduleItem[]
+  insertRecommendations?: RuntimeInsertRecommendationCandidate[]
+  selectedItemId?: string | null
+  selectedCandidateId?: string | null
+  attemptCount: number
+  createdAt: string
+  updatedAt: string
+  expiresAt?: string
+}
+
+export interface RuntimePendingAtomicContextSource {
+  originalUserInput?: string
+  collectedUserInput?: string
+  slots?: Partial<RuntimeAtomicSlotBag>
+  attemptCount?: number
+  createdAt?: string
+  expiresAt?: string
+}
+
+const nowIso = () => new Date().toISOString()
+
+const mapClarificationMissingField = (field: string): RuntimeAtomicMissingField => {
+  const normalized = field.trim().toLowerCase()
+  if (normalized === 'target') return 'target_time'
+  if (normalized === 'replacement') return 'replacement_program'
+  if (normalized.includes('time')) return 'target_time'
+  if (normalized.includes('program')) return 'program_name'
+  if (normalized.includes('offset') || normalized.includes('duration')) return 'offset'
+  if (normalized.includes('direction')) return 'direction'
+  if (normalized.includes('replace')) return 'replacement_program'
+  return 'selection'
+}
+
+export const buildPendingAtomicContextFromClarification = (
+  pending: RuntimePendingAtomicClarification,
+  timestamp: string = nowIso(),
+  source?: RuntimePendingAtomicContextSource,
+): RuntimePendingAtomicContext => ({
+  action: pending.action,
+  phase: 'clarifying',
+  summary: pending.summary,
+  reasoning: pending.reasoning,
+  originalUserInput: source?.originalUserInput ?? pending.originalUserInput,
+  collectedUserInput: source?.collectedUserInput ?? pending.collectedUserInput,
+  slots: {
+    ...(source?.slots ?? {}),
+    targetTimeHint: pending.targetTimeHint,
+    programName: pending.programNameHint,
+  },
+  missingFields: pending.missingFields.map(mapClarificationMissingField),
+  followUpQuestion: pending.followUpQuestion,
+  attemptCount: source?.attemptCount ?? 0,
+  createdAt: source?.createdAt ?? timestamp,
+  updatedAt: timestamp,
+  expiresAt: source?.expiresAt,
+})
+
+export const rehydratePendingAtomicClarificationFromAtomicContext = (
+  pending: RuntimePendingAtomicContext,
+): RuntimePendingAtomicClarification | null => {
+  if (pending.phase !== 'clarifying') return null
+
+  const missingFields = pending.missingFields.map((field) => {
+    switch (field) {
+      case 'target_time':
+        return 'target'
+      case 'program_name':
+        return 'program'
+      case 'replacement_program':
+        return 'replacement'
+      case 'offset':
+        return 'offset'
+      default:
+        return 'target'
+    }
+  })
+
+  return {
+    action: pending.action,
+    summary: pending.summary,
+    reasoning: pending.reasoning,
+    originalUserInput: pending.originalUserInput,
+    collectedUserInput: pending.collectedUserInput,
+    targetTimeHint: pending.slots.targetTimeHint ?? pending.slots.targetTime,
+    programNameHint: pending.slots.programName ?? pending.slots.rawProgramText,
+    missingFields,
+    followUpQuestion: pending.followUpQuestion,
+  }
+}
+
+export const buildPendingAtomicContextFromTargetSelection = (
+  pending: RuntimePendingTargetSelection,
+  timestamp: string = nowIso(),
+  source?: RuntimePendingAtomicContextSource,
+): RuntimePendingAtomicContext => ({
+  action: pending.action,
+  phase: 'selecting_target',
+  summary: pending.summary,
+  reasoning: pending.reasoning,
+  originalUserInput: source?.originalUserInput ?? pending.summary,
+  collectedUserInput: source?.collectedUserInput ?? pending.summary,
+  slots: {
+    ...(source?.slots ?? {}),
+    targetTime: pending.targetTime,
+    programName: pending.programName,
+    direction: pending.moveConfig?.direction,
+    offsetSeconds: pending.moveConfig?.offsetSeconds,
+    replacementProgramName: pending.replaceProgramName,
+  },
+  missingFields: ['selection'],
+  followUpQuestion: pending.summary,
+  targetCandidates: pending.candidates,
+  selectedItemId: pending.selectedItemId,
+  attemptCount: source?.attemptCount ?? 0,
+  createdAt: source?.createdAt ?? timestamp,
+  updatedAt: timestamp,
+  expiresAt: source?.expiresAt,
+})
+
+export const buildPendingAtomicContextFromInsertRecommendation = (
+  pending: RuntimePendingInsertRecommendation,
+  timestamp: string = nowIso(),
+  source?: RuntimePendingAtomicContextSource,
+): RuntimePendingAtomicContext => ({
+  action: pending.action,
+  phase: 'recommending_insert',
+  summary: pending.summary,
+  reasoning: pending.reasoning,
+  originalUserInput: source?.originalUserInput ?? pending.originalUserInput,
+  collectedUserInput: source?.collectedUserInput ?? pending.collectedUserInput,
+  slots: {
+    ...(source?.slots ?? {}),
+    targetTime: pending.targetTime,
+    rawProgramText: pending.rawProgramText,
+    semanticLabel: pending.semanticLabel,
+    programTypeHint: pending.programTypeHint,
+  },
+  missingFields: ['selection'],
+  followUpQuestion: pending.summary,
+  insertRecommendations: pending.recommendedCandidates,
+  selectedCandidateId: pending.selectedCandidateId,
+  attemptCount: source?.attemptCount ?? 0,
+  createdAt: source?.createdAt ?? timestamp,
+  updatedAt: timestamp,
+  expiresAt: source?.expiresAt,
+})
+
+export const mergeRuntimeAtomicSlots = (
+  base: RuntimeAtomicSlotBag,
+  patch?: Partial<RuntimeAtomicSlotBag>,
+): RuntimeAtomicSlotBag => ({
+  ...base,
+  ...(patch ?? {}),
+})
+
+export const deriveAtomicMissingFieldsFromSlots = (
+  action: RuntimeAtomicAction | null,
+  slots: RuntimeAtomicSlotBag,
+): RuntimeAtomicMissingField[] => {
+  const hasTarget = Boolean(slots.targetTime || slots.targetTimeHint || slots.programName || slots.rawProgramText)
+  switch (action) {
+    case 'move': {
+      const missing: RuntimeAtomicMissingField[] = []
+      if (!hasTarget) missing.push('target_time')
+      if (!slots.direction) missing.push('direction')
+      if (typeof slots.offsetSeconds !== 'number') missing.push('offset')
+      return missing
+    }
+    case 'delete':
+      return hasTarget ? [] : ['target_time']
+    case 'replace': {
+      const missing: RuntimeAtomicMissingField[] = []
+      if (!hasTarget) missing.push('target_time')
+      if (!slots.replacementProgramName) missing.push('replacement_program')
+      return missing
+    }
+    case 'insert': {
+      const missing: RuntimeAtomicMissingField[] = []
+      if (!slots.targetTime && !slots.targetTimeHint) missing.push('target_time')
+      if (!slots.programName && !slots.rawProgramText && !slots.semanticLabel && !slots.programTypeHint) missing.push('program_name')
+      return missing
+    }
+    default:
+      return ['target_time']
+  }
+}
+
+export const rehydratePendingTargetSelectionFromAtomicContext = (
+  pending: RuntimePendingAtomicContext,
+): RuntimePendingTargetSelection | null => {
+  if (pending.phase !== 'selecting_target' || !pending.targetCandidates?.length || !pending.action || pending.action === 'insert') {
+    return null
+  }
+
+  return {
+    action: pending.action,
+    summary: pending.summary,
+    reasoning: pending.reasoning,
+    targetTime: pending.slots.targetTime ?? pending.slots.targetTimeHint ?? '',
+    programName: pending.slots.programName,
+    candidates: pending.targetCandidates,
+    selectedItemId: pending.selectedItemId ?? null,
+    moveConfig: pending.slots.direction && typeof pending.slots.offsetSeconds === 'number'
+      ? {
+          direction: pending.slots.direction,
+          offsetSeconds: pending.slots.offsetSeconds,
+        }
+      : undefined,
+    replaceProgramName: pending.slots.replacementProgramName,
+  }
+}
+
+export const rehydratePendingInsertRecommendationFromAtomicContext = (
+  pending: RuntimePendingAtomicContext,
+): RuntimePendingInsertRecommendation | null => {
+  if (pending.phase !== 'recommending_insert' || !pending.insertRecommendations?.length) {
+    return null
+  }
+
+  return {
+    action: 'insert',
+    summary: pending.summary,
+    reasoning: pending.reasoning,
+    originalUserInput: pending.originalUserInput,
+    collectedUserInput: pending.collectedUserInput,
+    targetTime: pending.slots.targetTime ?? pending.slots.targetTimeHint ?? '',
+    rawProgramText: pending.slots.rawProgramText,
+    semanticLabel: pending.slots.semanticLabel,
+    programTypeHint: pending.slots.programTypeHint,
+    recommendedCandidates: pending.insertRecommendations,
+    selectedCandidateId: pending.selectedCandidateId ?? null,
+  }
+}

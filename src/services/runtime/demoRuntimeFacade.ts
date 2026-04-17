@@ -1,14 +1,17 @@
 ﻿import type { DeleteCommand, DraftFeasibilityReport, InsertCommand, LayoutDraft, LayoutReference, MoveCommand, OrchestrationCommand, ReplaceCommand, ScheduleState, TaskClassification, TaskMode, ValidationReport } from '@/types/orchestration'
 import { getLLMClient } from '@/services/llm/llmClient'
+import type { LayoutIntentSegment } from '@/types/orchestration'
 import { getTaskClassifier } from '@/services/llm/taskClassifier'
 import { buildDialogueContext } from '@/services/dialogueContext'
 import { getIntentRecognizer } from '@/services/intentRecognizer'
 import type { MicroEditIntent } from '@/services/intentRecognizer'
 import { getParamExtractor } from '@/services/paramExtractor'
-import type { DeleteParams, MoveParams, ReplaceParams } from '@/services/paramExtractor'
-import { getEntityLinker } from '@/services/entityLinker'
+import type { DeleteParams, InsertParams, MoveParams, ReplaceParams } from '@/services/paramExtractor'
 import { getCandidateService } from '@/services/candidateService'
-import { getCandidateSelectionService } from '@/services/candidateSelectionService'
+import { getAtomicContinuationClassifier } from '@/services/atomicContinuationClassifier'
+import type { AtomicContinuationDecision } from '@/services/atomicContinuationClassifier'
+import { getAtomicFollowUpParser } from '@/services/atomicFollowUpParser'
+import { getInsertCandidateResolver } from '@/services/insertCandidateResolver'
 import { getInsertCommandExecutor } from '@/services/insertCommandExecutor'
 import { getReplaceCommandExecutor } from '@/services/replaceCommandExecutor'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
@@ -20,6 +23,20 @@ import { getLayoutDraftValidator } from '@/services/layoutDraftValidator'
 import { getLayoutDraftFeasibilityService } from '@/services/layoutDraftFeasibilityService'
 import { getLayoutIntentRecognizer, type LayoutIntentRecognition } from '@/services/layoutIntentRecognizer'
 import { getOrchestrationDemoLayout } from '@/mock/orchestrationMock'
+import {
+  buildPendingAtomicContextFromClarification,
+  buildPendingAtomicContextFromInsertRecommendation,
+  buildPendingAtomicContextFromTargetSelection,
+  deriveAtomicMissingFieldsFromSlots,
+  mergeRuntimeAtomicSlots,
+  type RuntimeAtomicAction,
+  type RuntimeAtomicMissingField,
+  type RuntimePendingAtomicContext,
+} from './pendingAtomicContext'
+import {
+  getPendingAtomicContextService,
+  type PendingAtomicLifecycleBlockReason,
+} from './pendingAtomicContextService'
 
 export type RuntimeDetailMap = Record<string, unknown>
 export type RuntimeProcessType = 'planning' | 'selection' | 'execution' | 'validation' | 'general'
@@ -27,22 +44,32 @@ export interface RuntimeFeedback { content: string; thinking?: string; explanati
 export interface RuntimeScheduleItem { id: string; programCode?: string; programName?: string; startTime: string; endTime: string; duration?: number; programType?: string }
 export interface RuntimePendingCommand { command: OrchestrationCommand; summary: string; successMessage?: string; reasoning: string; details?: RuntimeDetailMap }
 export interface RuntimePendingTargetSelection { action: 'delete' | 'move' | 'replace'; summary: string; reasoning: string; targetTime: string; programName?: string; candidates: RuntimeScheduleItem[]; selectedItemId: string | null; moveConfig?: { direction: 'forward' | 'backward'; offsetSeconds: number }; replaceProgramName?: string; resolutionDetails?: RuntimeDetailMap }
+export interface RuntimeInsertRecommendationCandidate { candidateId: string; programName: string; programCode: string; duration: number; programType: string; score: number; confidence: number; reasonTags: string[] }
+export interface RuntimePendingInsertRecommendation { action: 'insert'; summary: string; reasoning: string; originalUserInput: string; collectedUserInput: string; targetTime: string; rawProgramText?: string; semanticLabel?: string; programTypeHint?: string; recommendedCandidates: RuntimeInsertRecommendationCandidate[]; selectedCandidateId: string | null }
+export interface RuntimePendingAtomicClarification { action: RuntimeAtomicAction | null; summary: string; reasoning: string; originalUserInput: string; collectedUserInput: string; targetTimeHint?: string; programNameHint?: string; missingFields: string[]; followUpQuestion: string }
 export interface RuntimeExecutionPlan { command: OrchestrationCommand; successMessage?: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap }
 export interface RuntimeExecutedResult { success: boolean; command: OrchestrationCommand; message: string; error?: string; summary: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; data?: unknown; affectedTimeRanges?: { start: string; end: string }[]; validationReport?: ValidationReport; validationSummary?: RuntimeDetailMap }
-export interface RuntimeSubmitInput { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[]; currentLayoutDraft?: LayoutDraft | null; currentLayoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'> | null; history?: string[] }
+export interface RuntimeSubmitInput { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[]; currentLayoutDraft?: LayoutDraft | null; currentLayoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'> | null; pendingTargetSelection?: RuntimePendingTargetSelection | null; pendingInsertRecommendation?: RuntimePendingInsertRecommendation | null; pendingAtomicClarification?: RuntimePendingAtomicClarification | null; pendingAtomicContext?: RuntimePendingAtomicContext | null; history?: string[] }
 export interface RuntimeResolveTargetSelectionInput { channelId: string; date: string; pendingTargetSelection: RuntimePendingTargetSelection }
+export interface RuntimeResolveInsertRecommendationInput { scheduleState: ScheduleState; pendingInsertRecommendation: RuntimePendingInsertRecommendation }
 export interface RuntimeExecutePendingCommandInput { pendingCommand: RuntimePendingCommand; scheduleDate: string; channelId: string }
 export interface RuntimeOrchestrationRequest { userInput: string; mode: Extract<TaskMode, 'full_generate' | 'partial_generate'>; reasoning: string; layoutDraft?: LayoutDraft }
+export type RuntimeStatusHint = 'needs_clarification' | 'needs_selection' | 'needs_confirmation' | 'accepted' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
 export type RuntimeDecision =
-  | { kind: 'message'; feedback: RuntimeFeedback }
+  | { kind: 'message'; feedback: RuntimeFeedback; pendingAtomicClarification?: RuntimePendingAtomicClarification; statusHint?: RuntimeStatusHint }
+  | { kind: 'pending_atomic_context'; feedback: RuntimeFeedback; pendingAtomicContext: RuntimePendingAtomicContext }
   | { kind: 'pending_command'; feedback: RuntimeFeedback; pendingCommand: RuntimePendingCommand }
   | { kind: 'pending_target_selection'; feedback: RuntimeFeedback; pendingTargetSelection: RuntimePendingTargetSelection }
+  | { kind: 'pending_insert_recommendation'; feedback: RuntimeFeedback; pendingInsertRecommendation: RuntimePendingInsertRecommendation }
   | { kind: 'execute_command'; execution: RuntimeExecutionPlan }
   | { kind: 'orchestration'; feedback: RuntimeFeedback; orchestrationRequest: RuntimeOrchestrationRequest }
   | { kind: 'layout_draft'; feedback: RuntimeFeedback; draft: LayoutDraft; feasibilityReport: DraftFeasibilityReport; orchestrationMode: Extract<TaskMode, 'full_generate' | 'partial_generate'> }
   | { kind: 'layout_commit'; feedback: RuntimeFeedback; draft: LayoutDraft; orchestrationRequest: RuntimeOrchestrationRequest }
 
-type RuntimeMicroEditBuildResult = { command: OrchestrationCommand | null; message?: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; successMessage?: string; pendingTargetSelection?: RuntimePendingTargetSelection }
+type RuntimeMicroEditBuildResult = { command: OrchestrationCommand | null; message?: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; successMessage?: string; pendingTargetSelection?: RuntimePendingTargetSelection; pendingInsertRecommendation?: RuntimePendingInsertRecommendation }
+type RuntimePendingAtomicContinuationResult =
+  | { kind: 'decision'; decision: RuntimeDecision }
+  | { kind: 'clear_pending_and_continue'; input: RuntimeSubmitInput }
 
 const DEFAULT_BROADCAST_WINDOW = { start: '06:00:00', end: '23:59:59' }
 const toClockText = (value: string) => value.includes('T') ? (value.split('T')[1]?.slice(0, 8) ?? value) : (value.length === 5 ? `${value}:00` : value)
@@ -63,9 +90,11 @@ export class DemoRuntimeFacade {
   private readonly intentRecognizer = getIntentRecognizer(this.llmClient)
   private readonly layoutIntentRecognizer = getLayoutIntentRecognizer(this.llmClient)
   private readonly paramExtractor = getParamExtractor(this.llmClient)
-  private readonly entityLinker = getEntityLinker()
+  private readonly atomicContinuationClassifier = getAtomicContinuationClassifier()
+  private readonly atomicFollowUpParser = getAtomicFollowUpParser()
+  private readonly pendingAtomicContextService = getPendingAtomicContextService()
   private readonly candidateService = getCandidateService()
-  private readonly candidateSelectionService = getCandidateSelectionService(this.llmClient)
+  private readonly insertCandidateResolver = getInsertCandidateResolver()
   private readonly insertCommandExecutor = getInsertCommandExecutor()
   private readonly replaceCommandExecutor = getReplaceCommandExecutor()
   private readonly scheduleCommandBus = getScheduleCommandBus()
@@ -76,31 +105,58 @@ export class DemoRuntimeFacade {
   private readonly layoutDraftFeasibilityService = getLayoutDraftFeasibilityService()
 
   async submitInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision> {
-    const atomicDecision = await this.tryHandleAtomicInstruction(input)
+    let effectiveInput = input
+    const pendingAtomicContextContinuation = await this.tryContinuePendingAtomicContext(input)
+    if (pendingAtomicContextContinuation) {
+      if (pendingAtomicContextContinuation.kind === 'decision') return pendingAtomicContextContinuation.decision
+      effectiveInput = pendingAtomicContextContinuation.input
+    }
+
+    const pendingAtomicDecision = await this.tryContinuePendingAtomicClarification(effectiveInput)
+    if (pendingAtomicDecision) return pendingAtomicDecision
+
+    const atomicDecision = await this.tryHandleAtomicInstruction(effectiveInput)
     if (atomicDecision) return atomicDecision
 
     const layoutRecognition = await this.layoutIntentRecognizer.recognize({
-      scheduleState: input.scheduleState,
-      userInput: input.userInput,
-      history: input.history,
-      currentLayoutDraft: input.currentLayoutDraft,
-      hasUploadedLayout: Boolean(getRuntimeLayoutEntry(input.scheduleState.channelId, input.scheduleState.date)?.templateMode),
-      hasDefaultLayout: Boolean(getOrchestrationDemoLayout(input.scheduleState.channelId, input.scheduleState.date)),
+      scheduleState: effectiveInput.scheduleState,
+      userInput: effectiveInput.userInput,
+      history: effectiveInput.history,
+      currentLayoutDraft: effectiveInput.currentLayoutDraft,
+      hasUploadedLayout: Boolean(getRuntimeLayoutEntry(effectiveInput.scheduleState.channelId, effectiveInput.scheduleState.date)?.templateMode),
+      hasDefaultLayout: Boolean(getOrchestrationDemoLayout(effectiveInput.scheduleState.channelId, effectiveInput.scheduleState.date)),
     })
+    if (this.isAtomicFallbackIntent(layoutRecognition)) {
+      const pendingAtomicClarification = this.buildPendingAtomicClarification(effectiveInput, layoutRecognition.reasoning)
+      return this.buildPendingAtomicClarificationDecision(pendingAtomicClarification)
+    }
     if (this.isConfidentLayoutIntent(layoutRecognition)) {
-      const classification = this.convertLayoutIntentToClassification(layoutRecognition, input.userInput)
+      const classification = this.convertLayoutIntentToClassification(layoutRecognition, effectiveInput.userInput)
       return classification.mode === 'layout_commit'
-        ? this.commitLayoutDraft(input, classification)
-        : this.prepareLayoutDraft(input, classification, input.currentLayoutDraftMode ?? 'full_generate')
+        ? this.commitLayoutDraft(effectiveInput, classification)
+        : this.prepareLayoutDraft(effectiveInput, classification, this.resolvePreferredOrchestrationMode(effectiveInput))
     }
 
-    const classification = await this.taskClassifier.classify({ scheduleState: input.scheduleState, userInput: input.userInput, history: input.history })
-    if (classification.mode === 'micro_edit') return this.buildMicroEditDecision(await this.buildMicroEditCommand(input, classification.reasoning), classification.reasoning)
-    if (classification.mode === 'validate_only') return this.buildValidationDecision(classification, input)
-    if (classification.mode === 'full_generate' || classification.mode === 'partial_generate' || classification.mode === 'repair_only') {
-      return this.prepareLayoutDraft(input, classification, classification.mode === 'full_generate' ? 'full_generate' : 'partial_generate')
+    const classification = await this.taskClassifier.classify({ scheduleState: effectiveInput.scheduleState, userInput: effectiveInput.userInput, history: effectiveInput.history })
+    if (classification.mode === 'micro_edit') {
+      const result = await this.buildMicroEditCommand(effectiveInput, classification.reasoning)
+      return this.buildMicroEditDecisionWithContinuationFallback(
+        effectiveInput,
+        result,
+        classification.reasoning,
+      )
     }
-    return { kind: 'message', feedback: createFeedback('我还不能稳定理解这条指令。你可以直接说“全天编排”“补齐当前空窗”，或明确说明“下午改成新闻栏目”。', 'general', '需要澄清', { explanation: classification.reasoning || layoutRecognition.reasoning }) }
+    if (classification.mode === 'validate_only') return this.buildValidationDecision(classification, effectiveInput)
+    if (classification.mode === 'repair_only') return this.buildRepairAnalysisDecision(classification, effectiveInput)
+    if (classification.mode === 'layout_prepare' || classification.mode === 'layout_refine' || classification.mode === 'layout_commit') {
+      return classification.mode === 'layout_commit'
+        ? this.commitLayoutDraft(effectiveInput, classification)
+        : this.prepareLayoutDraft(effectiveInput, classification, this.resolvePreferredOrchestrationMode(effectiveInput))
+    }
+    if (classification.mode === 'full_generate' || classification.mode === 'partial_generate') {
+      return this.prepareLayoutDraft(effectiveInput, classification, classification.mode === 'full_generate' ? 'full_generate' : 'partial_generate')
+    }
+    return { kind: 'message', feedback: this.buildClarifyFeedback(effectiveInput, classification.reasoning || layoutRecognition.reasoning) }
   }
 
   async resolvePendingTargetSelection(input: RuntimeResolveTargetSelectionInput): Promise<RuntimeDecision> {
@@ -130,26 +186,584 @@ export class DemoRuntimeFacade {
     return this.buildReplaceDecisionForSelectedItem(selectedItem, replaceProgramName, channelId, date, pendingTargetSelection)
   }
 
+  async resolvePendingInsertRecommendation(input: RuntimeResolveInsertRecommendationInput): Promise<RuntimeDecision> {
+    const { pendingInsertRecommendation, scheduleState } = input
+    const selectedCandidate = pendingInsertRecommendation.recommendedCandidates.find(
+      (candidate) => candidate.candidateId === pendingInsertRecommendation.selectedCandidateId,
+    )
+    if (!selectedCandidate) {
+      return {
+        kind: 'message',
+        feedback: createFeedback(
+          '当前未选中有效的插入候选，请重新确认要插入的节目。',
+          'selection',
+          '插入推荐',
+          {
+            explanation: pendingInsertRecommendation.reasoning,
+            details: {
+              targetTime: pendingInsertRecommendation.targetTime,
+              recommendedCandidateCount: pendingInsertRecommendation.recommendedCandidates.length,
+            },
+          },
+        ),
+      }
+    }
+
+    const result = this.buildInsertCommandResult(
+      {
+        scheduleState,
+        userInput: pendingInsertRecommendation.collectedUserInput,
+        currentSchedule: [],
+      },
+      {
+        targetTime: pendingInsertRecommendation.targetTime,
+        programName: selectedCandidate.programName,
+        rawProgramText: pendingInsertRecommendation.rawProgramText,
+        semanticLabel: pendingInsertRecommendation.semanticLabel,
+        programTypeHint: pendingInsertRecommendation.programTypeHint,
+      },
+      {
+        id: selectedCandidate.candidateId,
+        programName: selectedCandidate.programName,
+      },
+      pendingInsertRecommendation.reasoning,
+      {
+        targetTime: pendingInsertRecommendation.targetTime,
+        selectedCandidateName: selectedCandidate.programName,
+        recommendedCandidateCount: pendingInsertRecommendation.recommendedCandidates.length,
+      },
+      '已按你的确认选择插入候选节目。',
+    )
+
+    return this.buildMicroEditDecision(result, pendingInsertRecommendation.reasoning)
+  }
+
   async executePendingCommand(input: RuntimeExecutePendingCommandInput): Promise<RuntimeExecutedResult> {
     const result = await this.scheduleCommandBus.execute(input.pendingCommand.command, { scheduleDate: input.scheduleDate, channelId: input.channelId })
     return { success: result.success, command: input.pendingCommand.command, message: result.success ? (input.pendingCommand.successMessage || result.message) : (result.error || result.message), error: result.error, summary: input.pendingCommand.summary, thinking: result.success ? '命令已执行完成。' : '命令执行失败，未能完成本次修改。', explanation: input.pendingCommand.reasoning, details: input.pendingCommand.details, data: result.data, affectedTimeRanges: result.affectedTimeRanges, validationReport: result.validationReport, validationSummary: buildValidationSummary(result.validationReport) }
   }
 
-  private isConfidentLayoutIntent(recognition: LayoutIntentRecognition): boolean { return recognition.mode !== 'clarify' && recognition.confidence >= 0.72 }
-  private convertLayoutIntentToClassification(recognition: LayoutIntentRecognition, userInput: string): TaskClassification { return { mode: recognition.mode, confidence: recognition.confidence, reasoning: recognition.reasoning, suggestedParams: { userIntent: recognition.semanticLabel || userInput, targetTimeRange: recognition.targetTimeRange, ignoreExistingLayout: recognition.ignoreExistingLayout, semanticLabel: recognition.semanticLabel, programTypeHint: recognition.programTypeHint } } }
-  private shouldApplyIntentOnExistingDraft(classification: TaskClassification): boolean { return Boolean(classification.suggestedParams?.targetTimeRange || classification.suggestedParams?.semanticLabel || classification.suggestedParams?.programTypeHint) }
+  private isConfidentLayoutIntent(recognition: LayoutIntentRecognition): boolean { return recognition.mode !== 'clarify' && recognition.mode !== 'atomic_fallback' && recognition.confidence >= 0.72 }
+  private isAtomicFallbackIntent(recognition: LayoutIntentRecognition): boolean { return recognition.mode === 'atomic_fallback' && recognition.confidence >= 0.72 }
+  private convertLayoutIntentToClassification(recognition: LayoutIntentRecognition, userInput: string): TaskClassification {
+    const mode: TaskMode = recognition.mode === 'clarify' || recognition.mode === 'atomic_fallback'
+      ? 'clarify'
+      : recognition.mode
+    return { mode, confidence: recognition.confidence, reasoning: recognition.reasoning, suggestedParams: { userIntent: recognition.semanticLabel || userInput, targetTimeRange: recognition.targetTimeRange, ignoreExistingLayout: recognition.ignoreExistingLayout, semanticLabel: recognition.semanticLabel, programTypeHint: recognition.programTypeHint, segments: recognition.segments } }
+  }
+  private shouldApplyIntentOnExistingDraft(classification: TaskClassification, currentDraft?: LayoutDraft | null): boolean {
+    if (classification.suggestedParams?.segments?.length) return true
+    if (classification.suggestedParams?.semanticLabel || classification.suggestedParams?.programTypeHint) return true
+    const targetTimeRange = classification.suggestedParams?.targetTimeRange
+    if (!targetTimeRange) return false
+    if (!currentDraft) return true
+    return targetTimeRange.start !== currentDraft.coverage.start || targetTimeRange.end !== currentDraft.coverage.end
+  }
+  private normalizeStructuredSegments(segments?: LayoutIntentSegment[]): LayoutIntentSegment[] | undefined { return segments?.filter((segment) => Boolean(segment.start && segment.end)) }
+  private resolvePreferredOrchestrationMode(input: RuntimeSubmitInput): Extract<TaskMode, 'full_generate' | 'partial_generate'> {
+    return input.currentLayoutDraftMode ?? (input.scheduleState.isEmpty || input.scheduleState.itemCount === 0 ? 'full_generate' : 'partial_generate')
+  }
+
+  private async tryContinuePendingAtomicContext(input: RuntimeSubmitInput): Promise<RuntimePendingAtomicContinuationResult | null> {
+    const pendingContext = input.pendingAtomicContext
+    if (!pendingContext) return null
+
+    const continuationDecision = this.atomicContinuationClassifier.classify({
+      pendingContext,
+      userInput: input.userInput,
+    })
+
+    if (continuationDecision.kind === 'cancel') {
+      return {
+        kind: 'decision',
+        decision: this.buildPendingAtomicCancelledDecision(pendingContext),
+      }
+    }
+    if (continuationDecision.kind === 'interrupt_as_new_task') {
+      return {
+        kind: 'clear_pending_and_continue',
+        input: this.clearPendingAtomicState(input),
+      }
+    }
+
+    const lifecycleBlockReason = this.pendingAtomicContextService.getBlockReason(pendingContext)
+    if (lifecycleBlockReason) {
+      return {
+        kind: 'decision',
+        decision: this.buildPendingAtomicLifecycleBlockedDecision(pendingContext, lifecycleBlockReason),
+      }
+    }
+
+    if (pendingContext.phase === 'clarifying') {
+      return {
+        kind: 'decision',
+        decision: await this.continuePendingAtomicClarifyingContext(input, pendingContext),
+      }
+    }
+
+    if (pendingContext.phase === 'selecting_target') {
+      return {
+        kind: 'decision',
+        decision: await this.continuePendingTargetSelection(input, pendingContext, continuationDecision),
+      }
+    }
+
+    if (pendingContext.phase === 'recommending_insert') {
+      return {
+        kind: 'decision',
+        decision: await this.continuePendingInsertRecommendation(input, pendingContext, continuationDecision),
+      }
+    }
+
+    return null
+  }
+
+  private clearPendingAtomicState(input: RuntimeSubmitInput): RuntimeSubmitInput {
+    return {
+      ...input,
+      pendingTargetSelection: null,
+      pendingInsertRecommendation: null,
+      pendingAtomicClarification: null,
+      pendingAtomicContext: null,
+    }
+  }
+
+  private buildPendingAtomicCancelledDecision(pending: RuntimePendingAtomicContext): RuntimeDecision {
+    return {
+      kind: 'message',
+      statusHint: 'cancelled',
+      feedback: createFeedback(
+        `${pending.summary}已取消。`,
+        'general',
+        '已取消',
+        {
+          explanation: pending.reasoning,
+          details: {
+            action: pending.action,
+            phase: pending.phase,
+          },
+        },
+      ),
+    }
+  }
+
+  private buildPendingAtomicLifecycleBlockedDecision(
+    pending: RuntimePendingAtomicContext,
+    reason: PendingAtomicLifecycleBlockReason,
+  ): RuntimeDecision {
+    if (reason === 'expired') {
+      return {
+        kind: 'message',
+        statusHint: 'cancelled',
+        feedback: createFeedback(
+          '上一条待补充的修改任务已经超时失效，请重新描述完整需求。',
+          'general',
+          '上下文已失效',
+          {
+            explanation: pending.reasoning,
+            details: {
+              action: pending.action,
+              phase: pending.phase,
+              expiresAt: pending.expiresAt,
+            },
+          },
+        ),
+      }
+    }
+
+    return {
+      kind: 'message',
+      statusHint: 'failed',
+      feedback: createFeedback(
+        `这条待处理的修改任务已经连续尝试 ${pending.attemptCount} 次仍未补齐，我先结束本轮上下文。请重新描述完整需求。`,
+        'general',
+        '补参失败',
+        {
+          explanation: pending.reasoning,
+          details: {
+            action: pending.action,
+            phase: pending.phase,
+            attemptCount: pending.attemptCount,
+          },
+        },
+      ),
+    }
+  }
+
+  private rehydratePendingAtomicClarification(pending: RuntimePendingAtomicContext): RuntimePendingAtomicClarification {
+    const missingFields = pending.missingFields.map((field) => {
+      switch (field) {
+        case 'target_time':
+          return 'target'
+        case 'program_name':
+          return 'program'
+        case 'replacement_program':
+          return 'replacement'
+        case 'offset':
+          return 'offset'
+        default:
+          return 'target'
+      }
+    })
+
+    return {
+      action: pending.action,
+      summary: pending.summary,
+      reasoning: pending.reasoning,
+      originalUserInput: pending.originalUserInput,
+      collectedUserInput: pending.collectedUserInput,
+      targetTimeHint: pending.slots.targetTimeHint,
+      programNameHint: pending.slots.programName ?? pending.slots.rawProgramText,
+      missingFields,
+      followUpQuestion: pending.followUpQuestion,
+    }
+  }
+
+  private rehydratePendingTargetSelection(pending: RuntimePendingAtomicContext): RuntimePendingTargetSelection | null {
+    if (pending.phase !== 'selecting_target' || !pending.targetCandidates?.length || !pending.action || pending.action === 'insert') return null
+    return {
+      action: pending.action,
+      summary: pending.summary,
+      reasoning: pending.reasoning,
+      targetTime: pending.slots.targetTime ?? pending.slots.targetTimeHint ?? '',
+      programName: pending.slots.programName,
+      candidates: pending.targetCandidates,
+      selectedItemId: pending.selectedItemId ?? null,
+      moveConfig: pending.slots.direction && typeof pending.slots.offsetSeconds === 'number'
+        ? {
+            direction: pending.slots.direction,
+            offsetSeconds: pending.slots.offsetSeconds,
+          }
+        : undefined,
+      replaceProgramName: pending.slots.replacementProgramName,
+    }
+  }
+
+  private rehydratePendingInsertRecommendation(pending: RuntimePendingAtomicContext): RuntimePendingInsertRecommendation | null {
+    if (pending.phase !== 'recommending_insert' || !pending.insertRecommendations?.length) return null
+    return {
+      action: 'insert',
+      summary: pending.summary,
+      reasoning: pending.reasoning,
+      originalUserInput: pending.originalUserInput,
+      collectedUserInput: pending.collectedUserInput,
+      targetTime: pending.slots.targetTime ?? pending.slots.targetTimeHint ?? '',
+      rawProgramText: pending.slots.rawProgramText,
+      semanticLabel: pending.slots.semanticLabel,
+      programTypeHint: pending.slots.programTypeHint,
+      recommendedCandidates: pending.insertRecommendations,
+      selectedCandidateId: pending.selectedCandidateId ?? null,
+    }
+  }
+
+  private async continuePendingAtomicClarifyingContext(input: RuntimeSubmitInput, pendingContext: RuntimePendingAtomicContext): Promise<RuntimeDecision> {
+    const parsedPatch = this.atomicFollowUpParser.parse({
+      pendingContext,
+      userInput: input.userInput,
+    })
+
+    if (parsedPatch) {
+      const patchedContext = this.refreshClarifyingPendingAtomicContext(
+        this.patchPendingAtomicContext(pendingContext, parsedPatch.slots, input.userInput),
+      )
+
+      if (patchedContext.missingFields.length === 0 && patchedContext.action) {
+        const canonicalUserInput = this.buildCanonicalAtomicInstruction(patchedContext)
+        const result = await this.buildMicroEditCommand(
+          {
+            ...this.clearPendingAtomicState(input),
+            userInput: canonicalUserInput,
+          },
+          patchedContext.reasoning,
+          {
+            type: patchedContext.action,
+            confidence: 0.85,
+            reasoning: patchedContext.reasoning,
+          },
+        )
+        return this.buildMicroEditDecision(result, patchedContext.reasoning, patchedContext)
+      }
+
+      return this.buildPendingAtomicContextDecision(patchedContext)
+    }
+
+    const pendingAtomicClarification = input.pendingAtomicClarification ?? this.rehydratePendingAtomicClarification(pendingContext)
+    const decision = await this.tryContinuePendingAtomicClarification({
+      ...input,
+      pendingAtomicClarification,
+      pendingAtomicContext: null,
+    })
+    if (decision?.kind === 'pending_atomic_context') {
+      return this.buildPendingAtomicContextDecision(
+        this.pendingAtomicContextService.recordAttempt(decision.pendingAtomicContext),
+        decision.feedback,
+      )
+    }
+    return decision ?? this.buildPendingAtomicContextDecision(
+      this.pendingAtomicContextService.recordAttempt(pendingContext),
+    )
+  }
+
+  private async continuePendingTargetSelection(
+    input: RuntimeSubmitInput,
+    pendingContext: RuntimePendingAtomicContext,
+    continuationDecision?: AtomicContinuationDecision,
+  ): Promise<RuntimeDecision> {
+    const pendingTargetSelection = input.pendingTargetSelection ?? this.rehydratePendingTargetSelection(pendingContext)
+    if (!pendingTargetSelection) {
+      return {
+        kind: 'message',
+        feedback: createFeedback('当前未找到可继续的目标选择上下文，请重新描述你的修改需求。', 'selection', '目标选择'),
+      }
+    }
+
+    const selectedItemId = this.resolvePendingTargetSelectionReply(
+      pendingTargetSelection,
+      continuationDecision?.kind === 'selection_reply' && continuationDecision.selection.mode === 'raw_text'
+        ? continuationDecision.selection.value
+        : input.userInput,
+    )
+    if (!selectedItemId) {
+      return this.buildPendingTargetSelectionDecision(
+        pendingTargetSelection,
+        '我还不能确定你选的是哪一个目标。你可以回复“第一个”、具体节目名，或直接点选列表项。',
+        this.pendingAtomicContextService.recordAttempt(pendingContext),
+      )
+    }
+
+    return this.resolvePendingTargetSelection({
+      channelId: input.scheduleState.channelId,
+      date: input.scheduleState.date,
+      pendingTargetSelection: {
+        ...pendingTargetSelection,
+        selectedItemId,
+      },
+    })
+  }
+
+  private async continuePendingInsertRecommendation(
+    input: RuntimeSubmitInput,
+    pendingContext: RuntimePendingAtomicContext,
+    continuationDecision?: AtomicContinuationDecision,
+  ): Promise<RuntimeDecision> {
+    const pendingInsertRecommendation = input.pendingInsertRecommendation ?? this.rehydratePendingInsertRecommendation(pendingContext)
+    if (!pendingInsertRecommendation) {
+      return {
+        kind: 'message',
+        feedback: createFeedback('当前未找到可继续的插入推荐上下文，请重新描述插入需求。', 'selection', '插入推荐'),
+      }
+    }
+
+    const selectedCandidateId = this.resolvePendingInsertRecommendationReply(
+      pendingInsertRecommendation,
+      continuationDecision?.kind === 'selection_reply' && continuationDecision.selection.mode === 'raw_text'
+        ? continuationDecision.selection.value
+        : input.userInput,
+    )
+    if (selectedCandidateId) {
+      return this.resolvePendingInsertRecommendation({
+        scheduleState: input.scheduleState,
+        pendingInsertRecommendation: {
+          ...pendingInsertRecommendation,
+          selectedCandidateId,
+        },
+      })
+    }
+
+    const correctionPatch = this.atomicFollowUpParser.parse({
+      pendingContext,
+      userInput: continuationDecision?.kind === 'correction_reply'
+        ? continuationDecision.value
+        : input.userInput,
+    })
+    const patchedContext = correctionPatch
+      ? this.patchPendingAtomicContext(
+          pendingContext,
+          correctionPatch.slots,
+          continuationDecision?.kind === 'correction_reply' ? continuationDecision.value : input.userInput,
+        )
+      : pendingContext
+
+    const mergedUserInput = correctionPatch
+      ? this.buildCanonicalAtomicInstruction(patchedContext)
+      : this.mergePendingCollectedInput(pendingInsertRecommendation.collectedUserInput, input.userInput)
+    const retriedInput: RuntimeSubmitInput = {
+      ...this.clearPendingAtomicState(input),
+      userInput: mergedUserInput,
+    }
+    const result = await this.buildMicroEditCommand(
+      retriedInput,
+      pendingInsertRecommendation.reasoning,
+      {
+        type: 'insert',
+        confidence: 0.6,
+        reasoning: pendingInsertRecommendation.reasoning,
+      },
+    )
+
+    if (result.command || result.pendingInsertRecommendation) {
+      return this.buildMicroEditDecision(result, pendingInsertRecommendation.reasoning)
+    }
+
+    return this.buildPendingInsertRecommendationDecision(
+      {
+        ...pendingInsertRecommendation,
+        collectedUserInput: correctionPatch ? patchedContext.collectedUserInput : mergedUserInput,
+      },
+      result.message || '还没确认具体要插入的节目。你可以回复“第一个”、直接说候选节目名，或补充更明确的节目描述。',
+      this.pendingAtomicContextService.recordAttempt(correctionPatch ? patchedContext : pendingContext),
+    )
+  }
+
+  private resolvePendingTargetSelectionReply(pending: RuntimePendingTargetSelection, userInput: string): string | null {
+    const ordinalIndex = this.resolveSelectionOrdinalIndex(userInput)
+    if (ordinalIndex !== null) {
+      return pending.candidates[ordinalIndex]?.id ?? null
+    }
+
+    const normalizedInput = this.normalizeSelectionText(userInput)
+    if (!normalizedInput) return null
+
+    const matchedByName = pending.candidates.find((candidate) => {
+      const name = this.normalizeSelectionText(candidate.programName ?? '')
+      return name && (normalizedInput.includes(name) || name.includes(normalizedInput))
+    })
+    if (matchedByName) return matchedByName.id
+
+    const matchedByTime = pending.candidates.find((candidate) => normalizedInput.includes(this.normalizeSelectionText(candidate.startTime)))
+    return matchedByTime?.id ?? null
+  }
+
+  private resolvePendingInsertRecommendationReply(pending: RuntimePendingInsertRecommendation, userInput: string): string | null {
+    const ordinalIndex = this.resolveSelectionOrdinalIndex(userInput)
+    if (ordinalIndex !== null) {
+      return pending.recommendedCandidates[ordinalIndex]?.candidateId ?? null
+    }
+
+    const normalizedInput = this.normalizeSelectionText(userInput)
+    if (!normalizedInput) return null
+
+    const matched = pending.recommendedCandidates.find((candidate) => {
+      const name = this.normalizeSelectionText(candidate.programName)
+      return normalizedInput.includes(name) || name.includes(normalizedInput)
+    })
+    return matched?.candidateId ?? null
+  }
+
+  private resolveSelectionOrdinalIndex(userInput: string): number | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const cleaned = normalized.replace(/(我选|选|就|那就|吧|啊|呀|呢|节目|条|项|个)/g, '')
+    const mapping: Record<string, number> = {
+      '第一': 0,
+      '第1': 0,
+      '一': 0,
+      '1': 0,
+      '第二': 1,
+      '第2': 1,
+      '二': 1,
+      '2': 1,
+      '第三': 2,
+      '第3': 2,
+      '三': 2,
+      '3': 2,
+      '第四': 3,
+      '第4': 3,
+      '四': 3,
+      '4': 3,
+      '第五': 4,
+      '第5': 4,
+      '五': 4,
+      '5': 4,
+    }
+    return Object.prototype.hasOwnProperty.call(mapping, cleaned) ? mapping[cleaned]! : null
+  }
+
+  private normalizeSelectionText(value: string): string {
+    return value.replace(/[\s:：-]/g, '').toLowerCase()
+  }
+
+  private mergePendingCollectedInput(collectedUserInput: string, userInput: string): string {
+    const normalizedFollowUp = userInput.trim()
+    if (!normalizedFollowUp) return collectedUserInput
+    if (collectedUserInput.includes(normalizedFollowUp)) return collectedUserInput
+    return `${collectedUserInput}，补充说明：${normalizedFollowUp}`
+  }
+
+  private async tryContinuePendingAtomicClarification(input: RuntimeSubmitInput): Promise<RuntimeDecision | null> {
+    const pending = input.pendingAtomicClarification
+    if (!pending) return null
+    if (this.shouldBypassPendingAtomicClarification(input.userInput)) return null
+    const sourcePendingContext = input.pendingAtomicContext ?? buildPendingAtomicContextFromClarification(pending)
+
+    const mergedUserInput = this.mergeAtomicClarificationInput(pending, input.userInput)
+    const mergedInput: RuntimeSubmitInput = {
+      ...input,
+      userInput: mergedUserInput,
+      pendingAtomicClarification: null,
+    }
+    const context = buildDialogueContext({ scheduleState: mergedInput.scheduleState, userInput: mergedInput.userInput, currentSchedule: mergedInput.currentSchedule })
+    const recognized = await this.intentRecognizer.recognize(context)
+    const recognizedAction = this.asRuntimeAtomicAction(recognized.type)
+    const fallbackIntent = pending.action
+      ? {
+          type: pending.action,
+          confidence: 0.6,
+          reasoning: recognized.reasoning || pending.reasoning,
+        } satisfies MicroEditIntent
+      : null
+    const intent = recognizedAction ? recognized : fallbackIntent
+
+    if (!intent || !this.asRuntimeAtomicAction(intent.type)) {
+      return this.buildPendingAtomicClarificationDecision(
+        this.buildPendingAtomicClarification({
+          ...mergedInput,
+          userInput: mergedUserInput,
+          pendingAtomicClarification: pending,
+        }, recognized.reasoning || pending.reasoning, pending.action),
+        recognized.reasoning || pending.reasoning,
+        undefined,
+        sourcePendingContext,
+      )
+    }
+
+    const result = await this.buildMicroEditCommand(mergedInput, intent.reasoning || pending.reasoning, intent)
+    if (result.command || result.pendingTargetSelection || result.pendingInsertRecommendation) {
+      return this.buildMicroEditDecision(result, intent.reasoning || pending.reasoning, sourcePendingContext)
+    }
+
+    if (this.shouldStayInAtomicClarification(result.message)) {
+      return this.buildPendingAtomicClarificationDecision(
+        this.buildPendingAtomicClarification({
+          ...mergedInput,
+          userInput: mergedUserInput,
+          pendingAtomicClarification: pending,
+        }, result.explanation || intent.reasoning || pending.reasoning, pending.action),
+        result.explanation || intent.reasoning || pending.reasoning,
+        result.message,
+        sourcePendingContext,
+      )
+    }
+
+    return this.buildMicroEditDecision(result, intent.reasoning || pending.reasoning, sourcePendingContext)
+  }
 
   private async tryHandleAtomicInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision | null> {
     if (!this.shouldAttemptAtomicInstruction(input.userInput)) return null
     const context = buildDialogueContext({ scheduleState: input.scheduleState, userInput: input.userInput, currentSchedule: input.currentSchedule })
     const recognizedIntent = await this.intentRecognizer.recognize(context)
     if (!['insert', 'move', 'delete', 'replace'].includes(recognizedIntent.type)) return null
-    return this.buildMicroEditDecision(await this.buildMicroEditCommand(input, recognizedIntent.reasoning, recognizedIntent), recognizedIntent.reasoning)
+    const result = await this.buildMicroEditCommand(input, recognizedIntent.reasoning, recognizedIntent)
+    return this.buildMicroEditDecisionWithContinuationFallback(
+      input,
+      result,
+      recognizedIntent.reasoning,
+      this.asRuntimeAtomicAction(recognizedIntent.type),
+    )
   }
 
   private shouldAttemptAtomicInstruction(userInput: string): boolean {
     const normalized = userInput.replace(/\s+/g, '')
-    if (!/(插入|添加节目|安排节目|删除|删掉|移除|移动|后移|前移|顺延|延后|提前|换成|替换成|替换为|改成|改为)/.test(normalized)) return false
+    if (!/(插入|插个|插一|添加节目|安排节目|删除|删掉|移除|移动|后移|前移|顺延|延后|提前|换成|替换成|替换为|改成|改为)/.test(normalized)) return false
     const hasExactTime = /(\d{1,2})(点半|点(\d{1,2})分?|[:：]\d{2})/.test(normalized)
     const hasQuotedTitle = /《[^》]+》/.test(normalized)
     const hasBroadScope = /(全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全部|都|统一|整体)/.test(normalized)
@@ -157,9 +771,353 @@ export class DemoRuntimeFacade {
     return !((hasBroadScope || hasLayoutCue) && !hasExactTime && !hasQuotedTitle)
   }
 
-  private buildMicroEditDecision(result: RuntimeMicroEditBuildResult, fallbackReasoning: string): RuntimeDecision {
+  private shouldBypassPendingAtomicClarification(userInput: string): boolean {
+    const normalized = userInput.replace(/\s+/g, '')
+    if (/(按这个版面开始编排|按该版面开始编排|确认版面|采用这个版面|用这个版面编排)/.test(normalized)) return true
+    if (/(帮我全天编排|全天编排|整天编排|帮我填充全天节目|填充全天节目|补齐当前所有空窗|补齐当前空窗|补齐空窗|补齐当前所有空缺|补齐当前空缺)/.test(normalized)) return true
+    if (/(版面|栏目|剧场|时段|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全天|整天|全日)/.test(normalized)) return true
+    return /(\d{1,2}(?::\d{2})?点?.*)(到|至|-).*(\d{1,2}(?::\d{2})?点?)/.test(normalized)
+      && /(新闻|栏目|剧场|电视剧|综艺|专题|资讯|纪录片|纪实|少儿|动画)/.test(normalized)
+  }
+
+  private mergeAtomicClarificationInput(pending: RuntimePendingAtomicClarification, userInput: string): string {
+    return this.mergePendingCollectedInput(pending.collectedUserInput, userInput)
+  }
+
+  private asRuntimeAtomicAction(type: MicroEditIntent['type']): RuntimeAtomicAction | null {
+    return ['insert', 'move', 'delete', 'replace'].includes(type) ? type as RuntimeAtomicAction : null
+  }
+
+  private buildPendingAtomicClarification(input: RuntimeSubmitInput, reasoning: string, preferredAction?: RuntimeAtomicAction | null): RuntimePendingAtomicClarification {
+    const normalized = input.userInput.replace(/\s+/g, '')
+    const action = preferredAction ?? this.detectAtomicAction(normalized)
+    const targetTimeHint = this.extractAtomicTimeHint(input.userInput)
+    const programNameHint = this.extractQuotedProgramName(input.userInput)
+    const missingFields = this.resolveAtomicMissingFields(action, normalized, { targetTimeHint, programNameHint })
+    const followUpQuestion = this.buildAtomicClarificationPrompt(action, { targetTimeHint, programNameHint, missingFields })
+    const summaryTarget = targetTimeHint || programNameHint || '当前目标节目'
+    return {
+      action,
+      summary: action ? `请补充${summaryTarget}的${this.describeAtomicAction(action)}参数` : '请补充节目调整参数',
+      reasoning,
+      originalUserInput: input.pendingAtomicClarification?.originalUserInput ?? input.userInput,
+      collectedUserInput: input.userInput,
+      targetTimeHint,
+      programNameHint,
+      missingFields,
+      followUpQuestion,
+    }
+  }
+
+  private buildPendingAtomicClarificationDecision(
+    pending: RuntimePendingAtomicClarification,
+    explanation?: string,
+    contentOverride?: string,
+    sourcePendingContext?: RuntimePendingAtomicContext,
+  ): RuntimeDecision {
+    const pendingAtomicContext = buildPendingAtomicContextFromClarification(
+      pending,
+      undefined,
+      sourcePendingContext ? {
+        originalUserInput: sourcePendingContext.originalUserInput,
+        collectedUserInput: sourcePendingContext.collectedUserInput,
+        slots: sourcePendingContext.slots,
+        attemptCount: sourcePendingContext.attemptCount,
+        createdAt: sourcePendingContext.createdAt,
+        expiresAt: sourcePendingContext.expiresAt,
+      } : undefined,
+    )
+    return this.buildPendingAtomicContextDecision(
+      pendingAtomicContext,
+      this.buildAtomicFallbackFeedback(pending, contentOverride ?? pending.followUpQuestion, explanation),
+    )
+  }
+
+  private buildPendingTargetSelectionDecision(
+    pending: RuntimePendingTargetSelection,
+    contentOverride?: string,
+    sourcePendingContext?: RuntimePendingAtomicContext,
+  ): RuntimeDecision {
+    const pendingAtomicContext = buildPendingAtomicContextFromTargetSelection(
+      pending,
+      undefined,
+      sourcePendingContext ? {
+        originalUserInput: sourcePendingContext.originalUserInput,
+        collectedUserInput: sourcePendingContext.collectedUserInput,
+        slots: sourcePendingContext.slots,
+        attemptCount: sourcePendingContext.attemptCount,
+        createdAt: sourcePendingContext.createdAt,
+        expiresAt: sourcePendingContext.expiresAt,
+      } : undefined,
+    )
+    return this.buildPendingAtomicContextDecision(
+      pendingAtomicContext,
+      createFeedback(
+        contentOverride ?? pending.summary,
+        'selection',
+        '待选择目标',
+        {
+          explanation: pending.reasoning,
+          details: {
+            targetTime: pending.targetTime,
+            candidateCount: pending.candidates.length,
+          },
+        },
+      ),
+    )
+  }
+
+  private buildPendingInsertRecommendationDecision(
+    pending: RuntimePendingInsertRecommendation,
+    contentOverride?: string,
+    sourcePendingContext?: RuntimePendingAtomicContext,
+  ): RuntimeDecision {
+    const pendingAtomicContext = buildPendingAtomicContextFromInsertRecommendation(
+      pending,
+      undefined,
+      sourcePendingContext ? {
+        originalUserInput: sourcePendingContext.originalUserInput,
+        collectedUserInput: sourcePendingContext.collectedUserInput,
+        slots: sourcePendingContext.slots,
+        attemptCount: sourcePendingContext.attemptCount,
+        createdAt: sourcePendingContext.createdAt,
+        expiresAt: sourcePendingContext.expiresAt,
+      } : undefined,
+    )
+    return this.buildPendingAtomicContextDecision(
+      pendingAtomicContext,
+      createFeedback(
+        contentOverride ?? pending.summary,
+        'selection',
+        '插入推荐',
+        {
+          explanation: pending.reasoning,
+          details: {
+            targetTime: pending.targetTime,
+            recommendedCandidateCount: pending.recommendedCandidates.length,
+          },
+        },
+      ),
+    )
+  }
+
+  private buildPendingAtomicContextDecision(
+    pendingAtomicContext: RuntimePendingAtomicContext,
+    feedback?: RuntimeFeedback,
+  ): RuntimeDecision {
+    const lifecycleContext = this.pendingAtomicContextService.initialize(pendingAtomicContext)
+    return {
+      kind: 'pending_atomic_context',
+      feedback: feedback ?? createFeedback(
+        lifecycleContext.followUpQuestion,
+        'selection',
+        this.describeAtomicPhaseProcessLabel(lifecycleContext.phase),
+        {
+          explanation: lifecycleContext.reasoning,
+          details: {
+            action: lifecycleContext.action,
+            phase: lifecycleContext.phase,
+            missingFields: lifecycleContext.missingFields,
+            attemptCount: lifecycleContext.attemptCount,
+          },
+        },
+      ),
+      pendingAtomicContext: lifecycleContext,
+    }
+  }
+
+  private patchPendingAtomicContext(
+    pendingContext: RuntimePendingAtomicContext,
+    slotPatch: Partial<RuntimePendingAtomicContext['slots']>,
+    followUpUserInput: string,
+  ): RuntimePendingAtomicContext {
+    return this.pendingAtomicContextService.touch(pendingContext, {
+      collectedUserInput: this.mergePendingCollectedInput(pendingContext.collectedUserInput, followUpUserInput),
+      slots: mergeRuntimeAtomicSlots(pendingContext.slots, slotPatch),
+    })
+  }
+
+  private refreshClarifyingPendingAtomicContext(pendingContext: RuntimePendingAtomicContext): RuntimePendingAtomicContext {
+    const targetTimeHint = pendingContext.slots.targetTimeHint ?? pendingContext.slots.targetTime
+    const programNameHint = pendingContext.slots.programName ?? pendingContext.slots.rawProgramText
+    const missingFields = deriveAtomicMissingFieldsFromSlots(pendingContext.action, pendingContext.slots)
+    const followUpQuestion = this.buildAtomicClarificationPrompt(
+      pendingContext.action,
+      {
+        targetTimeHint,
+        programNameHint,
+        missingFields: this.mapAtomicMissingFieldsToLegacy(missingFields),
+      },
+    )
+    const summaryTarget = targetTimeHint || programNameHint || '当前目标节目'
+
+    return this.pendingAtomicContextService.recordAttempt(pendingContext, {
+      summary: pendingContext.action ? `请补充${summaryTarget}的${this.describeAtomicAction(pendingContext.action)}参数` : '请补充节目调整参数',
+      slots: {
+        ...pendingContext.slots,
+        targetTimeHint,
+      },
+      missingFields,
+      followUpQuestion,
+    })
+  }
+
+  private buildCanonicalAtomicInstruction(pendingContext: RuntimePendingAtomicContext): string {
+    const targetTimeText = pendingContext.slots.targetTime ?? pendingContext.slots.targetTimeHint ?? ''
+    const targetProgram = pendingContext.slots.programName ?? pendingContext.slots.rawProgramText ?? ''
+    const replacementProgramName = pendingContext.slots.replacementProgramName ?? ''
+    switch (pendingContext.action) {
+      case 'delete':
+        return `删除${targetTimeText}的节目${targetProgram ? `《${targetProgram}》` : ''}`
+      case 'move': {
+        const directionText = pendingContext.slots.direction === 'backward' ? '前移' : '后移'
+        const offsetText = this.formatAtomicOffset(pendingContext.slots.offsetSeconds)
+        return `把${targetTimeText}的节目${directionText}${offsetText}`
+      }
+      case 'replace':
+        return `把${targetTimeText}的节目替换成《${replacementProgramName}》`
+      case 'insert': {
+        const programText = pendingContext.slots.programName
+          ?? pendingContext.slots.rawProgramText
+          ?? pendingContext.slots.semanticLabel
+          ?? '节目'
+        return `在${targetTimeText}插入节目${programText}`
+      }
+      default:
+        return pendingContext.collectedUserInput
+    }
+  }
+
+  private formatAtomicOffset(offsetSeconds?: number): string {
+    if (typeof offsetSeconds !== 'number' || offsetSeconds <= 0) return '30分钟'
+    if (offsetSeconds % 3600 === 0) return `${offsetSeconds / 3600}小时`
+    if (offsetSeconds % 60 === 0) return `${offsetSeconds / 60}分钟`
+    return `${offsetSeconds}秒`
+  }
+
+  private mapAtomicMissingFieldsToLegacy(missingFields: RuntimeAtomicMissingField[]): string[] {
+    return missingFields.map((field) => {
+      switch (field) {
+        case 'target_time':
+          return 'target'
+        case 'program_name':
+          return 'program'
+        case 'replacement_program':
+          return 'replacement'
+        case 'direction':
+        case 'offset':
+          return 'offset'
+        default:
+          return 'target'
+      }
+    })
+  }
+
+  private describeAtomicPhaseProcessLabel(phase: RuntimePendingAtomicContext['phase']): string {
+    switch (phase) {
+      case 'clarifying':
+        return '原子参数澄清'
+      case 'selecting_target':
+        return '待选择目标'
+      case 'recommending_insert':
+        return '插入推荐'
+    }
+  }
+
+  private detectAtomicAction(normalized: string): RuntimeAtomicAction | null {
+    if (/(后移|前移|移动|顺一下|挪一下|顺延|延后|提前)/.test(normalized)) return 'move'
+    if (/(删除|删掉|移除)/.test(normalized)) return 'delete'
+    if (/(替换|换成|替换成|替换为|换掉|改掉|改成|改为)/.test(normalized)) return 'replace'
+    if (/(插入|添加节目|添加|安排节目|安排)/.test(normalized)) return 'insert'
+    return null
+  }
+
+  private extractAtomicTimeHint(userInput: string): string | undefined {
+    const match = userInput.match(/(\d{1,2})(点半|点(\d{1,2})分?|点|[:：]\d{2})/)
+    return match?.[0]
+  }
+
+  private extractQuotedProgramName(userInput: string): string | undefined {
+    const match = userInput.match(/《([^》]+)》/)
+    return match?.[1]?.trim()
+  }
+
+  private resolveAtomicMissingFields(action: RuntimeAtomicAction | null, normalized: string, hints: { targetTimeHint?: string; programNameHint?: string }): string[] {
+    const hasOffset = /\d+(分钟|小时|分|秒)/.test(normalized)
+    const hasTarget = Boolean(hints.targetTimeHint || hints.programNameHint || /那个|那条|那段|前面|后面|刚才|这个节目|这条节目/.test(normalized))
+    const hasReplacement = /(替换成|替换为|换成|改成|改为).+/.test(normalized)
+    const missing: string[] = []
+
+    if (action === 'move') {
+      if (!hasTarget) missing.push('target')
+      if (!hasOffset) missing.push('offset')
+      return missing
+    }
+    if (action === 'delete') {
+      if (!hasTarget) missing.push('target')
+      return missing
+    }
+    if (action === 'replace') {
+      if (!hasTarget) missing.push('target')
+      if (!hasReplacement) missing.push('replacement')
+      return missing
+    }
+    if (action === 'insert') {
+      if (!hints.targetTimeHint) missing.push('target')
+      if (!hints.programNameHint) missing.push('program')
+      return missing
+    }
+    return ['target']
+  }
+
+  private buildAtomicClarificationPrompt(action: RuntimeAtomicAction | null, input: { targetTimeHint?: string; programNameHint?: string; missingFields: string[] }): string {
+    if (action === 'move') {
+      if (input.missingFields.includes('target') && input.missingFields.includes('offset')) return '这句话更像是在调整具体节目，但现在还缺少目标节目和移动幅度。请补充准确时间点或节目名称，以及前移/后移多久，例如“把 09:00 的《看东方》后移 30 分钟”。'
+      if (input.missingFields.includes('target')) return '已经识别到你是在移动节目，但还缺少明确目标。请补充准确时间点或节目名称，例如“把 09:00 的《看东方》后移 30 分钟”。'
+      return `已经定位到 ${input.targetTimeHint || input.programNameHint || '目标节目'}，还需要你补充移动幅度，例如“后移 30 分钟”。`
+    }
+    if (action === 'delete') return '这句话更像是在删除某条已排节目。请补充准确时间点或节目名称，例如“删除 09:30 的《午间30分》”。'
+    if (action === 'replace') return '这句话更像是在替换某条已排节目。请补充准确时间点或节目名称，以及要换成的新节目，例如“把 10:00 的《看东方》替换成《东方新闻》”。'
+    if (action === 'insert') return '这句话更像是在插入节目。请补充目标时间点和节目名称，例如“在 09:00 插入《看东方》”。'
+    return '这句话更像是在调整具体节目，但现在还不够形成可执行命令。请补充明确的时间点、节目名称或动作，例如“把 09:00 的《看东方》后移 30 分钟”。'
+  }
+
+  private describeAtomicAction(action: RuntimeAtomicAction): string {
+    switch (action) {
+      case 'move':
+        return '移动'
+      case 'delete':
+        return '删除'
+      case 'replace':
+        return '替换'
+      case 'insert':
+        return '插入'
+    }
+  }
+
+  private shouldStayInAtomicClarification(message?: string): boolean {
+    if (!message) return true
+    return ['未能识别', '请重新描述', '请确认', '没有找到', '缺少', '未检索到'].some((keyword) => message.includes(keyword))
+  }
+
+  private buildMicroEditDecision(
+    result: RuntimeMicroEditBuildResult,
+    fallbackReasoning: string,
+    sourcePendingContext?: RuntimePendingAtomicContext,
+  ): RuntimeDecision {
     if (result.pendingTargetSelection) {
-      return { kind: 'pending_target_selection', feedback: createFeedback(result.message || result.pendingTargetSelection.summary, 'selection', '待选择目标', { thinking: result.thinking, explanation: result.explanation || fallbackReasoning, details: result.details }), pendingTargetSelection: result.pendingTargetSelection }
+      return this.buildPendingTargetSelectionDecision(
+        result.pendingTargetSelection,
+        result.message || result.pendingTargetSelection.summary,
+        sourcePendingContext,
+      )
+    }
+    if (result.pendingInsertRecommendation) {
+      return this.buildPendingInsertRecommendationDecision(
+        result.pendingInsertRecommendation,
+        result.message || result.pendingInsertRecommendation.summary,
+        sourcePendingContext,
+      )
     }
     if (!result.command) {
       return { kind: 'message', feedback: createFeedback(result.message || '当前未能形成可执行命令。', 'selection', '命令解析', { thinking: result.thinking, explanation: result.explanation || fallbackReasoning, details: result.details }) }
@@ -170,8 +1128,31 @@ export class DemoRuntimeFacade {
     return { kind: 'execute_command', execution: { command: result.command, successMessage: result.successMessage, thinking: result.thinking, explanation: result.explanation || fallbackReasoning, details: result.details } }
   }
 
+  private buildMicroEditDecisionWithContinuationFallback(
+    input: RuntimeSubmitInput,
+    result: RuntimeMicroEditBuildResult,
+    fallbackReasoning: string,
+    preferredAction?: RuntimeAtomicAction | null,
+  ): RuntimeDecision {
+    if (!result.command && !result.pendingTargetSelection && !result.pendingInsertRecommendation && this.shouldStayInAtomicClarification(result.message)) {
+      const pendingAtomicClarification = this.buildPendingAtomicClarification(
+        input,
+        result.explanation || fallbackReasoning,
+        preferredAction,
+      )
+      return this.buildPendingAtomicClarificationDecision(
+        pendingAtomicClarification,
+        result.explanation || fallbackReasoning,
+        result.message,
+      )
+    }
+
+    return this.buildMicroEditDecision(result, fallbackReasoning)
+  }
+
   private async prepareLayoutDraft(input: RuntimeSubmitInput, classification: TaskClassification, orchestrationMode: Extract<TaskMode, 'full_generate' | 'partial_generate'>): Promise<RuntimeDecision> {
     const suggested = classification.suggestedParams ?? {}
+    const structuredSegments = this.normalizeStructuredSegments(suggested.segments)
     const userIntent = typeof suggested.userIntent === 'string' && suggested.userIntent.trim() ? suggested.userIntent.trim() : input.userInput
     const ignoreExistingLayout = suggested.ignoreExistingLayout === true
     let draft: LayoutDraft
@@ -181,7 +1162,7 @@ export class DemoRuntimeFacade {
     if (classification.mode === 'layout_refine') {
       const baseDraft = input.currentLayoutDraft ?? this.resolveExistingLayoutDraft(input, userIntent, false)?.draft
       if (!baseDraft) return { kind: 'message', feedback: createFeedback('当前还没有可微调的版面草案，请先生成一份草案再继续调整。', 'planning', '版面草案', { explanation: classification.reasoning }) }
-      const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, currentDraft: baseDraft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint })
+      const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, currentDraft: baseDraft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
       const specValidation = this.layoutDraftValidator.validateSpec(spec)
       const specStructuralErrors = specValidation.errors.filter((issue) => issue.code !== 'segment_gap')
       if (specStructuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('版面草案调整失败，请补充更明确的时段或内容要求。', classification.reasoning, { errors: specStructuralErrors, warnings: specValidation.warnings })
@@ -191,8 +1172,8 @@ export class DemoRuntimeFacade {
       sourceLabel = '已按你的要求更新当前版面草案。'
     } else {
       const existing = this.resolveExistingLayoutDraft(input, userIntent, ignoreExistingLayout)
-      if (existing && this.shouldApplyIntentOnExistingDraft(classification)) {
-        const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, currentDraft: existing.draft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint })
+      if (existing && this.shouldApplyIntentOnExistingDraft(classification, existing.draft)) {
+        const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, currentDraft: existing.draft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
         const specValidation = this.layoutDraftValidator.validateSpec(spec)
         const specStructuralErrors = specValidation.errors.filter((issue) => issue.code !== 'segment_gap')
         if (specStructuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('基于当前版面参考生成调整方案失败，请补充更明确的时段或内容要求。', classification.reasoning, { errors: specStructuralErrors, warnings: specValidation.warnings })
@@ -205,7 +1186,7 @@ export class DemoRuntimeFacade {
         warnings = existing.draft.warnings ?? []
         sourceLabel = existing.label
       } else {
-        const spec = await this.layoutDraftService.generateSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint })
+        const spec = await this.layoutDraftService.generateSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
         const specValidation = this.layoutDraftValidator.validateSpec(spec)
         const specStructuralErrors = specValidation.errors.filter((issue) => issue.code !== 'segment_gap')
         if (specStructuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('版面草案生成失败，请补充更明确的时段或内容要求。', classification.reasoning, { errors: specStructuralErrors, warnings: specValidation.warnings })
@@ -227,7 +1208,7 @@ export class DemoRuntimeFacade {
   private commitLayoutDraft(input: RuntimeSubmitInput, classification: TaskClassification): RuntimeDecision {
     const draft = input.currentLayoutDraft
     if (!draft) return { kind: 'message', feedback: createFeedback('当前还没有可确认的版面草案，请先生成或导入版面后再开始编排。', 'planning', '版面草案', { explanation: classification.reasoning }) }
-    const mode = input.currentLayoutDraftMode ?? (input.scheduleState.isEmpty || input.scheduleState.itemCount === 0 ? 'full_generate' : 'partial_generate')
+    const mode = this.resolvePreferredOrchestrationMode(input)
     return { kind: 'layout_commit', feedback: createFeedback('已确认当前版面草案，准备按该版面开始编排。', 'planning', '版面草案确认', { explanation: classification.reasoning, details: { draftId: draft.id, layoutSource: draft.source } }), draft, orchestrationRequest: { userInput: input.userInput, mode, reasoning: classification.reasoning, layoutDraft: draft } }
   }
 
@@ -261,6 +1242,120 @@ export class DemoRuntimeFacade {
     return { kind: 'message', feedback: createFeedback(content, 'planning', '草案校验', { explanation: reasoning, details: { errors: validation.errors.map((item) => item.message), warnings: validation.warnings.map((item) => item.message) } }) }
   }
 
+  private buildInsertCommandResult(
+    context: { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[] },
+    params: InsertParams,
+    candidate: { id: string; programName: string },
+    explanation: string,
+    details?: RuntimeDetailMap,
+    thinking?: string,
+  ): RuntimeMicroEditBuildResult {
+    const command: InsertCommand = {
+      action: 'insert',
+      reasoning: explanation,
+      data: {
+        candidateId: candidate.id,
+        candidateName: candidate.programName,
+        insertTime: params.targetTime,
+        scheduleDate: context.scheduleState.date,
+        channelId: context.scheduleState.channelId,
+      },
+    }
+    const preview = this.insertCommandExecutor.preview(command)
+    if (!preview.canExecute) {
+      return {
+        command: null,
+        message: `目标时间 ${params.targetTime} 已有节目占用，请先删除、替换，或换一个空闲时间点。`,
+        thinking,
+        explanation,
+        details: {
+          ...(details ?? {}),
+          targetTime: params.targetTime,
+          selectedCandidateName: candidate.programName,
+          preview,
+        },
+      }
+    }
+
+    return {
+      command,
+      message: `将在 ${params.targetTime} 插入《${candidate.programName}》。`,
+      successMessage: `已在 ${params.targetTime} 插入《${candidate.programName}》`,
+      thinking,
+      explanation,
+      details: {
+        ...(details ?? {}),
+        targetTime: params.targetTime,
+        selectedCandidateName: candidate.programName,
+        preview,
+      },
+    }
+  }
+
+  private buildPendingInsertRecommendation(params: InsertParams, userInput: string, reasoning: string, candidates: RuntimeInsertRecommendationCandidate[]): RuntimePendingInsertRecommendation {
+    return {
+      action: 'insert',
+      summary: `请确认 ${params.targetTime} 要插入的节目`,
+      reasoning,
+      originalUserInput: userInput,
+      collectedUserInput: userInput,
+      targetTime: params.targetTime,
+      rawProgramText: params.rawProgramText,
+      semanticLabel: params.semanticLabel,
+      programTypeHint: params.programTypeHint,
+      recommendedCandidates: candidates,
+      selectedCandidateId: null,
+    }
+  }
+
+  private async searchInsertCandidates(input: { scheduleState: ScheduleState; params: InsertParams; columnId?: string }): Promise<{ candidates: Array<import('@/types/orchestration').ProgramCandidate>; searchMode: 'explicit_name' | 'semantic_recommendation' | 'fallback_recommendation' }> {
+    const { scheduleState, params, columnId } = input
+    const programTypes = params.programTypeHint ? [params.programTypeHint] : undefined
+    const explicitProgramName = params.programName?.trim()
+    if (explicitProgramName) {
+      const directCandidates = await this.candidateService.searchPrograms({
+        channelId: scheduleState.channelId,
+        programName: explicitProgramName,
+        columnId,
+        programTypes,
+        columnStrategy: 'prefer_channel',
+        limit: 6,
+      })
+      if (directCandidates.length > 0) {
+        return {
+          candidates: directCandidates,
+          searchMode: 'explicit_name',
+        }
+      }
+
+      const fallbackCandidates = await this.candidateService.searchPrograms({
+        channelId: scheduleState.channelId,
+        programName: '',
+        columnId,
+        programTypes,
+        columnStrategy: 'prefer_channel',
+        limit: 6,
+      })
+      return {
+        candidates: fallbackCandidates,
+        searchMode: 'fallback_recommendation',
+      }
+    }
+
+    const recommendedCandidates = await this.candidateService.searchPrograms({
+      channelId: scheduleState.channelId,
+      programName: '',
+      columnId,
+      programTypes,
+      columnStrategy: 'prefer_channel',
+      limit: 6,
+    })
+    return {
+      candidates: recommendedCandidates,
+      searchMode: 'semantic_recommendation',
+    }
+  }
+
   private async buildMicroEditCommand(input: RuntimeSubmitInput, fallbackReasoning: string, recognizedIntent?: MicroEditIntent): Promise<RuntimeMicroEditBuildResult> {
     const context = buildDialogueContext({ scheduleState: input.scheduleState, userInput: input.userInput, currentSchedule: input.currentSchedule })
     const intent = recognizedIntent ?? await this.intentRecognizer.recognize(context)
@@ -268,15 +1363,83 @@ export class DemoRuntimeFacade {
 
     if (intent.type === 'insert') {
       const params = await this.paramExtractor.extractInsertParams(context)
-      if (!params) return { command: null, message: '未能识别插入目标时间和节目名称，请重新描述。', explanation: reasoning }
+      if (!params) return { command: null, message: '未能识别插入目标时间，请重新描述。', explanation: reasoning }
       const columnId = findSlotColumnIdByTime(input.scheduleState.channelId, input.scheduleState.date, normalizeDateTime(input.scheduleState.date, params.targetTime))
-      const candidates = await this.candidateService.searchPrograms({ channelId: input.scheduleState.channelId, programName: params.programName, columnId, columnStrategy: 'prefer_channel', limit: 5 })
-      if (candidates.length === 0) return { command: null, message: `未检索到适合在 ${params.targetTime} 插入的节目，请确认节目名称或栏目。`, explanation: reasoning, details: { targetTime: params.targetTime, selectedCandidateName: params.programName, candidateCount: 0 } }
-      const selection = await this.candidateSelectionService.selectForInsert(context, params, candidates)
-      const command = this.entityLinker.createInsertCommand(context, params, selection.selectedCandidate.id, selection.selectedCandidate.programName)
-      const preview = this.insertCommandExecutor.preview(command)
-      if (!preview.canExecute) return { command: null, message: `目标时间 ${params.targetTime} 已有节目占用，请先删除、替换，或换一个空闲时间点。`, thinking: selection.reasoning, explanation: reasoning, details: { targetTime: params.targetTime, selectedCandidateName: selection.selectedCandidate.programName, selectedCandidate: selection.selectedCandidate, preview } }
-      return { command, message: `将在 ${params.targetTime} 插入《${selection.selectedCandidate.programName}》。`, successMessage: `已在 ${params.targetTime} 插入《${selection.selectedCandidate.programName}》`, thinking: selection.reasoning, explanation: reasoning, details: { targetTime: params.targetTime, selectedCandidateName: selection.selectedCandidate.programName, selectedCandidate: selection.selectedCandidate, preview } }
+      const { candidates, searchMode } = await this.searchInsertCandidates({
+        scheduleState: input.scheduleState,
+        params,
+        columnId,
+      })
+      const resolution = this.insertCandidateResolver.resolve({
+        channelId: input.scheduleState.channelId,
+        columnId,
+        params,
+        candidates,
+        searchMode,
+      })
+
+      if (resolution.status === 'needs_clarification') {
+        return {
+          command: null,
+          message: resolution.reasoning,
+          explanation: reasoning,
+          details: {
+            targetTime: params.targetTime,
+            selectedCandidateName: params.programName ?? params.rawProgramText,
+            candidateCount: 0,
+          },
+        }
+      }
+
+      if (resolution.status === 'needs_recommendation') {
+        const recommendedCandidates = resolution.candidates.map((entry) => ({
+          candidateId: entry.candidate.id,
+          programName: entry.candidate.programName,
+          programCode: entry.candidate.programCode,
+          duration: entry.candidate.duration,
+          programType: entry.candidate.programType,
+          score: entry.score,
+          confidence: entry.confidence,
+          reasonTags: entry.reasonTags,
+        }))
+        const pendingInsertRecommendation = this.buildPendingInsertRecommendation(
+          params,
+          input.userInput,
+          resolution.reasoning,
+          recommendedCandidates,
+        )
+        return {
+          command: null,
+          message: `我先给你推荐 ${recommendedCandidates.length} 个适合在 ${params.targetTime} 插入的节目，请确认具体要插入哪一个。`,
+          thinking: resolution.reasoning,
+          explanation: reasoning,
+          details: {
+            targetTime: params.targetTime,
+            selectedCandidateName: params.programName ?? params.rawProgramText ?? params.semanticLabel,
+            candidateCount: recommendedCandidates.length,
+            recommendationTrigger: resolution.trigger,
+            recommendedCandidates,
+          },
+          pendingInsertRecommendation,
+        }
+      }
+
+      return this.buildInsertCommandResult(
+        context,
+        params,
+        {
+          id: resolution.selectedCandidate.id,
+          programName: resolution.selectedCandidate.programName,
+        },
+        reasoning,
+        {
+          targetTime: params.targetTime,
+          selectedCandidateName: resolution.selectedCandidate.programName,
+          selectedCandidate: resolution.selectedCandidate,
+          candidateCount: resolution.recommendedCandidates.length,
+        },
+        resolution.reasoning,
+      )
     }
 
     if (intent.type === 'delete' || intent.type === 'move' || intent.type === 'replace') {
@@ -373,6 +1536,40 @@ export class DemoRuntimeFacade {
   private buildValidationDecision(classification: TaskClassification, input: RuntimeSubmitInput): RuntimeDecision {
     const report = this.scheduleCommandBus.validate({ scheduleDate: input.scheduleState.date, channelId: input.scheduleState.channelId })
     return { kind: 'message', feedback: createFeedback(report.isValid ? '当前节目单校验通过，未发现明显风险。' : `校验完成，发现 ${report.summary.totalIssues} 个问题，其中严重问题 ${report.summary.criticalCount} 个。`, 'validation', '校验结果', { explanation: classification.reasoning, details: { summary: report.summary, issues: report.issues.slice(0, 5) } }) }
+  }
+
+  private buildRepairAnalysisDecision(classification: TaskClassification, input: RuntimeSubmitInput): RuntimeDecision {
+    const report = this.scheduleCommandBus.validate({ scheduleDate: input.scheduleState.date, channelId: input.scheduleState.channelId })
+    const content = report.isValid
+      ? '当前节目单暂未发现明显问题，暂时没有可执行的自动修复项。'
+      : `已先完成问题分析，发现 ${report.summary.totalIssues} 个问题。当前自动修复仍需按问题清单逐步处理，建议先确认修复范围。`
+    return { kind: 'message', feedback: createFeedback(content, 'validation', '问题分析', { explanation: classification.reasoning, details: { summary: report.summary, issues: report.issues.slice(0, 5), nextStep: '如需继续处理，请明确要修复的时段、问题类型，或先调整版面草案。' } }) }
+  }
+
+  private buildAtomicFallbackFeedback(pending: RuntimePendingAtomicClarification, contentOverride?: string, explanation?: string): RuntimeFeedback {
+    const content = contentOverride && contentOverride !== pending.followUpQuestion
+      ? `${contentOverride} ${pending.followUpQuestion}`
+      : (contentOverride ?? pending.followUpQuestion)
+    return createFeedback(content, 'selection', '原子参数澄清', {
+      explanation,
+      details: {
+        action: pending.action,
+        targetTimeHint: pending.targetTimeHint,
+        programNameHint: pending.programNameHint,
+        missingFields: pending.missingFields,
+      },
+    })
+  }
+
+  private buildClarifyFeedback(input: RuntimeSubmitInput, explanation?: string): RuntimeFeedback {
+    const normalized = input.userInput.replace(/\s+/g, '')
+    if (/(改|调整|换|替换|移动|删除|插入|添加|顺一下|挪一下)/.test(normalized) && !/(版面|栏目|剧场|时段|上午|下午|晚间|晚上|全天)/.test(normalized)) {
+      return createFeedback('这句话更像是在调整具体节目。请补充明确的时间点或节目名称，例如“把 09:00 的《看东方》后移 30 分钟”。', 'general', '需要澄清', { explanation })
+    }
+    if (/(编排|补齐|补全|填充|排表|排期|空窗|空缺)/.test(normalized)) {
+      return createFeedback('这条指令更像是在描述编排需求。请补充版面范围和内容偏好，例如“下午改成新闻栏目”或“全天按新闻资讯版面生成草案”。', 'general', '需要澄清', { explanation })
+    }
+    return createFeedback('我还不能稳定理解这条指令。你可以直接说“下午改成新闻栏目”，或补充更明确的时间范围和目标内容。', 'general', '需要澄清', { explanation })
   }
 }
 

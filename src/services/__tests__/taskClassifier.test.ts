@@ -15,7 +15,7 @@ const createScheduleState = (overrides: Partial<ScheduleState> = {}): ScheduleSt
 })
 
 describe('TaskClassifier', () => {
-  it('对明确补空窗短语走规则快速判定', async () => {
+  it('对明确补空窗短语走规则快速判定为 layout_prepare', async () => {
     const chat = vi.fn(async () => ({
       content: JSON.stringify({
         mode: 'clarify',
@@ -30,7 +30,8 @@ describe('TaskClassifier', () => {
       userInput: '请补齐当前所有空窗',
     })
 
-    expect(result.mode).toBe('partial_generate')
+    expect(result.mode).toBe('layout_prepare')
+    expect(result.suggestedParams?.userIntent).toBe('请补齐当前所有空窗')
     expect(chat).not.toHaveBeenCalled()
   })
 
@@ -131,6 +132,34 @@ describe('TaskClassifier', () => {
 
     expect(result.mode).toBe('clarify')
     expect(result.confidence).toBeGreaterThanOrEqual(0.9)
+    expect(chat).not.toHaveBeenCalled()
+  })
+
+  it('对修复类表达先收敛到问题分析', async () => {
+    const chat = vi.fn()
+    const classifier = new TaskClassifier({ chat } as never)
+
+    const result = await classifier.classify({
+      scheduleState: createScheduleState(),
+      userInput: '把当前节目单的问题自动修复一下',
+    })
+
+    expect(result.mode).toBe('validate_only')
+    expect(result.reasoning).toContain('先输出问题分析结果')
+    expect(chat).not.toHaveBeenCalled()
+  })
+
+  it('对像原子操作但信息不完整的表达要求澄清', async () => {
+    const chat = vi.fn()
+    const classifier = new TaskClassifier({ chat } as never)
+
+    const result = await classifier.classify({
+      scheduleState: createScheduleState(),
+      userInput: '把9点后那段顺一下',
+    })
+
+    expect(result.mode).toBe('clarify')
+    expect(result.reasoning).toContain('原子命令')
     expect(chat).not.toHaveBeenCalled()
   })
 

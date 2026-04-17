@@ -113,3 +113,9 @@ cmd /c node_modules\.bin\eslint.cmd . --cache
 
 - [docs/layout-draft-workflow.md](/C:/Users/sucongfei/Documents/trae_projects/bigbiandan2/docs/layout-draft-workflow.md)
   自然语言版面草案、草案微调、开始编排的完整工作流说明
+- [docs/atomic-command-clarification-requirements.md](/C:/Users/sucongfei/Documents/trae_projects/bigbiandan2/docs/atomic-command-clarification-requirements.md)
+  原子命令补参与批量处理需求，覆盖插入节目推荐确认、多轮补参继续执行和批量处理文件预演
+- [docs/insert-program-recommendation-technical-design.md](/C:/Users/sucongfei/Documents/trae_projects/bigbiandan2/docs/insert-program-recommendation-technical-design.md)
+  第一个需求的技术方案，覆盖插入节目推荐确认的类型设计、状态机和实施步骤
+- [docs/atomic-context-management-technical-design.md](/C:/Users/sucongfei/Documents/trae_projects/bigbiandan2/docs/atomic-context-management-technical-design.md)
+  第二个需求的技术方案与设计评审，覆盖统一未完成态、结构化补参和原子命令续跑路由

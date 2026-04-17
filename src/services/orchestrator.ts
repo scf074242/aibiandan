@@ -87,6 +87,7 @@ export interface OrchestratorConfig {
   enableAutoRepair: boolean
   maxGapItems: number
   planningConcurrency: number
+  planningLlmTimeoutMs: number
 }
 
 const DEFAULT_CONFIG: OrchestratorConfig = {
@@ -94,6 +95,7 @@ const DEFAULT_CONFIG: OrchestratorConfig = {
   enableAutoRepair: true,
   maxGapItems: 10,
   planningConcurrency: 1,
+  planningLlmTimeoutMs: 8000,
 }
 
 const AD_INSERTION_PACING_MS = 3000
@@ -375,7 +377,11 @@ export class Orchestrator extends EventEmitter {
     const prompt = this.buildPlanningPrompt(this.session!.gaps.pending.length)
 
     try {
-      const response = await this.llmClient.chat(prompt, { temperature: 0.2, maxTokens: 800 })
+      const response = await this.runWithTimeout(
+        this.llmClient.chat(prompt, { temperature: 0.2, maxTokens: 800 }),
+        this.config.planningLlmTimeoutMs,
+        'LLM 策略规划超时',
+      )
       const plan = this.parseJSONCommand<PlanCommand>(response.content)
       if (plan?.action === 'plan') {
         this.session!.strategy = { ...this.session!.strategy, ...plan.data.strategy }
@@ -384,9 +390,10 @@ export class Orchestrator extends EventEmitter {
         strategy: this.session!.strategy,
         initialGapCount: this.session!.gaps.pending.length,
       })
-    } catch {
+    } catch (error) {
       this.log('warn', 'planning', 'LLM 策略规划不可用，已回退到默认编排策略', {
         strategy: this.session!.strategy,
+        reason: error instanceof Error ? error.message : 'unknown',
       })
     }
   }
@@ -904,6 +911,28 @@ export class Orchestrator extends EventEmitter {
         content: `频道: ${this.session!.channelId}\n日期: ${this.session!.date}\n待处理空窗数: ${gapCount}`,
       },
     ]
+  }
+
+  private async runWithTimeout<T>(task: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return task
+    }
+
+    let timerId: ReturnType<typeof setTimeout> | null = null
+    try {
+      return await Promise.race([
+        task,
+        new Promise<never>((_, reject) => {
+          timerId = setTimeout(() => {
+            reject(new Error(timeoutMessage))
+          }, timeoutMs)
+        }),
+      ])
+    } finally {
+      if (timerId) {
+        clearTimeout(timerId)
+      }
+    }
   }
 
   private parseJSONCommand<T>(content: string): T | null {

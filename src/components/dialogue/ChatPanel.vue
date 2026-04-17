@@ -166,20 +166,64 @@
       </div>
     </div>
 
-    <div v-if="pendingTargetSelection" class="pending-command-panel">
+    <div v-if="showClarifyingAtomicPanel && pendingAtomicContext" class="pending-command-panel clarifying-panel">
       <div class="pending-command-header">
         <div>
-          <div class="pending-command-title">待确认目标</div>
-          <div class="pending-command-summary">{{ pendingTargetSelection.summary }}</div>
+          <div class="pending-command-title">{{ getAtomicPhaseLabel(pendingAtomicContext.phase) }}</div>
+          <div class="pending-command-summary">{{ pendingAtomicContext.summary }}</div>
+        </div>
+        <el-tag type="warning" effect="light">需补参</el-tag>
+      </div>
+
+      <div class="pending-command-body">
+        <div class="pending-command-reasoning">{{ pendingAtomicContext.followUpQuestion }}</div>
+        <div class="reason-tag-row is-panel">
+          <span class="reason-tag">动作：{{ formatAtomicActionLabel(pendingAtomicContext.action) }}</span>
+          <span v-for="field in pendingAtomicContext.missingFields" :key="field" class="reason-tag">
+            缺少：{{ formatAtomicMissingFieldLabel(field) }}
+          </span>
+        </div>
+        <div
+          v-if="pendingAtomicContext.slots.targetTime || pendingAtomicContext.slots.targetTimeHint || pendingAtomicContext.slots.programName || pendingAtomicContext.slots.rawProgramText"
+          class="details-summary-list is-panel"
+        >
+          <div
+            v-if="pendingAtomicContext.slots.targetTime || pendingAtomicContext.slots.targetTimeHint"
+            class="detail-summary-item"
+          >
+            <span class="detail-summary-label">目标时间</span>
+            <span class="detail-summary-value">
+              {{ pendingAtomicContext.slots.targetTime || pendingAtomicContext.slots.targetTimeHint }}
+            </span>
+          </div>
+          <div v-if="pendingAtomicContext.slots.programName || pendingAtomicContext.slots.rawProgramText" class="detail-summary-item">
+            <span class="detail-summary-label">节目线索</span>
+            <span class="detail-summary-value">
+              {{ pendingAtomicContext.slots.programName || pendingAtomicContext.slots.rawProgramText }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="pending-command-actions">
+        <el-button size="small" @click="cancelPendingAtomicContext">取消</el-button>
+      </div>
+    </div>
+
+    <div v-if="showTargetSelectionAtomicPanel && pendingAtomicContext" class="pending-command-panel">
+      <div class="pending-command-header">
+        <div>
+          <div class="pending-command-title">{{ getAtomicPhaseLabel(pendingAtomicPhase ?? 'selecting_target') }}</div>
+          <div class="pending-command-summary">{{ pendingAtomicContext.summary }}</div>
         </div>
         <el-tag type="info" effect="light">需选择</el-tag>
       </div>
 
       <div class="pending-command-body">
-        <div class="pending-command-reasoning">{{ pendingTargetSelection.reasoning }}</div>
-        <el-radio-group v-model="pendingTargetSelection.selectedItemId" class="target-selection-list">
+        <div class="pending-command-reasoning">{{ pendingAtomicContext.reasoning }}</div>
+        <el-radio-group v-model="pendingAtomicTargetSelectedItemId" class="target-selection-list">
           <el-radio
-            v-for="candidate in pendingTargetSelection.candidates"
+            v-for="candidate in pendingAtomicTargetCandidates"
             :key="candidate.id"
             :value="candidate.id"
             class="target-selection-option"
@@ -190,10 +234,76 @@
       </div>
 
       <div class="pending-command-actions">
-        <el-button type="primary" size="small" :disabled="!pendingTargetSelection.selectedItemId" @click="confirmPendingTargetSelection">
+        <el-button type="primary" size="small" :disabled="!pendingAtomicTargetSelectedItemId" @click="confirmPendingTargetSelection">
           确认目标
         </el-button>
         <el-button size="small" @click="cancelPendingTargetSelection">取消</el-button>
+      </div>
+    </div>
+
+    <div v-if="showInsertRecommendationAtomicPanel && pendingAtomicContext" class="pending-command-panel insert-recommendation-panel">
+      <div class="pending-command-header">
+        <div>
+          <div class="pending-command-title">{{ getAtomicPhaseLabel(pendingAtomicPhase ?? 'recommending_insert') }}</div>
+          <div class="pending-command-summary">{{ pendingAtomicContext.summary }}</div>
+        </div>
+        <el-tag type="info" effect="light">需选择</el-tag>
+      </div>
+
+      <div class="pending-command-body">
+        <div class="pending-command-reasoning">{{ pendingAtomicContext.reasoning }}</div>
+        <div class="target-selection-list insert-recommendation-list" role="radiogroup" aria-label="插入推荐节目列表">
+          <button
+            v-for="(candidate, index) in pendingAtomicInsertRecommendations"
+            :key="candidate.candidateId"
+            type="button"
+            class="insert-recommendation-option"
+            :class="{ 'is-selected': pendingAtomicInsertSelectedCandidateId === candidate.candidateId }"
+            role="radio"
+            :aria-checked="pendingAtomicInsertSelectedCandidateId === candidate.candidateId"
+            @click="pendingAtomicInsertSelectedCandidateId = candidate.candidateId"
+          >
+            <span class="insert-recommendation-selector" aria-hidden="true">
+              <span class="insert-recommendation-selector-dot" />
+            </span>
+            <span class="insert-recommendation-card">
+              <span class="insert-recommendation-head">
+                <span class="insert-recommendation-name-line">
+                  <span class="insert-recommendation-name">{{ candidate.programName }}</span>
+                  <span class="insert-recommendation-chip">
+                    {{ getInsertRecommendationBadgeLabel(index) }}
+                  </span>
+                </span>
+                <span class="insert-recommendation-confidence">
+                  置信度 {{ Math.round(candidate.confidence * 100) }}%
+                </span>
+              </span>
+              <span class="insert-recommendation-meta">
+                {{ formatInsertRecommendationMeta(candidate.duration, candidate.programType, candidate.confidence) }}
+              </span>
+              <span v-if="candidate.reasonTags.length" class="reason-tag-row insert-recommendation-tags">
+                <span v-for="tag in candidate.reasonTags" :key="`${candidate.candidateId}-${tag}`" class="reason-tag">
+                  {{ tag }}
+                </span>
+              </span>
+            </span>
+          </button>
+          <div class="insert-recommendation-footer-note">
+            相似候选已经按匹配度排序，建议优先确认上方靠前的节目。
+          </div>
+        </div>
+      </div>
+
+      <div class="pending-command-actions insert-recommendation-actions">
+        <div class="insert-recommendation-action-hint">
+          选择后会继续执行插入，并保留当前时点编排上下文。
+        </div>
+        <div class="insert-recommendation-action-buttons">
+          <el-button type="primary" size="small" :disabled="!pendingAtomicInsertSelectedCandidateId" @click="confirmPendingInsertRecommendation">
+            确认插入
+          </el-button>
+          <el-button size="small" @click="cancelPendingInsertRecommendation">取消</el-button>
+        </div>
       </div>
     </div>
 
@@ -284,7 +394,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, Promotion, UploadFilled } from '@element-plus/icons-vue'
 import type { ChatMessage } from '@/types/llm'
@@ -298,6 +408,12 @@ import type {
   TaskMode,
   ValidationReport,
 } from '@/types/orchestration'
+import {
+  buildPendingAtomicContextFromClarification,
+  buildPendingAtomicContextFromInsertRecommendation,
+  buildPendingAtomicContextFromTargetSelection,
+  type RuntimePendingAtomicContext,
+} from '@/services/runtime/pendingAtomicContext'
 import { getCommandExecutor } from '@/services/commandExecutor'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
 import { getLayoutImportService } from '@/services/layoutImportService'
@@ -312,7 +428,6 @@ import {
   type RuntimeFeedback,
   type RuntimeOrchestrationRequest,
   type RuntimePendingCommand,
-  type RuntimePendingTargetSelection,
   type RuntimeScheduleItem,
 } from '@/services/runtime/demoRuntimeFacade'
 import type { RuntimeBridgeSessionState } from '@/services/runtime/runtimeSessionStore'
@@ -429,7 +544,7 @@ const loading = ref(false)
 const messagesContainer = ref<HTMLElement>()
 const layoutFileInput = ref<HTMLInputElement>()
 const pendingCommand = ref<RuntimePendingCommand | null>(null)
-const pendingTargetSelection = ref<RuntimePendingTargetSelection | null>(null)
+const pendingAtomicContext = ref<RuntimePendingAtomicContext | null>(null)
 const pendingLayoutDraft = ref<LayoutDraft | null>(null)
 const layoutDraftFeasibility = ref<DraftFeasibilityReport | null>(null)
 const pendingLayoutDraftMode = ref<Extract<TaskMode, 'full_generate' | 'partial_generate'> | null>(null)
@@ -640,10 +755,14 @@ const handlePrimaryAction = async () => {
 
 const getBridgeConversationId = () => `${props.channelId}::${props.date}`
 
+const resolvePendingAtomicContextFromState = (state: RuntimeBridgeSessionState): RuntimePendingAtomicContext | null => {
+  return state.pendingAtomicContext ?? null
+}
+
 const syncBridgeSessionState = (state: RuntimeBridgeSessionState) => {
   bridgeSessionId.value = state.sessionId
   pendingCommand.value = state.pendingCommand ?? null
-  pendingTargetSelection.value = state.pendingTargetSelection ?? null
+  pendingAtomicContext.value = resolvePendingAtomicContextFromState(state)
   pendingLayoutDraft.value = state.pendingLayoutDraft ?? null
   layoutDraftFeasibility.value = state.layoutDraftFeasibility ?? null
   pendingLayoutDraftMode.value = state.layoutDraftMode ?? null
@@ -693,16 +812,28 @@ const appendRuntimeFeedback = (feedback: RuntimeFeedback) => {
 
 const applyRuntimeDecision = async (decision: RuntimeDecision) => {
   switch (decision.kind) {
+    case 'pending_atomic_context':
+      appendRuntimeFeedback(decision.feedback)
+      pendingAtomicContext.value = decision.pendingAtomicContext
+      return
     case 'message':
       appendRuntimeFeedback(decision.feedback)
+      pendingAtomicContext.value = decision.pendingAtomicClarification
+        ? buildPendingAtomicContextFromClarification(decision.pendingAtomicClarification)
+        : null
       return
     case 'pending_command':
       appendRuntimeFeedback(decision.feedback)
       pendingCommand.value = decision.pendingCommand
+      pendingAtomicContext.value = null
       return
     case 'pending_target_selection':
       appendRuntimeFeedback(decision.feedback)
-      pendingTargetSelection.value = decision.pendingTargetSelection
+      pendingAtomicContext.value = buildPendingAtomicContextFromTargetSelection(decision.pendingTargetSelection)
+      return
+    case 'pending_insert_recommendation':
+      appendRuntimeFeedback(decision.feedback)
+      pendingAtomicContext.value = buildPendingAtomicContextFromInsertRecommendation(decision.pendingInsertRecommendation)
       return
     case 'execute_command':
       emitFocusTarget(
@@ -867,10 +998,6 @@ const sendMessage = async () => {
   const content = inputMessage.value.trim()
   if (!content) return
 
-  // 新用户命令到来时，先清理上一次遗留的确认态，避免旧面板和新执行结果叠在一起
-  pendingCommand.value = null
-  pendingTargetSelection.value = null
-
   messages.value.push({ role: 'user', content })
   inputMessage.value = ''
   await scrollToBottom()
@@ -900,6 +1027,109 @@ const formatDisplayTimeRange = (startTime: string, endTime?: string): string => 
   if (!endTime) return start
   return `${start}到${formatDisplayTime(endTime)}`
 }
+
+const formatProgramTypeLabel = (programType: string): string => {
+  const normalized = programType.trim().toLowerCase()
+  const labelMap: Record<string, string> = {
+    news: '新闻',
+    news_magazine: '新闻杂志',
+    current_affairs: '时政',
+    kids: '少儿',
+    drama: '剧集',
+    movie: '电影',
+    health: '健康',
+    entertainment: '娱乐',
+    commentary: '评论',
+    ad: '广告',
+  }
+  return labelMap[normalized] ?? normalized.replace(/_/g, ' ')
+}
+
+const formatInsertRecommendationMeta = (duration: number, programType: string, confidence: number): string => {
+  const durationMinutes = duration >= 60
+    ? duration % 60 === 0
+      ? `${duration / 60}分钟`
+      : `${(duration / 60).toFixed(1)}分钟`
+    : `${duration}秒`
+  const confidenceText = `${Math.round(confidence * 100)}%`
+  return `${durationMinutes} · ${formatProgramTypeLabel(programType)} · 匹配度 ${confidenceText}`
+}
+
+const getInsertRecommendationBadgeLabel = (index: number): string => (
+  index === 0 ? '优先推荐' : `候选 ${index + 1}`
+)
+
+const getAtomicPhaseLabel = (phase?: RuntimePendingAtomicContext['phase']) => {
+  switch (phase) {
+    case 'clarifying':
+      return '待补参'
+    case 'selecting_target':
+      return '待选择'
+    case 'recommending_insert':
+      return '插入推荐'
+    default:
+      return '原子上下文'
+  }
+}
+
+const formatAtomicActionLabel = (action: RuntimePendingAtomicContext['action']) => {
+  switch (action) {
+    case 'insert':
+      return '插入'
+    case 'move':
+      return '移动'
+    case 'delete':
+      return '删除'
+    case 'replace':
+      return '替换'
+    default:
+      return '未识别'
+  }
+}
+
+const formatAtomicMissingFieldLabel = (field: string) => {
+  switch (field) {
+    case 'target_time':
+      return '目标时间'
+    case 'program_name':
+      return '节目名称'
+    case 'offset':
+      return '移动幅度'
+    case 'direction':
+      return '方向'
+    case 'replacement_program':
+      return '替换节目'
+    case 'selection':
+      return '候选选择'
+    default:
+      return field
+  }
+}
+
+const pendingAtomicPhase = computed(() => (
+  pendingAtomicContext.value?.phase ?? null
+))
+const pendingAtomicTargetCandidates = computed(() => pendingAtomicContext.value?.targetCandidates ?? [])
+const pendingAtomicInsertRecommendations = computed(() => pendingAtomicContext.value?.insertRecommendations ?? [])
+const pendingAtomicTargetSelectedItemId = computed<string | null>({
+  get: () => pendingAtomicContext.value?.selectedItemId ?? null,
+  set: (value) => {
+    if (pendingAtomicContext.value) {
+      pendingAtomicContext.value.selectedItemId = value
+    }
+  },
+})
+const pendingAtomicInsertSelectedCandidateId = computed<string | null>({
+  get: () => pendingAtomicContext.value?.selectedCandidateId ?? null,
+  set: (value) => {
+    if (pendingAtomicContext.value) {
+      pendingAtomicContext.value.selectedCandidateId = value
+    }
+  },
+})
+const showClarifyingAtomicPanel = computed(() => pendingAtomicPhase.value === 'clarifying')
+const showTargetSelectionAtomicPanel = computed(() => pendingAtomicPhase.value === 'selecting_target' && pendingAtomicTargetCandidates.value.length > 0)
+const showInsertRecommendationAtomicPanel = computed(() => pendingAtomicPhase.value === 'recommending_insert' && pendingAtomicInsertRecommendations.value.length > 0)
 
 const formatDetails = (details: DetailMap) => formatStructuredDetails(details, formatDisplayTime)
 
@@ -1814,12 +2044,19 @@ const buildPendingCommandFocusTarget = (
 }
 
 const buildPendingTargetSelectionFocusTarget = (
-  value: RuntimePendingTargetSelection | null,
+  value: RuntimePendingAtomicContext | null,
 ): MessageFocusTarget | undefined => {
   if (!value) return undefined
+  if (value.phase !== 'selecting_target') return undefined
 
-  const selectedCandidate = value.selectedItemId
-    ? value.candidates.find((candidate) => candidate.id === value.selectedItemId)
+  const candidates = value.targetCandidates ?? []
+  if (!candidates) return undefined
+
+  const selectedItemId = value.selectedItemId
+  const targetTime = value.slots.targetTime ?? value.slots.targetTimeHint ?? ''
+
+  const selectedCandidate = selectedItemId
+    ? candidates.find((candidate: RuntimeScheduleItem) => candidate.id === selectedItemId)
     : null
   const selectedTarget = extractFocusTargetFromRuntimeItem(selectedCandidate, 'active')
   if (selectedTarget) {
@@ -1829,8 +2066,8 @@ const buildPendingTargetSelectionFocusTarget = (
     }
   }
 
-  if (value.candidates.length === 1) {
-    const soleTarget = extractFocusTargetFromRuntimeItem(value.candidates[0], 'active')
+  if (candidates.length === 1) {
+    const soleTarget = extractFocusTargetFromRuntimeItem(candidates[0], 'active')
     if (soleTarget) {
       return {
         ...soleTarget,
@@ -1839,7 +2076,7 @@ const buildPendingTargetSelectionFocusTarget = (
     }
   }
 
-  const normalizedTargetTime = normalizeClockText(value.targetTime)
+  const normalizedTargetTime = normalizeClockText(targetTime)
   if (!normalizedTargetTime) return undefined
 
   return {
@@ -2189,18 +2426,54 @@ const confirmPendingCommand = async () => {
 }
 
 const confirmPendingTargetSelection = async () => {
-  if (!pendingTargetSelection.value?.selectedItemId || !bridgeSessionId.value) return
+  const selectedItemId = pendingAtomicTargetSelectedItemId.value
+  if (!selectedItemId) {
+    ElMessage.warning('请先选择要操作的节目')
+    return
+  }
+  if (!bridgeSessionId.value) {
+    ElMessage.warning('当前目标选择会话已失效，请重新发起操作。')
+    return
+  }
   const stepProgress = startStepProgress('思考中')
   try {
     const result = await openClawBridge.selectTarget(
       bridgeSessionId.value,
-      pendingTargetSelection.value.selectedItemId,
+      selectedItemId,
     )
     await applyBridgeResult(result)
     attachStepMetricToLatestAssistantMessage(stepProgress.finish())
   } catch (error) {
     messages.value.push(buildAssistantMessage({
       content: error instanceof Error ? error.message : '确认目标失败，请稍后重试。',
+      processType: 'error',
+      processTypeLabel: '执行异常',
+      stepMetric: stepProgress.finish(),
+    }))
+  }
+}
+
+const confirmPendingInsertRecommendation = async () => {
+  const selectedCandidateId = pendingAtomicInsertSelectedCandidateId.value
+  if (!selectedCandidateId) {
+    ElMessage.warning('请先选择要插入的节目')
+    return
+  }
+  if (!bridgeSessionId.value) {
+    ElMessage.warning('当前插入推荐会话已失效，请重新发起插入指令。')
+    return
+  }
+  const stepProgress = startStepProgress('思考中')
+  try {
+    const result = await openClawBridge.selectInsertRecommendation(
+      bridgeSessionId.value,
+      selectedCandidateId,
+    )
+    await applyBridgeResult(result)
+    attachStepMetricToLatestAssistantMessage(stepProgress.finish())
+  } catch (error) {
+    messages.value.push(buildAssistantMessage({
+      content: error instanceof Error ? error.message : '确认插入节目失败，请稍后重试。',
       processType: 'error',
       processTypeLabel: '执行异常',
       stepMetric: stepProgress.finish(),
@@ -2223,6 +2496,7 @@ const cancelPendingCommand = async () => {
       stepMetric: stepProgress.finish(),
     }))
     pendingCommand.value = null
+    pendingAtomicContext.value = null
   } catch (error) {
     messages.value.push(buildAssistantMessage({
       content: error instanceof Error ? error.message : '取消执行失败，请稍后重试。',
@@ -2233,24 +2507,76 @@ const cancelPendingCommand = async () => {
   }
 }
 
-const cancelPendingTargetSelection = async () => {
-  if (!pendingTargetSelection.value) return
+const cancelPendingAtomicContext = async () => {
+  if (!pendingAtomicContext.value) return
   const stepProgress = startStepProgress('思考中')
   try {
     if (bridgeSessionId.value) {
       await openClawBridge.cancel(bridgeSessionId.value)
     }
     messages.value.push(buildAssistantMessage({
-      content: `${pendingTargetSelection.value.summary}，已取消选择。`,
+      content: `${pendingAtomicContext.value.summary}，已取消当前补参。`,
+      thinking: '我已停止这次原子命令的后续补参，不会继续执行。',
+      processType: 'general',
+      processTypeLabel: '已取消',
+      stepMetric: stepProgress.finish(),
+    }))
+    pendingAtomicContext.value = null
+  } catch (error) {
+    messages.value.push(buildAssistantMessage({
+      content: error instanceof Error ? error.message : '取消补参失败，请稍后重试。',
+      processType: 'error',
+      processTypeLabel: '执行异常',
+      stepMetric: stepProgress.finish(),
+    }))
+  }
+}
+
+const cancelPendingTargetSelection = async () => {
+  if (pendingAtomicContext.value?.phase !== 'selecting_target') return
+  const stepProgress = startStepProgress('思考中')
+  try {
+    const summary = pendingAtomicContext.value.summary
+    if (bridgeSessionId.value) {
+      await openClawBridge.cancel(bridgeSessionId.value)
+    }
+    messages.value.push(buildAssistantMessage({
+      content: `${summary}，已取消选择。`,
       thinking: '我已停止这次目标选择，不会继续执行后续修改。',
       processType: 'general',
       processTypeLabel: '已取消',
       stepMetric: stepProgress.finish(),
     }))
-    pendingTargetSelection.value = null
+    pendingAtomicContext.value = null
   } catch (error) {
     messages.value.push(buildAssistantMessage({
       content: error instanceof Error ? error.message : '取消目标选择失败，请稍后重试。',
+      processType: 'error',
+      processTypeLabel: '执行异常',
+      stepMetric: stepProgress.finish(),
+    }))
+  }
+}
+
+const cancelPendingInsertRecommendation = async () => {
+  if (pendingAtomicContext.value?.phase !== 'recommending_insert') return
+  const stepProgress = startStepProgress('思考中')
+  try {
+    const summary = pendingAtomicContext.value.summary
+    if (bridgeSessionId.value) {
+      await openClawBridge.cancel(bridgeSessionId.value)
+    }
+    messages.value.push(buildAssistantMessage({
+      content: `${summary}，已取消选择。`,
+      thinking: '我已停止这次插入推荐确认，不会继续执行后续插入。',
+      processType: 'general',
+      processTypeLabel: '已取消',
+      stepMetric: stepProgress.finish(),
+    }))
+    pendingAtomicContext.value = null
+  } catch (error) {
+    messages.value.push(buildAssistantMessage({
+      content: error instanceof Error ? error.message : '取消插入推荐失败，请稍后重试。',
       processType: 'error',
       processTypeLabel: '执行异常',
       stepMetric: stepProgress.finish(),
@@ -2743,13 +3069,18 @@ watch(
 
 watch(
   () => ({
-    summary: pendingTargetSelection.value?.summary ?? '',
-    selectedItemId: pendingTargetSelection.value?.selectedItemId ?? '',
-    targetTime: pendingTargetSelection.value?.targetTime ?? '',
-    candidateIds: pendingTargetSelection.value?.candidates.map((candidate) => candidate.id).join('|') ?? '',
+    phase: pendingAtomicContext.value?.phase ?? '',
+    summary: pendingAtomicContext.value?.summary ?? '',
+    selectedItemId: pendingAtomicContext.value?.selectedItemId ?? '',
+    targetTime: pendingAtomicContext.value
+      ? `${pendingAtomicContext.value.slots.targetTime ?? ''}_${pendingAtomicContext.value.slots.targetTimeHint ?? ''}`
+      : '',
+    candidateIds: pendingAtomicContext.value
+      ? (pendingAtomicContext.value.targetCandidates ?? []).map((candidate) => candidate.id).join('|')
+      : '',
   }),
   () => {
-    emitFocusTarget(buildPendingTargetSelectionFocusTarget(pendingTargetSelection.value))
+    emitFocusTarget(buildPendingTargetSelectionFocusTarget(pendingAtomicContext.value))
   },
 )
 
@@ -2796,7 +3127,7 @@ watch(
     unsubscribeBridgeSession = null
     bridgeSessionId.value = ''
     pendingCommand.value = null
-    pendingTargetSelection.value = null
+    pendingAtomicContext.value = null
   },
   { immediate: true },
 )
@@ -3301,6 +3632,271 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   gap: 8px;
   padding: 0 14px 12px;
+}
+
+.target-selection-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+:deep(.target-selection-list .el-radio) {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  margin-right: 0;
+  margin-bottom: 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(251, 191, 36, 0.18);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.8);
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+:deep(.target-selection-list .el-radio:hover) {
+  border-color: rgba(245, 158, 11, 0.38);
+  background: rgba(255, 255, 255, 0.96);
+  transform: translateY(-1px);
+}
+
+:deep(.target-selection-list .el-radio.is-checked) {
+  border-color: rgba(245, 158, 11, 0.52);
+  background: linear-gradient(180deg, rgba(255, 252, 245, 0.98) 0%, rgba(255, 247, 230, 0.92) 100%);
+  box-shadow: 0 18px 30px -24px rgba(180, 83, 9, 0.42);
+}
+
+:deep(.target-selection-list .el-radio__input) {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+
+:deep(.target-selection-list .el-radio__label) {
+  flex: 1;
+  min-width: 0;
+  padding-left: 12px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: normal;
+  word-break: break-word;
+}
+
+:deep(.target-selection-list .el-radio__input .el-radio__inner:hover) {
+  border-color: #f59e0b;
+}
+
+:deep(.target-selection-list .el-radio__input.is-checked .el-radio__inner) {
+  border-color: #f59e0b;
+  background: #f59e0b;
+}
+
+.insert-recommendation-panel {
+  border-color: rgba(245, 158, 11, 0.38);
+  background: linear-gradient(180deg, rgba(255, 252, 244, 0.96) 0%, rgba(255, 247, 229, 0.94) 100%);
+  box-shadow: 0 24px 36px -30px rgba(180, 83, 9, 0.4);
+}
+
+.insert-recommendation-panel .pending-command-header {
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(251, 191, 36, 0.18);
+}
+
+.insert-recommendation-list {
+  margin-top: 16px;
+}
+
+.insert-recommendation-card {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 12px;
+}
+
+.insert-recommendation-option {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(251, 191, 36, 0.18);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  appearance: none;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+.insert-recommendation-option:hover {
+  border-color: rgba(245, 158, 11, 0.38);
+  background: rgba(255, 255, 255, 0.96);
+  transform: translateY(-1px);
+}
+
+.insert-recommendation-option:focus-visible {
+  outline: none;
+  border-color: rgba(245, 158, 11, 0.52);
+  box-shadow:
+    0 0 0 3px rgba(245, 158, 11, 0.16),
+    0 18px 30px -24px rgba(180, 83, 9, 0.42);
+}
+
+.insert-recommendation-option.is-selected {
+  border-color: rgba(245, 158, 11, 0.52);
+  background: linear-gradient(180deg, rgba(255, 252, 245, 0.98) 0%, rgba(255, 247, 230, 0.92) 100%);
+  box-shadow: 0 18px 30px -24px rgba(180, 83, 9, 0.42);
+}
+
+.insert-recommendation-selector {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-top: 2px;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  background: #fff;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+
+.insert-recommendation-selector-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #f59e0b;
+  transform: scale(0);
+  transition: transform 0.18s ease;
+}
+
+.insert-recommendation-option.is-selected .insert-recommendation-selector {
+  border-color: #f59e0b;
+  background: rgba(255, 247, 230, 0.92);
+}
+
+.insert-recommendation-option.is-selected .insert-recommendation-selector-dot {
+  transform: scale(1);
+}
+
+.insert-recommendation-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.insert-recommendation-name-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.insert-recommendation-name {
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.insert-recommendation-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(146, 64, 14, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.18);
+  color: #b45309;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.insert-recommendation-meta {
+  margin-top: 0;
+  color: #5b6472;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.insert-recommendation-confidence {
+  flex: 0 0 auto;
+  padding-left: 12px;
+  color: #92400e;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.insert-recommendation-tags {
+  margin-top: 0;
+  gap: 8px;
+}
+
+.insert-recommendation-tags .reason-tag {
+  background: rgba(255, 255, 255, 0.82);
+  border-color: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+  font-weight: 500;
+}
+
+.insert-recommendation-footer-note {
+  padding: 0 4px;
+  color: #7c5b2a;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.insert-recommendation-actions {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(251, 191, 36, 0.18);
+  background: linear-gradient(180deg, rgba(255, 248, 233, 0) 0%, rgba(255, 248, 233, 0.82) 100%);
+}
+
+.insert-recommendation-action-hint {
+  color: #7c5b2a;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.insert-recommendation-action-buttons {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .insert-recommendation-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .insert-recommendation-action-buttons {
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
 
 .layout-draft-panel {

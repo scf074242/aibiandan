@@ -39,7 +39,7 @@ export class EntityLinker {
       searchParams: {
         channelId: context.scheduleState.channelId,
         channelName: context.scheduleState.channelName,
-        programName: params.programName,
+        programName: params.programName ?? params.rawProgramText ?? '',
         targetTime: params.targetTime,
       },
     }

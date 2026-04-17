@@ -2,15 +2,29 @@ import {
   getDemoRuntimeFacade,
   type RuntimeDecision,
   type RuntimeExecutedResult,
+  type RuntimePendingAtomicClarification,
   type RuntimePendingCommand,
+  type RuntimePendingInsertRecommendation,
   type RuntimePendingTargetSelection,
   type RuntimeScheduleItem,
 } from '@/services/runtime/demoRuntimeFacade'
+import type { RuntimePendingAtomicContext } from '@/services/runtime/pendingAtomicContext'
+import {
+  buildPendingAtomicContextFromClarification,
+  buildPendingAtomicContextFromInsertRecommendation,
+  buildPendingAtomicContextFromTargetSelection,
+  rehydratePendingAtomicClarificationFromAtomicContext,
+  rehydratePendingInsertRecommendationFromAtomicContext,
+  rehydratePendingTargetSelectionFromAtomicContext,
+} from '@/services/runtime/pendingAtomicContext'
 import {
   getRuntimeSessionStore,
   type BridgeRuntimeStatus,
   type RuntimeBridgeSessionState,
+  type RuntimeLayoutDraftStatus,
 } from '@/services/runtime/runtimeSessionStore'
+import { getPendingAtomicContextService } from '@/services/runtime/pendingAtomicContextService'
+import type { DraftFeasibilityReport, LayoutDraft, TaskMode } from '@/types/orchestration'
 import type { ScheduleState } from '@/types/orchestration'
 
 export interface OpenClawBridgeSubmitInput {
@@ -29,12 +43,33 @@ export interface OpenClawBridgeResult {
   status: BridgeRuntimeStatus
   summary: string
   message?: string
-  payload?: Record<string, unknown>
+  payload?: OpenClawBridgePayload
+}
+
+export interface OpenClawBridgePayloadCompatibility {
+  sourceOfTruth: 'pendingAtomicContext'
+  legacyPendingPayloads: true
+}
+
+export interface OpenClawBridgePayload {
+  conversationId: string
+  pendingCommand?: RuntimePendingCommand
+  pendingAtomicContext?: RuntimePendingAtomicContext | null
+  pendingLayoutDraft?: LayoutDraft
+  layoutDraftStatus?: RuntimeLayoutDraftStatus
+  layoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'>
+  layoutDraftFeasibility?: DraftFeasibilityReport
+  lastDecisionKind?: RuntimeDecision['kind']
+  compatibility: OpenClawBridgePayloadCompatibility
+  pendingTargetSelection?: RuntimePendingTargetSelection | null
+  pendingInsertRecommendation?: RuntimePendingInsertRecommendation | null
+  pendingAtomicClarification?: RuntimePendingAtomicClarification | null
 }
 
 export class OpenClawBridge {
   private readonly runtimeFacade = getDemoRuntimeFacade()
   private readonly sessionStore = getRuntimeSessionStore()
+  private readonly pendingAtomicContextService = getPendingAtomicContextService()
 
   async submitInstruction(input: OpenClawBridgeSubmitInput): Promise<OpenClawBridgeResult> {
     const session = this.sessionStore.upsertSessionForConversation({
@@ -45,12 +80,18 @@ export class OpenClawBridge {
       currentSchedule: input.currentSchedule,
     })
 
+    const pendingAtomicContext = this.resolvePendingAtomicContext(session)
+
     const decision = await this.runtimeFacade.submitInstruction({
       scheduleState: buildBridgeScheduleState(input),
       userInput: input.text,
       currentSchedule: input.currentSchedule,
       currentLayoutDraft: session.pendingLayoutDraft ?? null,
       currentLayoutDraftMode: session.layoutDraftMode ?? null,
+      pendingTargetSelection: null,
+      pendingInsertRecommendation: null,
+      pendingAtomicClarification: this.resolvePendingAtomicClarification(session),
+      pendingAtomicContext,
       history: input.history,
     })
 
@@ -96,7 +137,7 @@ export class OpenClawBridge {
 
   async selectTarget(sessionId: string, targetId: string): Promise<OpenClawBridgeResult> {
     const session = this.requireSession(sessionId)
-    const pendingTargetSelection = session.pendingTargetSelection
+    const pendingTargetSelection = this.resolvePendingTargetSelection(session)
     if (!pendingTargetSelection) {
       return this.toBridgeResult(this.sessionStore.updateSession(sessionId, {
         status: 'failed',
@@ -133,13 +174,59 @@ export class OpenClawBridge {
     return this.toBridgeResult(nextState)
   }
 
+  async selectInsertRecommendation(sessionId: string, candidateId: string): Promise<OpenClawBridgeResult> {
+    const session = this.requireSession(sessionId)
+    const pendingInsertRecommendation = this.resolvePendingInsertRecommendation(session)
+    if (!pendingInsertRecommendation) {
+      return this.toBridgeResult(this.sessionStore.updateSession(sessionId, {
+        status: 'failed',
+        summary: '当前没有待确认的插入推荐',
+      }))
+    }
+
+    const decision = await this.runtimeFacade.resolvePendingInsertRecommendation({
+      scheduleState: {
+        channelId: session.context.channelId,
+        channelName: session.context.channelName,
+        date: session.context.date,
+        isEmpty: session.context.currentSchedule.length === 0,
+        itemCount: session.context.currentSchedule.length,
+        gapCount: 0,
+        hasSelectedTimeRange: false,
+      },
+      pendingInsertRecommendation: {
+        ...pendingInsertRecommendation,
+        selectedCandidateId: candidateId,
+      },
+    })
+
+    if (decision.kind === 'execute_command') {
+      const executed = await this.runtimeFacade.executePendingCommand({
+        pendingCommand: {
+          command: decision.execution.command,
+          summary: summarizeExecutionCommand(decision.execution.command),
+          successMessage: decision.execution.successMessage,
+          reasoning: decision.execution.explanation || '',
+          details: decision.execution.details,
+        },
+        scheduleDate: session.context.date,
+        channelId: session.context.channelId,
+      })
+      const executedState = this.updateSessionFromExecution(sessionId, executed)
+      return this.toBridgeResult(executedState)
+    }
+
+    const nextState = this.updateSessionFromDecision(sessionId, decision, pendingInsertRecommendation.summary)
+    return this.toBridgeResult(nextState)
+  }
+
   async cancel(sessionId: string): Promise<OpenClawBridgeResult> {
     const nextState = this.sessionStore.updateSession(sessionId, {
       status: 'cancelled',
       summary: '已取消当前会话中的待处理操作',
       lastExecution: undefined,
       pendingCommand: undefined,
-      pendingTargetSelection: undefined,
+      pendingAtomicContext: undefined,
       pendingLayoutDraft: undefined,
       layoutDraftStatus: undefined,
       layoutDraftMode: undefined,
@@ -168,99 +255,154 @@ export class OpenClawBridge {
     return session
   }
 
+  private resolvePendingAtomicContext(session: RuntimeBridgeSessionState) {
+    return session.pendingAtomicContext
+      ? this.pendingAtomicContextService.initialize(session.pendingAtomicContext)
+      : null
+  }
+
+  private resolvePendingAtomicClarification(session: RuntimeBridgeSessionState) {
+    if (!session.pendingAtomicContext) return null
+    return rehydratePendingAtomicClarificationFromAtomicContext(session.pendingAtomicContext)
+  }
+
+  private resolvePendingTargetSelection(session: RuntimeBridgeSessionState) {
+    if (!session.pendingAtomicContext) return null
+    return rehydratePendingTargetSelectionFromAtomicContext(session.pendingAtomicContext)
+  }
+
+  private resolvePendingInsertRecommendation(session: RuntimeBridgeSessionState) {
+    if (!session.pendingAtomicContext) return null
+    return rehydratePendingInsertRecommendationFromAtomicContext(session.pendingAtomicContext)
+  }
+
   private updateSessionFromDecision(sessionId: string, decision: RuntimeDecision, fallbackSummary: string): RuntimeBridgeSessionState {
     switch (decision.kind) {
+      case 'pending_atomic_context':
+        return this.sessionStore.updateSession(sessionId, {
+          status: resolveStatusFromAtomicContext(decision.pendingAtomicContext),
+          summary: decision.feedback.content || fallbackSummary,
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: undefined,
+          pendingAtomicContext: this.pendingAtomicContextService.initialize(decision.pendingAtomicContext),
+          pendingLayoutDraft: undefined,
+          layoutDraftStatus: undefined,
+          layoutDraftMode: undefined,
+          layoutDraftFeasibility: undefined,
+        })
       case 'message':
-      return this.sessionStore.updateSession(sessionId, {
-        status: resolveStatusFromFeedback(decision.feedback.content),
-        summary: decision.feedback.content || fallbackSummary,
-        lastDecision: decision,
-        lastExecution: undefined,
-        pendingCommand: undefined,
-        pendingTargetSelection: undefined,
-        pendingLayoutDraft: undefined,
-        layoutDraftStatus: undefined,
-        layoutDraftMode: undefined,
-        layoutDraftFeasibility: undefined,
-      })
+        return this.sessionStore.updateSession(sessionId, {
+          status: resolveStatusFromMessageDecision(decision),
+          summary: decision.feedback.content || fallbackSummary,
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: undefined,
+          pendingAtomicContext: decision.pendingAtomicClarification
+            ? this.pendingAtomicContextService.initialize(
+                buildPendingAtomicContextFromClarification(decision.pendingAtomicClarification),
+              )
+            : undefined,
+          pendingLayoutDraft: undefined,
+          layoutDraftStatus: undefined,
+          layoutDraftMode: undefined,
+          layoutDraftFeasibility: undefined,
+        })
       case 'pending_command':
-      return this.sessionStore.updateSession(sessionId, {
-        status: 'needs_confirmation',
-        summary: decision.feedback.content || decision.pendingCommand.summary,
-        lastDecision: decision,
-        lastExecution: undefined,
-        pendingCommand: decision.pendingCommand,
-        pendingTargetSelection: undefined,
-        pendingLayoutDraft: undefined,
-        layoutDraftStatus: undefined,
-        layoutDraftMode: undefined,
-        layoutDraftFeasibility: undefined,
-      })
+        return this.sessionStore.updateSession(sessionId, {
+          status: 'needs_confirmation',
+          summary: decision.feedback.content || decision.pendingCommand.summary,
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: decision.pendingCommand,
+          pendingAtomicContext: undefined,
+          pendingLayoutDraft: undefined,
+          layoutDraftStatus: undefined,
+          layoutDraftMode: undefined,
+          layoutDraftFeasibility: undefined,
+        })
       case 'pending_target_selection':
-      return this.sessionStore.updateSession(sessionId, {
-        status: 'needs_selection',
-        summary: decision.feedback.content || decision.pendingTargetSelection.summary,
-        lastDecision: decision,
-        lastExecution: undefined,
-        pendingCommand: undefined,
-        pendingTargetSelection: decision.pendingTargetSelection,
-        pendingLayoutDraft: undefined,
-        layoutDraftStatus: undefined,
-        layoutDraftMode: undefined,
-        layoutDraftFeasibility: undefined,
-      })
+        return this.sessionStore.updateSession(sessionId, {
+          status: 'needs_selection',
+          summary: decision.feedback.content || decision.pendingTargetSelection.summary,
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: undefined,
+          pendingAtomicContext: this.pendingAtomicContextService.initialize(
+            buildPendingAtomicContextFromTargetSelection(decision.pendingTargetSelection),
+          ),
+          pendingLayoutDraft: undefined,
+          layoutDraftStatus: undefined,
+          layoutDraftMode: undefined,
+          layoutDraftFeasibility: undefined,
+        })
+      case 'pending_insert_recommendation':
+        return this.sessionStore.updateSession(sessionId, {
+          status: 'needs_selection',
+          summary: decision.feedback.content || decision.pendingInsertRecommendation.summary,
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: undefined,
+          pendingAtomicContext: this.pendingAtomicContextService.initialize(
+            buildPendingAtomicContextFromInsertRecommendation(decision.pendingInsertRecommendation),
+          ),
+          pendingLayoutDraft: undefined,
+          layoutDraftStatus: undefined,
+          layoutDraftMode: undefined,
+          layoutDraftFeasibility: undefined,
+        })
       case 'execute_command':
-      return this.sessionStore.updateSession(sessionId, {
-        status: 'in_progress',
-        summary: decision.execution.successMessage || summarizeExecutionCommand(decision.execution.command),
-        lastDecision: decision,
-        lastExecution: undefined,
-        pendingCommand: undefined,
-        pendingTargetSelection: undefined,
-        pendingLayoutDraft: undefined,
-        layoutDraftStatus: undefined,
-        layoutDraftMode: undefined,
-        layoutDraftFeasibility: undefined,
-      })
+        return this.sessionStore.updateSession(sessionId, {
+          status: 'in_progress',
+          summary: decision.execution.successMessage || summarizeExecutionCommand(decision.execution.command),
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: undefined,
+          pendingAtomicContext: undefined,
+          pendingLayoutDraft: undefined,
+          layoutDraftStatus: undefined,
+          layoutDraftMode: undefined,
+          layoutDraftFeasibility: undefined,
+        })
       case 'orchestration':
-      return this.sessionStore.updateSession(sessionId, {
-        status: 'accepted',
-        summary: decision.feedback.content || fallbackSummary,
-        lastDecision: decision,
-        lastExecution: undefined,
-        pendingCommand: undefined,
-        pendingTargetSelection: undefined,
-        pendingLayoutDraft: undefined,
-        layoutDraftStatus: undefined,
-        layoutDraftMode: undefined,
-        layoutDraftFeasibility: undefined,
-      })
+        return this.sessionStore.updateSession(sessionId, {
+          status: 'accepted',
+          summary: decision.feedback.content || fallbackSummary,
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: undefined,
+          pendingAtomicContext: undefined,
+          pendingLayoutDraft: undefined,
+          layoutDraftStatus: undefined,
+          layoutDraftMode: undefined,
+          layoutDraftFeasibility: undefined,
+        })
       case 'layout_draft':
-      return this.sessionStore.updateSession(sessionId, {
-        status: 'accepted',
-        summary: decision.feedback.content || fallbackSummary,
-        lastDecision: decision,
-        lastExecution: undefined,
-        pendingCommand: undefined,
-        pendingTargetSelection: undefined,
-        pendingLayoutDraft: decision.draft,
-        layoutDraftStatus: 'ready',
-        layoutDraftMode: decision.orchestrationMode,
-        layoutDraftFeasibility: decision.feasibilityReport,
-      })
+        return this.sessionStore.updateSession(sessionId, {
+          status: 'accepted',
+          summary: decision.feedback.content || fallbackSummary,
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: undefined,
+          pendingAtomicContext: undefined,
+          pendingLayoutDraft: decision.draft,
+          layoutDraftStatus: 'ready',
+          layoutDraftMode: decision.orchestrationMode,
+          layoutDraftFeasibility: decision.feasibilityReport,
+        })
       case 'layout_commit':
-      return this.sessionStore.updateSession(sessionId, {
-        status: 'accepted',
-        summary: decision.feedback.content || fallbackSummary,
-        lastDecision: decision,
-        lastExecution: undefined,
-        pendingCommand: undefined,
-        pendingTargetSelection: undefined,
-        pendingLayoutDraft: undefined,
-        layoutDraftStatus: undefined,
-        layoutDraftMode: undefined,
-        layoutDraftFeasibility: undefined,
-      })
+        return this.sessionStore.updateSession(sessionId, {
+          status: 'accepted',
+          summary: decision.feedback.content || fallbackSummary,
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: undefined,
+          pendingAtomicContext: undefined,
+          pendingLayoutDraft: undefined,
+          layoutDraftStatus: undefined,
+          layoutDraftMode: undefined,
+          layoutDraftFeasibility: undefined,
+        })
     }
   }
 
@@ -270,7 +412,7 @@ export class OpenClawBridge {
       summary: executed.message,
       lastExecution: executed,
       pendingCommand: undefined,
-      pendingTargetSelection: undefined,
+      pendingAtomicContext: undefined,
       pendingLayoutDraft: undefined,
       layoutDraftStatus: undefined,
       layoutDraftMode: undefined,
@@ -287,7 +429,10 @@ export class OpenClawBridge {
       payload: {
         conversationId: state.conversationId,
         pendingCommand: state.pendingCommand,
-        pendingTargetSelection: state.pendingTargetSelection,
+        pendingTargetSelection: this.resolvePendingTargetSelection(state),
+        pendingInsertRecommendation: this.resolvePendingInsertRecommendation(state),
+        pendingAtomicClarification: this.resolvePendingAtomicClarification(state),
+        pendingAtomicContext: this.resolvePendingAtomicContext(state),
         pendingLayoutDraft: state.pendingLayoutDraft,
         layoutDraftStatus: state.layoutDraftStatus,
         layoutDraftMode: state.layoutDraftMode,
@@ -323,11 +468,24 @@ const summarizeExecutionCommand = (command: RuntimePendingCommand['command']): s
   }
 }
 
-const resolveStatusFromFeedback = (content: string): BridgeRuntimeStatus => {
-  if (content.includes('不能完全确定') || content.includes('请明确')) return 'needs_clarification'
-  if (content.includes('执行异常') || content.includes('失败')) return 'failed'
-  if (content.includes('校验完成') || content.includes('校验通过')) return 'completed'
+const resolveStatusFromMessageDecision = (
+  decision: Extract<RuntimeDecision, { kind: 'message' }>,
+): BridgeRuntimeStatus => {
+  if (decision.statusHint) return decision.statusHint
+  if (decision.pendingAtomicClarification) return 'needs_clarification'
   return 'completed'
+}
+
+const resolveStatusFromAtomicContext = (
+  pendingAtomicContext: NonNullable<RuntimeBridgeSessionState['pendingAtomicContext']>,
+): BridgeRuntimeStatus => {
+  switch (pendingAtomicContext.phase) {
+    case 'clarifying':
+      return 'needs_clarification'
+    case 'selecting_target':
+    case 'recommending_insert':
+      return 'needs_selection'
+  }
 }
 
 let globalOpenClawBridge: OpenClawBridge | null = null

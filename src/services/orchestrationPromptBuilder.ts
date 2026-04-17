@@ -79,6 +79,7 @@ export function buildInsertCandidateSelectionPrompt(
   params: InsertParams,
   candidates: ProgramCandidate[],
 ): ChatMessage[] {
+  const targetProgramText = params.programName ?? params.rawProgramText ?? params.semanticLabel ?? '未明确节目名'
   const candidateList = candidates
     .map(
       (candidate, index) =>
@@ -98,7 +99,7 @@ export function buildInsertCandidateSelectionPrompt(
         `频道：${context.scheduleState.channelName}\n` +
         `日期：${context.scheduleState.date}\n` +
         `插入时间：${params.targetTime}\n` +
-        `目标节目名：${params.programName}\n` +
+        `目标节目名：${targetProgramText}\n` +
         `当前编单摘要：${context.scheduleSummary}\n` +
         `候选列表：\n${candidateList}\n` +
         '请输出 JSON，例如：{"selectedCandidateId":"...","reasoning":"..."}',

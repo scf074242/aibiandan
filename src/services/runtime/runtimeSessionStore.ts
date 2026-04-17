@@ -3,9 +3,9 @@ import type {
   RuntimeDecision,
   RuntimeExecutedResult,
   RuntimePendingCommand,
-  RuntimePendingTargetSelection,
   RuntimeScheduleItem,
 } from './demoRuntimeFacade'
+import type { RuntimePendingAtomicContext } from './pendingAtomicContext'
 
 export type BridgeRuntimeStatus =
   | 'idle'
@@ -36,7 +36,7 @@ export interface RuntimeBridgeSessionState {
   context: RuntimeBridgeSessionContext
   lastDecision?: RuntimeDecision
   pendingCommand?: RuntimePendingCommand
-  pendingTargetSelection?: RuntimePendingTargetSelection
+  pendingAtomicContext?: RuntimePendingAtomicContext
   pendingLayoutDraft?: LayoutDraft
   layoutDraftStatus?: RuntimeLayoutDraftStatus
   layoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'>
@@ -112,6 +112,36 @@ export class RuntimeSessionStore {
       layoutDraftStatus: undefined,
       layoutDraftMode: undefined,
       layoutDraftFeasibility: undefined,
+    })
+  }
+
+  clearPendingAtomicContext(sessionId: string): RuntimeBridgeSessionState {
+    return this.updateSession(sessionId, {
+      pendingAtomicContext: undefined,
+    })
+  }
+
+  touchPendingAtomicContext(
+    sessionId: string,
+    patch: Partial<RuntimePendingAtomicContext>,
+  ): RuntimeBridgeSessionState {
+    const current = this.sessions.get(sessionId)
+    if (!current?.pendingAtomicContext) {
+      throw new Error(`运行时会话 ${sessionId} 当前没有未完成的原子上下文`)
+    }
+
+    return this.updateSession(sessionId, {
+      pendingAtomicContext: {
+        ...current.pendingAtomicContext,
+        ...patch,
+        slots: patch.slots
+          ? {
+              ...current.pendingAtomicContext.slots,
+              ...patch.slots,
+            }
+          : current.pendingAtomicContext.slots,
+        updatedAt: new Date().toISOString(),
+      },
     })
   }
 

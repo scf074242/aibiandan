@@ -127,7 +127,77 @@ describe('LayoutIntentRecognizer', () => {
     expect(result.confidence).toBeGreaterThan(0.8)
   })
 
-  it('对全天补排这类直接编排命令不走版面识别的 LLM 分支', async () => {
+  it('会把更像原子调整但信息不完整的表达识别为 atomic_fallback', async () => {
+    const recognizer = new LayoutIntentRecognizer({
+      chat: vi.fn(async () => {
+        throw new Error('skip llm')
+      }),
+    } as never)
+
+    const result = await recognizer.recognize({
+      scheduleState: createScheduleState(),
+      userInput: '把9点后那段顺一下',
+    })
+
+    expect(result.mode).toBe('atomic_fallback')
+    expect(result.confidence).toBeGreaterThan(0.8)
+  })
+
+  it('不会把明确的时间范围版面需求误判成 atomic_fallback', async () => {
+    const recognizer = new LayoutIntentRecognizer({
+      chat: vi.fn(async () => {
+        throw new Error('skip llm')
+      }),
+    } as never)
+
+    const result = await recognizer.recognize({
+      scheduleState: createScheduleState(),
+      userInput: '把9点到10点改成新闻栏目',
+    })
+
+    expect(result.mode).toBe('layout_prepare')
+    expect(result.semanticLabel).toBe('新闻栏目')
+    expect(result.targetTimeRange).toEqual({
+      start: '09:00:00',
+      end: '10:00:00',
+    })
+  })
+
+  it('能把多时段版面需求识别成结构化 segments', async () => {
+    const recognizer = new LayoutIntentRecognizer({
+      chat: vi.fn(async () => {
+        throw new Error('skip llm')
+      }),
+    } as never)
+
+    const result = await recognizer.recognize({
+      scheduleState: createScheduleState(),
+      userInput: '上午新闻，下午剧场，晚间综艺',
+    })
+
+    expect(result.mode).toBe('layout_prepare')
+    expect(result.segments).toHaveLength(3)
+    expect(result.segments?.[0]).toMatchObject({
+      start: '06:00:00',
+      end: '12:00:00',
+      semanticLabel: '新闻',
+      programTypeHint: 'news',
+    })
+    expect(result.segments?.[1]).toMatchObject({
+      start: '13:00:00',
+      end: '18:00:00',
+      semanticLabel: '剧场',
+      programTypeHint: 'drama',
+    })
+    expect(result.segments?.[2]).toMatchObject({
+      start: '18:00:00',
+      end: '23:00:00',
+      semanticLabel: '综艺',
+      programTypeHint: 'entertainment',
+    })
+  })
+
+  it('对全天补排这类启动编排命令直接落到 layout_prepare，且不走 LLM 分支', async () => {
     const chat = vi.fn(async () => ({
       content: '{"mode":"layout_prepare","confidence":0.99,"reasoning":"unexpected","ignoreExistingLayout":false}',
     }))
@@ -144,6 +214,10 @@ describe('LayoutIntentRecognizer', () => {
     })
 
     expect(chat).not.toHaveBeenCalled()
-    expect(result.mode).toBe('clarify')
+    expect(result.mode).toBe('layout_prepare')
+    expect(result.targetTimeRange).toEqual({
+      start: '06:00:00',
+      end: '23:59:59',
+    })
   })
 })

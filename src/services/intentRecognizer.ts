@@ -83,7 +83,7 @@ export class IntentRecognizer {
 
   private ruleBasedRecognize(userInput: string): MicroEditIntent {
     const normalized = userInput.replace(/\s+/g, '')
-    const hasInsertVerb = /(插入|加一条|添加节目|安排节目)/.test(normalized)
+    const hasInsertVerb = /(插入|插个|插一|加一条|添加节目|安排节目)/.test(normalized)
     const hasMoveVerb = /(移动|后移|前移|顺延|延后|提前)/.test(normalized)
     const hasDeleteVerb = /(删除|删掉|去掉|移除)/.test(normalized)
     const hasReplaceVerb = /(换成|替换成|改成|替换为|改为)/.test(normalized)
