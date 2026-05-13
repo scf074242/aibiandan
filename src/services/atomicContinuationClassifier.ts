@@ -18,6 +18,14 @@ export class AtomicContinuationClassifier {
       return { kind: 'cancel' }
     }
 
+    const correctionValue = input.pendingContext.phase === 'recommending_insert'
+      ? this.resolveCorrectionValue(input.userInput)
+      : null
+
+    if (this.shouldInterruptAsFreshAtomicInstruction(input.pendingContext, normalized, input.userInput, correctionValue)) {
+      return { kind: 'interrupt_as_new_task' }
+    }
+
     if (this.shouldInterruptAsNewTask(normalized)) {
       return { kind: 'interrupt_as_new_task' }
     }
@@ -34,7 +42,6 @@ export class AtomicContinuationClassifier {
     }
 
     if (input.pendingContext.phase === 'recommending_insert') {
-      const correctionValue = this.resolveCorrectionValue(input.userInput)
       if (correctionValue) {
         return {
           kind: 'correction_reply',
@@ -57,6 +64,71 @@ export class AtomicContinuationClassifier {
     return { kind: 'continue' }
   }
 
+  private shouldInterruptAsFreshAtomicInstruction(
+    pendingContext: RuntimePendingAtomicContext,
+    normalizedInput: string,
+    rawUserInput: string,
+    correctionValue?: string | null,
+  ): boolean {
+    const detectedAction = this.detectAtomicAction(normalizedInput)
+    if (!detectedAction) return false
+
+    const hasExactTime = /(\d{1,2})(点半|点(\d{1,2})分?|点|[:：]\d{2})/.test(normalizedInput)
+    const hasQuotedTitle = /《[^》]+》/.test(normalizedInput)
+    const hasOffset = /\d+(分钟|小时|分|秒)/.test(normalizedInput)
+    const hasProgramLikeText = this.hasProgramLikeText(rawUserInput, detectedAction)
+
+    if (detectedAction !== pendingContext.action) {
+      const isInsertCorrection =
+        pendingContext.phase === 'recommending_insert'
+        && pendingContext.action === 'insert'
+        && detectedAction === 'replace'
+        && Boolean(correctionValue)
+        && !hasExactTime
+        && !hasOffset
+      if (isInsertCorrection) return false
+      return hasExactTime || hasQuotedTitle || hasOffset || hasProgramLikeText
+    }
+
+    switch (detectedAction) {
+      case 'move':
+        return hasExactTime && hasOffset
+      case 'delete':
+        return hasExactTime || hasQuotedTitle
+      case 'replace':
+        return hasExactTime && /(替换成|替换为|换成|改成|改为).+/.test(normalizedInput)
+      case 'insert':
+        return hasExactTime && /(插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个).+/.test(normalizedInput)
+      default:
+        return false
+    }
+  }
+
+  private hasProgramLikeText(rawUserInput: string, detectedAction: RuntimePendingAtomicContext['action']): boolean {
+    const normalized = rawUserInput
+      .trim()
+      .replace(/《([^》]+)》/g, '$1')
+      .replace(/(\d{1,2})(点半|点(\d{1,2})分?|点|[:：]\d{2})/g, '')
+      .replace(/\d+(分钟|小时|分|秒)/g, '')
+      .replace(/[，,。！？!?：:\s]/g, '')
+      .replace(/^(?:把|将|在|于)/, '')
+
+    const actionPatternByType: Record<NonNullable<RuntimePendingAtomicContext['action']>, RegExp> = {
+      insert: /^(?:插入节目|插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/,
+      delete: /^(?:删除|删掉|移除)/,
+      move: /^(?:后移|前移|移动|顺一下|挪一下|顺延|延后|提前)/,
+      replace: /^(?:替换成|替换为|替换|换成|换掉|改成|改为|改掉)/,
+    }
+
+    const stripped = normalized
+      .replace(actionPatternByType[detectedAction], '')
+      .replace(/^(?:成|为|到|向|往)/, '')
+
+    if (!stripped) return false
+    if (/^(?:这个|那个|这条|那条|这档|那档|节目|节目名|栏目|它)$/.test(stripped)) return false
+    return stripped.length >= 2
+  }
+
   private shouldInterruptAsNewTask(normalizedInput: string): boolean {
     if (/(按这个版面开始编排|按该版面开始编排|确认版面|采用这个版面|用这个版面编排)/.test(normalizedInput)) return true
     if (/(帮我全天编排|全天编排|整天编排|帮我填充全天节目|填充全天节目|补齐当前所有空窗|补齐当前空窗|补齐空窗|补齐当前所有空缺|补齐当前空缺)/.test(normalizedInput)) return true
@@ -64,6 +136,14 @@ export class AtomicContinuationClassifier {
     if (/(版面|栏目|剧场|时段|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全天|整天|全日)/.test(normalizedInput)) return true
     return /(\d{1,2}(?::\d{2})?点?.*)(到|至|-).*(\d{1,2}(?::\d{2})?点?)/.test(normalizedInput)
       && /(新闻|栏目|剧场|电视剧|综艺|专题|资讯|纪录片|纪实|少儿|动画)/.test(normalizedInput)
+  }
+
+  private detectAtomicAction(normalizedInput: string): RuntimePendingAtomicContext['action'] {
+    if (/(后移|前移|移动|顺一下|挪一下|顺延|延后|提前)/.test(normalizedInput)) return 'move'
+    if (/(删除|删掉|移除)/.test(normalizedInput)) return 'delete'
+    if (/(替换|换成|替换成|替换为|换掉|改掉|改成|改为)/.test(normalizedInput)) return 'replace'
+    if (/(插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/.test(normalizedInput)) return 'insert'
+    return null
   }
 
   private looksLikeSelectionReply(normalizedInput: string): boolean {

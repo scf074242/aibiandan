@@ -68,4 +68,64 @@ describe('ParamExtractor', () => {
       offsetSeconds: 1800,
     })
   })
+
+  it('不会在 LLM 返回非法时间时偷偷回落到 09:00:00', async () => {
+    const extractor = new ParamExtractor({
+      chat: vi.fn(async () => ({
+        content: '{"targetTime":"稍后","programName":"看东方"}',
+      })),
+    } as never)
+
+    const result = await extractor.extractInsertParams(
+      buildDialogueContext({
+        scheduleState: createScheduleState(),
+        userInput: '插入',
+        currentSchedule: [],
+      }),
+    )
+
+    expect(result).toBeNull()
+  })
+
+  it('能识别更口语化的插入表达', async () => {
+    const chat = vi.fn(async () => ({
+      content: 'should-not-be-used',
+    }))
+    const extractor = new ParamExtractor({ chat } as never)
+
+    const result = await extractor.extractInsertParams(
+      buildDialogueContext({
+        scheduleState: createScheduleState(),
+        userInput: '9点来个看东方',
+        currentSchedule: [],
+      }),
+    )
+
+    expect(result).toEqual({
+      targetTime: '09:00:00',
+      programName: '看东方',
+      rawProgramText: '看东方',
+      semanticLabel: undefined,
+      programTypeHint: undefined,
+    })
+    expect(chat).not.toHaveBeenCalled()
+  })
+
+  it('用户没提时间时不会让 LLM 猜一个 09:00:00 出来', async () => {
+    const chat = vi.fn(async () => ({
+      content: '{"targetTime":"09:00:00","programName":"看东方"}',
+    }))
+    const extractor = new ParamExtractor({ chat } as never)
+
+    const result = await extractor.extractInsertParams(
+      buildDialogueContext({
+        scheduleState: createScheduleState(),
+        userInput: '插入看东方',
+        currentSchedule,
+      }),
+    )
+
+    expect(result).toBeNull()
+    expect(chat).not.toHaveBeenCalled()
+  })
 })

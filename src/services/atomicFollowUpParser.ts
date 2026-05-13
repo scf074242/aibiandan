@@ -41,10 +41,13 @@ export class AtomicFollowUpParser {
       }
     }
 
-    if (input.pendingContext.action === 'delete' && !slots.targetTime) {
+    if ((input.pendingContext.action === 'delete' || input.pendingContext.action === 'move') && !slots.targetTime) {
       const programPatch = this.extractProgramPatch(trimmed, normalized)
       if (programPatch?.programName) {
         slots.programName = programPatch.programName
+        if (!slots.rawProgramText) {
+          slots.rawProgramText = programPatch.rawProgramText
+        }
       }
     }
 
@@ -70,14 +73,18 @@ export class AtomicFollowUpParser {
       const match = pattern.exec(normalized)
       if (!match?.[0]) continue
       if (pattern.source.includes('点半')) {
+        const targetTime = this.normalizeTime(`${match[1]}:30`)
+        if (!targetTime) continue
         return {
-          targetTime: this.normalizeTime(`${match[1]}:30`),
+          targetTime,
           targetTimeHint: match[0],
         }
       }
 
+      const targetTime = this.normalizeTime(`${match[1]}:${match[2] ?? '00'}`)
+      if (!targetTime) continue
       return {
-        targetTime: this.normalizeTime(`${match[1]}:${match[2] ?? '00'}`),
+        targetTime,
         targetTimeHint: match[0],
       }
     }
@@ -120,7 +127,7 @@ export class AtomicFollowUpParser {
 
   private extractProgramPatch(trimmed: string, normalized: string): Partial<RuntimeAtomicSlotBag> | null {
     const quotedProgramName = trimmed.match(/《([^》]+)》/)?.[1]?.trim()
-    const explicitProgramName = trimmed.match(/(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目|我要|换成|改成)(.+)$/)?.[1]?.trim()
+    const explicitProgramName = trimmed.match(/(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目|来个|来一条|来一档|放个|上个|删除|删掉|移除|去掉|我要|我想要|想要|我想看|想看|要看|换成|改成)(.+)$/)?.[1]?.trim()
     const candidate = this.normalizeProgramCandidate(quotedProgramName ?? explicitProgramName ?? trimmed)
     if (!candidate) return null
 
@@ -135,16 +142,19 @@ export class AtomicFollowUpParser {
     const normalized = value
       .replace(/^[，,：:\s]+/, '')
       .replace(/[，。！？!?]/g, '')
-      .replace(/^(?:补充说明[:：]?|节目名|节目|栏目|这条|那条|这个|那个|我要|换成|改成|改为)+/, '')
+      .replace(/^(?:补充说明[:：]?|节目名|节目|栏目|这条|那条|这个|那个|我要|我想要|想要|我想看|想看|要看|来个|来一条|来一档|放个|上个|删除|删掉|移除|去掉|换成|改成|改为)+/, '')
+      .replace(/(?:吧|呀|啊|呢)$/u, '')
       .trim()
     if (!normalized) return undefined
+    if (/^\d{1,2}(?:[:：]\d{2})?$/.test(normalized)) return undefined
+    if (/^\d{1,2}点(?:半|\d{1,2}分?)?$/.test(normalized)) return undefined
     if (/^(节目|栏目|这条|那条|这个节目|那个节目|第[一二三四五12345]个?)$/.test(normalized)) return undefined
     return normalized
   }
 
-  private normalizeTime(timeText: string): string {
+  private normalizeTime(timeText: string): string | null {
     const match = timeText.match(/(\d{1,2})[:：]?(\d{2})?(?:[:：]?(\d{2}))?/)
-    if (!match) return '09:00:00'
+    if (!match) return null
 
     const hours = (match[1] ?? '09').padStart(2, '0')
     const minutes = (match[2] ?? '00').padStart(2, '0')

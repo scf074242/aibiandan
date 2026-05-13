@@ -128,4 +128,26 @@ describe('LayoutDraftService', () => {
     expect(spec.segments.map((segment) => `${segment.startTime}-${segment.endTime}`)).toContain('22:30:00-23:00:00')
     expect(spec.segments.map((segment) => `${segment.startTime}-${segment.endTime}`)).toContain('23:30:00-23:59:59')
   })
+
+  it('删除草案时段时不会把草案泛称当作栏目名', async () => {
+    const chat = vi.fn(async () => {
+      throw new Error('mock llm unavailable')
+    })
+    const service = new LayoutDraftService({
+      chat,
+    } as never)
+
+    const spec = await service.refineSpec({
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      userInput: '删除22点的草案',
+      currentDraft: createDraft(),
+    })
+
+    expect(chat).not.toHaveBeenCalled()
+    expect(spec.segments.map((segment) => segment.label)).not.toContain('今晚')
+    expect(spec.segments.map((segment) => `${segment.startTime}-${segment.endTime}`)).not.toContain('22:00:00-22:30:00')
+    expect(spec.segments.map((segment) => `${segment.startTime}-${segment.endTime}`)).toContain('22:30:00-23:00:00')
+  })
 })

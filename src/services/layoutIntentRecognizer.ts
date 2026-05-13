@@ -2,7 +2,7 @@ import type { ChatMessage } from '@/types/llm'
 import type { LayoutDraft, LayoutIntentSegment, ScheduleState } from '@/types/orchestration'
 import type { LLMClient } from './llm/llmClient'
 
-export type LayoutIntentMode = 'layout_prepare' | 'layout_refine' | 'layout_commit' | 'atomic_fallback' | 'clarify'
+export type LayoutIntentMode = 'layout_prepare' | 'layout_refine' | 'layout_commit' | 'layout_analysis' | 'atomic_fallback' | 'clarify'
 
 export interface LayoutIntentRecognition {
   mode: LayoutIntentMode
@@ -25,6 +25,7 @@ export interface LayoutIntentRecognizerInput {
 }
 
 const CONFIDENCE_THRESHOLD = 0.72
+const PROTECTED_RULE_BASED_MODES: LayoutIntentMode[] = ['layout_analysis', 'layout_commit']
 
 const looksLikeDirectOrchestrationIntent = (input: string): boolean => {
   return [
@@ -115,6 +116,30 @@ const matchesLayoutCommit = (input: string): boolean => {
     '采用这个版面',
     '用这个版面编排',
   ].some((keyword) => input.includes(keyword))
+}
+
+const matchesLayoutAnalysis = (input: string): boolean => {
+  const hasAnalysisVerb = ['分析', '评估', '研判', '诊断', '梳理'].some((keyword) => input.includes(keyword))
+  const hasLayoutTarget = ['当前版面', '版面编排', '当前编排', '当前节目单', '节目单编排', '节目编排', '编排情况']
+    .some((keyword) => input.includes(keyword))
+  const hasEditorialCue = /编辑视角|业务分析|文字版报告|分析报告/.test(input)
+  return (hasAnalysisVerb && hasLayoutTarget) || (hasLayoutTarget && hasEditorialCue) || (hasAnalysisVerb && hasEditorialCue)
+}
+
+const matchesLayoutOptimization = (input: string): boolean => {
+  const hasOptimizeVerb = ['优化', '调优', '重构', '重新梳理', '重做'].some((keyword) => input.includes(keyword))
+  const hasTarget = ['当前版面', '版面', '当前编排', '编排', '节目单'].some((keyword) => input.includes(keyword))
+  return hasOptimizeVerb && hasTarget
+}
+
+const matchesLayoutDraftRemove = (input: string): boolean => {
+  const hasRemoveVerb = ['删除', '删掉', '移除', '去掉'].some((keyword) => input.includes(keyword))
+  const hasDraftCue = ['草案', '版面草案', '当前版面', '版面', '时段'].some((keyword) => input.includes(keyword))
+  const hasTargetCue = Boolean(extractTimeRange(input))
+    || /(\d{1,2})(点半|点(\d{1,2})分?|[:：]\d{2})/.test(input)
+    || /《[^》]+》/.test(input)
+    || !['草案', '版面', '时段'].some((keyword) => input === `删除${keyword}` || input === `去掉${keyword}`)
+  return hasRemoveVerb && hasDraftCue && hasTargetCue
 }
 
 const matchesLayoutRefineVerb = (input: string): boolean => {
@@ -299,6 +324,12 @@ export class LayoutIntentRecognizer {
     if (fallback.mode === 'atomic_fallback') {
       return false
     }
+    if (matchesLayoutDraftRemove(normalized)) {
+      return false
+    }
+    if (PROTECTED_RULE_BASED_MODES.includes(fallback.mode)) {
+      return false
+    }
     if (input.currentLayoutDraft) {
       return true
     }
@@ -323,6 +354,43 @@ export class LayoutIntentRecognizer {
         mode: 'layout_commit',
         confidence: 0.95,
         reasoning: '检测到用户正在确认当前版面草案并准备开始编排。',
+        ignoreExistingLayout,
+        targetTimeRange,
+        semanticLabel,
+        programTypeHint,
+      }
+    }
+
+    if (matchesLayoutAnalysis(normalized)) {
+      return {
+        mode: 'layout_analysis',
+        confidence: 0.94,
+        reasoning: '检测到用户想分析当前实际编排效果，应先输出文字版业务分析报告。',
+        ignoreExistingLayout,
+        targetTimeRange,
+        semanticLabel,
+        programTypeHint,
+      }
+    }
+
+    if (matchesLayoutOptimization(normalized)) {
+      return {
+        mode: 'layout_prepare',
+        confidence: 0.9,
+        reasoning: '检测到用户想优化当前版面编排，应先生成新的待确认版面草案。',
+        ignoreExistingLayout: true,
+        targetTimeRange,
+        semanticLabel,
+        programTypeHint,
+        segments: structuredSegments,
+      }
+    }
+
+    if (input.currentLayoutDraft && matchesLayoutDraftRemove(normalized)) {
+      return {
+        mode: 'layout_refine',
+        confidence: 0.93,
+        reasoning: '当前已有版面草案，用户正在删除草案中的某个版面时段，应作为草案微调处理。',
         ignoreExistingLayout,
         targetTimeRange,
         semanticLabel,
@@ -435,8 +503,10 @@ export class LayoutIntentRecognizer {
     const systemPrompt = [
       '你是广播节目版面意图识别器，主要负责识别版面草案相关意图。',
       '如果输入明显更像在调整具体节目条目，但信息不足以直接形成插入、删除、移动、替换命令，请返回 atomic_fallback。',
-      '请只在以下模式中选择一个：layout_prepare、layout_refine、layout_commit、atomic_fallback、clarify。',
+      '请只在以下模式中选择一个：layout_prepare、layout_refine、layout_commit、layout_analysis、atomic_fallback、clarify。',
       '业务短语是开放的，不要把“下午剧场”“新闻栏目”“城市剧场”这类短语硬套成固定词表，请尽量原样保留到 semanticLabel。',
+      '如果用户明确要求“分析当前版面编排/当前节目单编排”，返回 layout_analysis。',
+      '如果用户明确要求“优化当前版面/优化当前编排”，优先返回 layout_prepare，并把 ignoreExistingLayout 设为 true。',
       '如果用户明确表示“不参考当前版面/忽略版面”，请把 ignoreExistingLayout 设为 true。',
       '如果用户只提到了分类标签，比如“电视剧”“新闻”，也要给出 programTypeHint。',
       '如果输入仍然过于模糊，就返回 clarify，不要过度猜测。',
@@ -468,7 +538,7 @@ export class LayoutIntentRecognizer {
         return null
       }
       const parsed = JSON.parse(match[0]) as Partial<LayoutIntentRecognition>
-      if (!parsed.mode || !['layout_prepare', 'layout_refine', 'layout_commit', 'atomic_fallback', 'clarify'].includes(parsed.mode)) {
+      if (!parsed.mode || !['layout_prepare', 'layout_refine', 'layout_commit', 'layout_analysis', 'atomic_fallback', 'clarify'].includes(parsed.mode)) {
         return null
       }
       return {

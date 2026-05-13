@@ -33,6 +33,9 @@ export class ParamExtractor {
     if (ruleBased && !this.shouldRefineWithContext(context, 'insert', ruleBased.programName)) {
       return ruleBased
     }
+    if (!ruleBased && !this.hasExplicitTargetTimeHint(context)) {
+      return null
+    }
 
     try {
       const response = await this.llmClient.chat(
@@ -40,7 +43,7 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime，以及可选的 programName、rawProgramText、semanticLabel、programTypeHint，并且只返回 JSON。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime，以及可选的 programName、rawProgramText、semanticLabel、programTypeHint，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。',
           },
           {
             role: 'user',
@@ -57,8 +60,10 @@ export class ParamExtractor {
       if (!match) return ruleBased ?? null
       const parsed = JSON.parse(match[0]) as Partial<InsertParams>
       if (!parsed.targetTime) return ruleBased ?? null
+      const normalizedTargetTime = this.normalizeTime(parsed.targetTime)
+      if (!normalizedTargetTime) return ruleBased ?? null
       return this.normalizeInsertParams({
-        targetTime: this.normalizeTime(parsed.targetTime),
+        targetTime: normalizedTargetTime,
         programName: parsed.programName,
         rawProgramText: parsed.rawProgramText,
         semanticLabel: parsed.semanticLabel,
@@ -74,6 +79,9 @@ export class ParamExtractor {
     if (ruleBased && !this.shouldRefineWithContext(context, 'move')) {
       return ruleBased
     }
+    if (!ruleBased && !this.hasExplicitTargetTimeHint(context)) {
+      return null
+    }
 
     try {
       const response = await this.llmClient.chat(
@@ -81,7 +89,7 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime、direction 和 offsetSeconds，并且只返回 JSON。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime、direction 和 offsetSeconds，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。',
           },
           {
             role: 'user',
@@ -98,8 +106,10 @@ export class ParamExtractor {
       if (!match) return ruleBased ?? null
       const parsed = JSON.parse(match[0]) as Partial<MoveParams>
       if (!parsed.targetTime || !parsed.direction || !parsed.offsetSeconds) return ruleBased ?? null
+      const normalizedTargetTime = this.normalizeTime(parsed.targetTime)
+      if (!normalizedTargetTime) return ruleBased ?? null
       const extracted: MoveParams = {
-        targetTime: this.normalizeTime(parsed.targetTime),
+        targetTime: normalizedTargetTime,
         direction: parsed.direction === 'backward' ? 'backward' : 'forward',
         offsetSeconds: Math.max(60, Number(parsed.offsetSeconds)),
       }
@@ -114,6 +124,9 @@ export class ParamExtractor {
     if (ruleBased && !this.shouldRefineWithContext(context, 'delete', ruleBased.programName)) {
       return ruleBased
     }
+    if (!ruleBased && !this.hasExplicitTargetTimeHint(context)) {
+      return null
+    }
 
     try {
       const response = await this.llmClient.chat(
@@ -121,7 +134,7 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和可选 programName，并且只返回 JSON。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和可选 programName，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。',
           },
           {
             role: 'user',
@@ -138,8 +151,10 @@ export class ParamExtractor {
       if (!match) return ruleBased ?? null
       const parsed = JSON.parse(match[0]) as Partial<DeleteParams>
       if (!parsed.targetTime) return ruleBased ?? null
+      const normalizedTargetTime = this.normalizeTime(parsed.targetTime)
+      if (!normalizedTargetTime) return ruleBased ?? null
       const extracted = {
-        targetTime: this.normalizeTime(parsed.targetTime),
+        targetTime: normalizedTargetTime,
         programName: parsed.programName?.trim(),
       }
       return extracted
@@ -153,6 +168,9 @@ export class ParamExtractor {
     if (ruleBased && !this.shouldRefineWithContext(context, 'replace', ruleBased.programName)) {
       return ruleBased
     }
+    if (!ruleBased && !this.hasExplicitTargetTimeHint(context)) {
+      return null
+    }
 
     try {
       const response = await this.llmClient.chat(
@@ -160,7 +178,7 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和 replacementProgramName，并且只返回 JSON。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和 replacementProgramName，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。',
           },
           {
             role: 'user',
@@ -182,8 +200,10 @@ export class ParamExtractor {
       }
       const programName = parsed.replacementProgramName ?? parsed.programName
       if (!parsed.targetTime || !programName) return ruleBased ?? null
+      const normalizedTargetTime = this.normalizeTime(parsed.targetTime)
+      if (!normalizedTargetTime) return ruleBased ?? null
       const extracted = {
-        targetTime: this.normalizeTime(parsed.targetTime),
+        targetTime: normalizedTargetTime,
         programName: programName.trim(),
       }
       return extracted
@@ -197,13 +217,16 @@ export class ParamExtractor {
     const timeMatch =
       normalized.match(/在?(\d{1,2})点(?:(\d{1,2})分)?/) ||
       normalized.match(/在?(\d{1,2})[:：](\d{2})/)
-    const insertVerbMatched = /(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目)/.test(normalized)
-    const programMatch = normalized.match(/(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目)(.*)$/)
+    const insertVerbMatched = /(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目|来个|来一条|来一档|放个|上个)/.test(normalized)
+    const programMatch = normalized.match(/(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目|来个|来一条|来一档|放个|上个)(.*)$/)
 
     if (!timeMatch || !insertVerbMatched) return null
 
+    const normalizedTargetTime = this.normalizeTime(`${timeMatch[1] ?? '09'}:${timeMatch[2] ?? '00'}`)
+    if (!normalizedTargetTime) return null
+
     return this.normalizeInsertParams({
-      targetTime: this.normalizeTime(`${timeMatch[1] ?? '09'}:${timeMatch[2] ?? '00'}`),
+      targetTime: normalizedTargetTime,
       rawProgramText: programMatch?.[1],
     })
   }
@@ -267,15 +290,19 @@ export class ParamExtractor {
       const match = pattern.exec(normalized)
       if (!match?.[0] || typeof match.index !== 'number') continue
       if (pattern.source.includes('点半')) {
+        const targetTime = this.normalizeTime(`${match[1]}:30`)
+        if (!targetTime) continue
         return {
-          targetTime: this.normalizeTime(`${match[1]}:30`),
+          targetTime,
           matchedText: match[0],
           index: match.index,
         }
       }
 
+      const targetTime = this.normalizeTime(`${match[1]}:${match[2] ?? '00'}`)
+      if (!targetTime) continue
       return {
-        targetTime: this.normalizeTime(`${match[1]}:${match[2] ?? '00'}`),
+        targetTime,
         matchedText: match[0],
         index: match.index,
       }
@@ -358,9 +385,13 @@ export class ParamExtractor {
     return hasTimeHints && hasNearbyItems
   }
 
-  private normalizeTime(timeText: string): string {
-    const match = timeText.match(/(\d{1,2})[:：]?(\d{2})?(?:[:：]?(\d{2}))?/) 
-    if (!match) return '09:00:00'
+  private hasExplicitTargetTimeHint(context: DialogueContext): boolean {
+    return context.targetTimeHints.length > 0
+  }
+
+  private normalizeTime(timeText: string): string | null {
+    const match = timeText.match(/(\d{1,2})[:：]?(\d{2})?(?:[:：]?(\d{2}))?/)
+    if (!match) return null
 
     const hours = (match[1] ?? '09').padStart(2, '0')
     const minutes = (match[2] ?? '00').padStart(2, '0')
@@ -370,6 +401,9 @@ export class ParamExtractor {
 
   private normalizeInsertParams(params: InsertParams): InsertParams {
     const targetTime = this.normalizeTime(params.targetTime)
+    if (!targetTime) {
+      throw new Error('normalizeInsertParams requires a valid targetTime')
+    }
     const rawProgramText = this.normalizeProgramFragment(params.rawProgramText)
     const explicitProgramName = this.normalizeProgramName(params.programName)
     const quotedProgramName = rawProgramText?.match(/《([^》]+)》/)?.[1]?.trim()
@@ -415,6 +449,8 @@ export class ParamExtractor {
       .replace(/^《/, '')
       .replace(/》$/, '')
       .replace(/[，。！？!?]/g, '')
+      .replace(/^(?:我要|我想要|想要|我想看|想看|要看|来个|来一条|来一档|放个|上个)+/, '')
+      .replace(/(?:吧|呀|啊|呢)$/u, '')
       .trim()
     return normalized || undefined
   }
@@ -424,8 +460,9 @@ export class ParamExtractor {
     const normalized = value
       .replace(/^(一档|一个|一条|一期|一部|个|条|档|期|部)/, '')
       .replace(/^(适合的|合适的|当前的)/, '')
-      .replace(/^(节目名|节目|栏目)\s*/, '')
+      .replace(/^(节目名|节目|栏目|我要|我想要|想要|我想看|想看|要看|来个|来一条|来一档|放个|上个)\s*/, '')
       .replace(/[，。！？!?]/g, '')
+      .replace(/(?:吧|呀|啊|呢)$/u, '')
       .trim()
     return normalized || undefined
   }

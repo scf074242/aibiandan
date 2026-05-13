@@ -5,6 +5,7 @@ import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomi
 import { resetCandidateService } from '@/services/candidateService'
 
 const mockIntentRecognize = vi.fn()
+const mockExtractInsertParams = vi.fn()
 const mockExtractDeleteParams = vi.fn()
 const mockExtractMoveParams = vi.fn()
 const mockLayoutRecognize = vi.fn()
@@ -42,7 +43,7 @@ vi.mock('@/services/intentRecognizer', () => ({
 
 vi.mock('@/services/paramExtractor', () => ({
   getParamExtractor: () => ({
-    extractInsertParams: vi.fn(async () => null),
+    extractInsertParams: mockExtractInsertParams,
     extractDeleteParams: mockExtractDeleteParams,
     extractMoveParams: mockExtractMoveParams,
     extractReplaceParams: vi.fn(async () => null),
@@ -77,6 +78,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     mockIntentRecognize.mockReset()
+    mockExtractInsertParams.mockReset()
     mockExtractDeleteParams.mockReset()
     mockExtractMoveParams.mockReset()
     mockLayoutRecognize.mockReset()
@@ -472,6 +474,202 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
+  it('补充式插入命令会进入统一澄清并承接后续时间补参', async () => {
+    mockIntentRecognize.mockResolvedValue({
+      type: 'unsupported',
+      confidence: 0.2,
+      reasoning: 'short insert phrase',
+    })
+    mockExtractInsertParams.mockResolvedValue(null)
+    mockLayoutRecognize.mockResolvedValue({
+      mode: 'clarify',
+      confidence: 0.2,
+      reasoning: 'unused',
+      ignoreExistingLayout: false,
+    })
+
+    const facade = new DemoRuntimeFacade()
+    const first = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '插入',
+      currentSchedule: [],
+      history: [],
+    })
+
+    expect(first.kind).toBe('pending_atomic_context')
+    if (first.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context decision')
+    }
+    expect(first.pendingAtomicContext.action).toBe('insert')
+    expect(first.pendingAtomicContext.phase).toBe('clarifying')
+
+    const second = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '10点',
+      currentSchedule: [],
+      pendingAtomicContext: first.pendingAtomicContext,
+      history: [],
+    })
+
+    expect(second.kind).toBe('pending_atomic_context')
+    if (second.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context decision')
+    }
+    expect(second.pendingAtomicContext.phase).toBe('clarifying')
+    expect(second.pendingAtomicContext.slots.targetTime).toBe('10:00:00')
+    expect(second.pendingAtomicContext.missingFields).toContain('program_name')
+    expect(second.pendingAtomicContext.missingFields).not.toContain('target_time')
+  })
+
+  it('旧的原子上下文会给新的完整原子命令让路', async () => {
+    mockIntentRecognize.mockResolvedValue({
+      type: 'delete',
+      confidence: 0.92,
+      reasoning: 'fresh delete intent',
+    })
+    mockExtractDeleteParams.mockResolvedValue({
+      targetTime: '09:00:00',
+    })
+    mockResolveTarget.mockResolvedValue({
+      status: 'unique',
+      selectedItem: { ...mockedItem },
+      reasoning: 'matched target item',
+      matchedBy: ['time_window'],
+      candidates: [{ ...mockedItem }],
+    })
+    mockLayoutRecognize.mockResolvedValue({
+      mode: 'clarify',
+      confidence: 0.2,
+      reasoning: 'unused',
+      ignoreExistingLayout: false,
+    })
+
+    const facade = new DemoRuntimeFacade()
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '删除9点的节目',
+      currentSchedule: [mockedItem],
+      pendingAtomicContext: {
+        action: 'insert',
+        phase: 'clarifying',
+        summary: '请补充插入参数',
+        reasoning: 'pending insert clarification',
+        originalUserInput: '插入节目',
+        collectedUserInput: '插入节目',
+        slots: {},
+        missingFields: ['target_time', 'program_name'],
+        followUpQuestion: '请补充目标时间点和节目名称。',
+        attemptCount: 0,
+        createdAt: '2026-04-15T10:00:00.000Z',
+        updatedAt: '2026-04-15T10:00:00.000Z',
+      },
+      history: [],
+    })
+
+    expect(result.kind).toBe('pending_command')
+    if (result.kind !== 'pending_command') {
+      throw new Error('expected pending_command decision')
+    }
+
+    expect(result.pendingCommand.command.action).toBe('delete')
+    expect(result.pendingCommand.command.data).toMatchObject({
+      itemId: mockedItem.id,
+    })
+  })
+
+  it('用户没提时间时不会被误导到 09:00 的插入推荐', async () => {
+    mockIntentRecognize.mockResolvedValue({
+      type: 'insert',
+      confidence: 0.9,
+      reasoning: 'insert without explicit time',
+    })
+    mockExtractInsertParams.mockResolvedValue(null)
+    mockLayoutRecognize.mockResolvedValue({
+      mode: 'clarify',
+      confidence: 0.2,
+      reasoning: 'unused',
+      ignoreExistingLayout: false,
+    })
+
+    const facade = new DemoRuntimeFacade()
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '插入看东方',
+      currentSchedule: [mockedItem],
+      history: [],
+    })
+
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context decision')
+    }
+
+    expect(result.pendingAtomicContext.action).toBe('insert')
+    expect(result.pendingAtomicContext.missingFields).toContain('target_time')
+    expect(result.pendingAtomicContext.missingFields).not.toContain('program_name')
+    expect(result.pendingAtomicContext.slots.targetTime).toBeUndefined()
+    expect(result.pendingAtomicContext.slots.programName).toBe('看东方')
+    expect(result.pendingAtomicContext.summary).not.toContain('09:00')
+    expect(result.pendingAtomicContext.summary).not.toContain('09:00:00')
+  })
+
+  it('首轮已经说过节目名时，后续补时间不会再次追问节目名', async () => {
+    mockIntentRecognize
+      .mockResolvedValueOnce({
+        type: 'insert',
+        confidence: 0.9,
+        reasoning: 'insert without explicit time',
+      })
+      .mockResolvedValueOnce({
+        type: 'insert',
+        confidence: 0.9,
+        reasoning: 'insert with completed params',
+      })
+    mockExtractInsertParams
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        targetTime: '09:00:00',
+        programName: '看东方',
+        rawProgramText: '看东方',
+      })
+    mockLayoutRecognize.mockResolvedValue({
+      mode: 'clarify',
+      confidence: 0.2,
+      reasoning: 'unused',
+      ignoreExistingLayout: false,
+    })
+
+    const facade = new DemoRuntimeFacade()
+    const first = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '插入看东方',
+      currentSchedule: [mockedItem],
+      history: [],
+    })
+
+    if (first.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context decision')
+    }
+
+    const second = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '9点',
+      currentSchedule: [mockedItem],
+      pendingAtomicContext: first.pendingAtomicContext,
+      history: [],
+    })
+
+    expect(second.kind).toBe('pending_atomic_context')
+    if (second.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context decision')
+    }
+
+    expect(second.pendingAtomicContext.phase).toBe('recommending_insert')
+    expect(second.pendingAtomicContext.missingFields).toEqual(['selection'])
+    expect(second.pendingAtomicContext.slots.programName).toBe('看东方')
+    expect(second.pendingAtomicContext.slots.targetTime).toBe('09:00:00')
+  })
+
   it('统一 pendingAtomicContext 超时后会结束旧上下文并提示用户重述', async () => {
     const facade = new DemoRuntimeFacade()
 
@@ -526,7 +724,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
         attemptCount: 3,
         createdAt: '2026-04-15T10:00:00.000Z',
         updatedAt: '2026-04-15T10:03:00.000Z',
-        expiresAt: '2026-04-16T16:13:00.000Z',
+        expiresAt: '2099-04-16T16:13:00.000Z',
       },
       history: [],
     })

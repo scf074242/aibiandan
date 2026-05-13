@@ -80,6 +80,11 @@ export class OpenClawBridge {
       currentSchedule: input.currentSchedule,
     })
 
+    const pendingCommandDecision = await this.tryResolvePendingCommandReply(session.sessionId, session.pendingCommand, input.text)
+    if (pendingCommandDecision) {
+      return pendingCommandDecision
+    }
+
     const pendingAtomicContext = this.resolvePendingAtomicContext(session)
 
     const decision = await this.runtimeFacade.submitInstruction({
@@ -113,6 +118,22 @@ export class OpenClawBridge {
 
     const nextState = this.updateSessionFromDecision(session.sessionId, decision, input.text)
     return this.toBridgeResult(nextState)
+  }
+
+  private async tryResolvePendingCommandReply(
+    sessionId: string,
+    pendingCommand: RuntimePendingCommand | undefined,
+    text: string,
+  ): Promise<OpenClawBridgeResult | null> {
+    if (!pendingCommand) return null
+    const normalized = text.replace(/\s+/g, '')
+    if (/^(取消|不用了|算了|先不用|停止|结束|关闭|不执行|别删了|别删除)$/.test(normalized)) {
+      return this.cancel(sessionId)
+    }
+    if (/^(确认|确认执行|执行|可以|是的|对|确认删除|删除吧|删吧|就这样)$/.test(normalized)) {
+      return this.confirm(sessionId)
+    }
+    return null
   }
 
   async confirm(sessionId: string): Promise<OpenClawBridgeResult> {
@@ -428,6 +449,10 @@ export class OpenClawBridge {
       message: state.lastExecution?.message,
       payload: {
         conversationId: state.conversationId,
+        compatibility: {
+          sourceOfTruth: 'pendingAtomicContext',
+          legacyPendingPayloads: true,
+        },
         pendingCommand: state.pendingCommand,
         pendingTargetSelection: this.resolvePendingTargetSelection(state),
         pendingInsertRecommendation: this.resolvePendingInsertRecommendation(state),

@@ -242,4 +242,120 @@ describe('OpenClawBridge insert recommendation', () => {
       }),
     }))
   })
+
+  it('待确认删除命令支持自然语言取消', async () => {
+    mockSubmitInstruction.mockResolvedValueOnce({
+      kind: 'pending_command',
+      feedback: {
+        content: '将删除 09:00:00 的《看东方》。',
+        processType: 'selection',
+        processTypeLabel: '待确认修改',
+      },
+      pendingCommand: {
+        command: {
+          action: 'delete',
+          reasoning: 'mock delete',
+          data: {
+            itemId: 'item-1',
+          },
+        },
+        summary: '删除 09:00:00 的《看东方》',
+        successMessage: '已删除 09:00:00 的《看东方》',
+        reasoning: 'mock delete',
+      },
+    })
+
+    const bridge = new OpenClawBridge()
+    const first = await bridge.submitInstruction({
+      conversationId: 'conv-pending-delete-cancel',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '删除9点的看东方',
+      currentSchedule: [],
+      gapCount: 0,
+      history: [],
+    })
+
+    const second = await bridge.submitInstruction({
+      conversationId: 'conv-pending-delete-cancel',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '取消',
+      currentSchedule: [],
+      gapCount: 0,
+      history: [],
+    })
+
+    expect(first.status).toBe('needs_confirmation')
+    expect(second.status).toBe('cancelled')
+    expect(second.payload?.pendingCommand).toBeUndefined()
+    expect(mockExecutePendingCommand).not.toHaveBeenCalled()
+    expect(mockSubmitInstruction).toHaveBeenCalledTimes(1)
+  })
+
+  it('待确认删除命令支持自然语言确认', async () => {
+    mockSubmitInstruction.mockResolvedValueOnce({
+      kind: 'pending_command',
+      feedback: {
+        content: '将删除 09:00:00 的《看东方》。',
+        processType: 'selection',
+        processTypeLabel: '待确认修改',
+      },
+      pendingCommand: {
+        command: {
+          action: 'delete',
+          reasoning: 'mock delete',
+          data: {
+            itemId: 'item-1',
+          },
+        },
+        summary: '删除 09:00:00 的《看东方》',
+        successMessage: '已删除 09:00:00 的《看东方》',
+        reasoning: 'mock delete',
+      },
+    })
+    mockExecutePendingCommand.mockResolvedValueOnce({
+      success: true,
+      command: {
+        action: 'delete',
+        reasoning: 'mock delete',
+        data: {
+          itemId: 'item-1',
+        },
+      },
+      message: '已删除 09:00:00 的《看东方》',
+      summary: '删除节目',
+    })
+
+    const bridge = new OpenClawBridge()
+    const first = await bridge.submitInstruction({
+      conversationId: 'conv-pending-delete-confirm',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '删除9点的看东方',
+      currentSchedule: [],
+      gapCount: 0,
+      history: [],
+    })
+
+    const second = await bridge.submitInstruction({
+      conversationId: 'conv-pending-delete-confirm',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '确认删除',
+      currentSchedule: [],
+      gapCount: 0,
+      history: [],
+    })
+
+    expect(first.status).toBe('needs_confirmation')
+    expect(second.status).toBe('completed')
+    expect(second.message).toBe('已删除 09:00:00 的《看东方》')
+    expect(mockExecutePendingCommand).toHaveBeenCalledTimes(1)
+    expect(mockSubmitInstruction).toHaveBeenCalledTimes(1)
+  })
 })

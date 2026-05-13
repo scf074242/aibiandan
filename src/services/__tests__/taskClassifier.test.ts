@@ -149,6 +149,33 @@ describe('TaskClassifier', () => {
     expect(chat).not.toHaveBeenCalled()
   })
 
+  it('对当前版面编排分析诉求识别为 layout_analysis', async () => {
+    const chat = vi.fn()
+    const classifier = new TaskClassifier({ chat } as never)
+
+    const result = await classifier.classify({
+      scheduleState: createScheduleState(),
+      userInput: '请分析当前版面编排，给我一份编辑视角的文字版报告',
+    })
+
+    expect(result.mode).toBe('layout_analysis')
+    expect(chat).not.toHaveBeenCalled()
+  })
+
+  it('对优化当前版面的诉求识别为 layout_prepare', async () => {
+    const chat = vi.fn()
+    const classifier = new TaskClassifier({ chat } as never)
+
+    const result = await classifier.classify({
+      scheduleState: createScheduleState(),
+      userInput: '请优化当前版面编排',
+    })
+
+    expect(result.mode).toBe('layout_prepare')
+    expect(result.suggestedParams?.ignoreExistingLayout).toBe(true)
+    expect(chat).not.toHaveBeenCalled()
+  })
+
   it('对像原子操作但信息不完整的表达要求澄清', async () => {
     const chat = vi.fn()
     const classifier = new TaskClassifier({ chat } as never)

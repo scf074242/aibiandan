@@ -67,12 +67,29 @@
               :key="section.title"
               class="explanation-section"
               :class="{
+                'is-layout-analysis-report': shouldRenderLayoutAnalysisReport(message, section),
                 'is-secondary': section.tone === 'secondary',
                 'is-risk': section.tone === 'risk',
               }"
             >
-              <span class="explanation-title">{{ section.title }}</span>
-              <div class="explanation-content">{{ section.body }}</div>
+              <span v-if="!shouldRenderLayoutAnalysisReport(message, section)" class="explanation-title">{{ section.title }}</span>
+              <div v-if="shouldRenderLayoutAnalysisReport(message, section)" class="explanation-content analysis-report-content">
+                <div
+                  v-for="(paragraph, paragraphIndex) in getLayoutAnalysisReportParagraphs(section.body)"
+                  :key="`${section.title}-${paragraphIndex}`"
+                  class="analysis-report-paragraph"
+                >
+                  <span
+                    v-if="paragraph.label"
+                    class="analysis-report-label"
+                    :class="{ 'is-risk': paragraph.label === '风险' }"
+                  >
+                    {{ paragraph.label }}：
+                  </span>
+                  <span class="analysis-report-body">{{ paragraph.body }}</span>
+                </div>
+              </div>
+              <div v-else class="explanation-content">{{ section.body }}</div>
             </div>
 
             <div
@@ -459,6 +476,7 @@ import {
   buildCandidateComparisonItems,
   buildDetailsSummary as buildMessageDetailsSummary,
   extractWarnings,
+  isLayoutAnalysisDetails,
   isLayoutImportDetails,
   isOrchestrationOverviewDetails,
 } from './chatPanelDetails'
@@ -807,6 +825,7 @@ const appendRuntimeFeedback = (feedback: RuntimeFeedback) => {
           feedbackProcessType === 'error' ? 'issue' : 'intent',
         )
       : undefined,
+    expanded: isLayoutAnalysisDetails(details) ? true : undefined,
   }))
 }
 
@@ -1692,6 +1711,44 @@ const keepPersistentThinkingAtBottom = () => {
   messages.value.push(thinkingMessage)
 }
 
+type LayoutAnalysisDisplayParagraph = {
+  label?: string
+  body: string
+}
+
+const LAYOUT_ANALYSIS_LABEL_PATTERN = /^(总评|观察|风险|建议|说明)\s*[：:]\s*/u
+
+const getLayoutAnalysisParagraphs = (content: string): string[] =>
+  content
+    .replace(/\r\n/g, '\n')
+    .split(/\n\s*\n/g)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+const getLayoutAnalysisReportParagraphs = (content: string): LayoutAnalysisDisplayParagraph[] =>
+  getLayoutAnalysisParagraphs(content).map((paragraph) => {
+    const match = paragraph.match(LAYOUT_ANALYSIS_LABEL_PATTERN)
+    if (!match) {
+      return { body: paragraph }
+    }
+
+    return {
+      label: match[1],
+      body: paragraph.replace(LAYOUT_ANALYSIS_LABEL_PATTERN, '').trim(),
+    }
+  })
+
+const shouldRenderLayoutAnalysisReport = (message: Message, section: ExplanationSection): boolean => {
+  const details = getMessageDetails(message)
+  return isLayoutAnalysisDetails(details) && section.title === '分析报告'
+}
+
+const getLayoutAnalysisSummary = (message: Message): string => {
+  const paragraphs = getLayoutAnalysisReportParagraphs(message.content)
+  const summary = paragraphs[0]?.body || message.content
+  return truncateText(summary.replace(/\s+/g, ' '), 90)
+}
+
 const buildExpandedWhy = (message: Message): string => {
   const explanation = normalizeDecisionExplanation(message.explanation?.explanation)
   return explanation || buildDecisionShortExplanation(message) || message.content
@@ -1767,6 +1824,11 @@ const getPrimarySummary = (message: Message): string => {
     return ''
   }
 
+  const details = getMessageDetails(message)
+  if (isLayoutAnalysisDetails(details)) {
+    return getLayoutAnalysisSummary(message)
+  }
+
   const content = message.content.trim()
   if (!content) return '已更新'
 
@@ -1796,6 +1858,16 @@ const getVisibleFacts = (message: Message): string[] => {
       typeof details.matchedColumnLabel === 'string' ? `列 ${details.matchedColumnLabel}` : '',
       typeof details.matchedSheetName === 'string' ? `表 ${details.matchedSheetName}` : '',
       typeof details.slotCount === 'number' ? `时段 ${details.slotCount}` : '',
+    ].filter(Boolean)
+
+    return facts.slice(0, 2)
+  }
+
+  if (isLayoutAnalysisDetails(details)) {
+    const facts = [
+      typeof details.alignedSlotCount === 'number' && typeof details.slotCount === 'number' ? `命中 ${details.alignedSlotCount}/${details.slotCount}` : '',
+      typeof details.mismatchSlotCount === 'number' && details.mismatchSlotCount > 0 ? `偏差 ${details.mismatchSlotCount}` : '',
+      formatValidationSummaryText(details.validationSummary),
     ].filter(Boolean)
 
     return facts.slice(0, 2)
@@ -1930,6 +2002,13 @@ const getExpandedSections = (message: Message): ExplanationSection[] => {
     }
 
     return sections
+  }
+
+  if (isLayoutAnalysisDetails(details)) {
+    return [{
+      title: '分析报告',
+      body: message.content.trim() || buildExpandedWhy(message),
+    }]
   }
 
   const sections: ExplanationSection[] = []
@@ -3436,6 +3515,10 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.explanation-section.is-layout-analysis-report {
+  display: block;
+}
+
 .explanation-title {
   flex: 0 0 auto;
   min-width: 28px;
@@ -3451,6 +3534,35 @@ onBeforeUnmount(() => {
   font-size: 13px;
   line-height: 1.7;
   color: #334155;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.analysis-report-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  white-space: normal;
+  width: 100%;
+}
+
+.analysis-report-paragraph {
+  line-height: 1.82;
+}
+
+.analysis-report-label {
+  display: inline;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.analysis-report-label.is-risk {
+  color: #b45309;
+}
+
+.analysis-report-body {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .explanation-section.is-secondary .explanation-content {

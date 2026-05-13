@@ -22,6 +22,7 @@ import { getLayoutDraftCompiler } from '@/services/layoutDraftCompiler'
 import { getLayoutDraftValidator } from '@/services/layoutDraftValidator'
 import { getLayoutDraftFeasibilityService } from '@/services/layoutDraftFeasibilityService'
 import { getLayoutIntentRecognizer, type LayoutIntentRecognition } from '@/services/layoutIntentRecognizer'
+import { getLayoutAnalysisService } from '@/services/layoutAnalysisService'
 import { getOrchestrationDemoLayout } from '@/mock/orchestrationMock'
 import {
   buildPendingAtomicContextFromClarification,
@@ -32,6 +33,7 @@ import {
   type RuntimeAtomicAction,
   type RuntimeAtomicMissingField,
   type RuntimePendingAtomicContext,
+  type RuntimeAtomicSlotBag,
 } from './pendingAtomicContext'
 import {
   getPendingAtomicContextService,
@@ -46,7 +48,7 @@ export interface RuntimePendingCommand { command: OrchestrationCommand; summary:
 export interface RuntimePendingTargetSelection { action: 'delete' | 'move' | 'replace'; summary: string; reasoning: string; targetTime: string; programName?: string; candidates: RuntimeScheduleItem[]; selectedItemId: string | null; moveConfig?: { direction: 'forward' | 'backward'; offsetSeconds: number }; replaceProgramName?: string; resolutionDetails?: RuntimeDetailMap }
 export interface RuntimeInsertRecommendationCandidate { candidateId: string; programName: string; programCode: string; duration: number; programType: string; score: number; confidence: number; reasonTags: string[] }
 export interface RuntimePendingInsertRecommendation { action: 'insert'; summary: string; reasoning: string; originalUserInput: string; collectedUserInput: string; targetTime: string; rawProgramText?: string; semanticLabel?: string; programTypeHint?: string; recommendedCandidates: RuntimeInsertRecommendationCandidate[]; selectedCandidateId: string | null }
-export interface RuntimePendingAtomicClarification { action: RuntimeAtomicAction | null; summary: string; reasoning: string; originalUserInput: string; collectedUserInput: string; targetTimeHint?: string; programNameHint?: string; missingFields: string[]; followUpQuestion: string }
+export interface RuntimePendingAtomicClarification { action: RuntimeAtomicAction | null; summary: string; reasoning: string; originalUserInput: string; collectedUserInput: string; targetTimeHint?: string; programNameHint?: string; slots?: Partial<RuntimeAtomicSlotBag>; missingFields: string[]; followUpQuestion: string }
 export interface RuntimeExecutionPlan { command: OrchestrationCommand; successMessage?: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap }
 export interface RuntimeExecutedResult { success: boolean; command: OrchestrationCommand; message: string; error?: string; summary: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; data?: unknown; affectedTimeRanges?: { start: string; end: string }[]; validationReport?: ValidationReport; validationSummary?: RuntimeDetailMap }
 export interface RuntimeSubmitInput { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[]; currentLayoutDraft?: LayoutDraft | null; currentLayoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'> | null; pendingTargetSelection?: RuntimePendingTargetSelection | null; pendingInsertRecommendation?: RuntimePendingInsertRecommendation | null; pendingAtomicClarification?: RuntimePendingAtomicClarification | null; pendingAtomicContext?: RuntimePendingAtomicContext | null; history?: string[] }
@@ -103,6 +105,7 @@ export class DemoRuntimeFacade {
   private readonly layoutDraftCompiler = getLayoutDraftCompiler()
   private readonly layoutDraftValidator = getLayoutDraftValidator()
   private readonly layoutDraftFeasibilityService = getLayoutDraftFeasibilityService()
+  private readonly layoutAnalysisService = getLayoutAnalysisService(this.llmClient)
 
   async submitInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision> {
     let effectiveInput = input
@@ -132,6 +135,9 @@ export class DemoRuntimeFacade {
     }
     if (this.isConfidentLayoutIntent(layoutRecognition)) {
       const classification = this.convertLayoutIntentToClassification(layoutRecognition, effectiveInput.userInput)
+      if (classification.mode === 'layout_analysis') {
+        return await this.buildLayoutAnalysisDecision(classification, effectiveInput)
+      }
       return classification.mode === 'layout_commit'
         ? this.commitLayoutDraft(effectiveInput, classification)
         : this.prepareLayoutDraft(effectiveInput, classification, this.resolvePreferredOrchestrationMode(effectiveInput))
@@ -148,6 +154,7 @@ export class DemoRuntimeFacade {
     }
     if (classification.mode === 'validate_only') return this.buildValidationDecision(classification, effectiveInput)
     if (classification.mode === 'repair_only') return this.buildRepairAnalysisDecision(classification, effectiveInput)
+    if (classification.mode === 'layout_analysis') return await this.buildLayoutAnalysisDecision(classification, effectiveInput)
     if (classification.mode === 'layout_prepare' || classification.mode === 'layout_refine' || classification.mode === 'layout_commit') {
       return classification.mode === 'layout_commit'
         ? this.commitLayoutDraft(effectiveInput, classification)
@@ -258,6 +265,15 @@ export class DemoRuntimeFacade {
     if (!targetTimeRange) return false
     if (!currentDraft) return true
     return targetTimeRange.start !== currentDraft.coverage.start || targetTimeRange.end !== currentDraft.coverage.end
+  }
+  private shouldPreferReferenceLayout(classification: TaskClassification, ignoreExistingLayout: boolean): boolean {
+    if (ignoreExistingLayout) return false
+    const suggested = classification.suggestedParams ?? {}
+    if (suggested.segments?.length || suggested.semanticLabel || suggested.programTypeHint) return false
+    const targetTimeRange = suggested.targetTimeRange
+    if (!targetTimeRange) return true
+    return targetTimeRange.start === DEFAULT_BROADCAST_WINDOW.start
+      && targetTimeRange.end === DEFAULT_BROADCAST_WINDOW.end
   }
   private normalizeStructuredSegments(segments?: LayoutIntentSegment[]): LayoutIntentSegment[] | undefined { return segments?.filter((segment) => Boolean(segment.start && segment.end)) }
   private resolvePreferredOrchestrationMode(input: RuntimeSubmitInput): Extract<TaskMode, 'full_generate' | 'partial_generate'> {
@@ -414,6 +430,7 @@ export class DemoRuntimeFacade {
       collectedUserInput: pending.collectedUserInput,
       targetTimeHint: pending.slots.targetTimeHint,
       programNameHint: pending.slots.programName ?? pending.slots.rawProgramText,
+      slots: pending.slots,
       missingFields,
       followUpQuestion: pending.followUpQuestion,
     }
@@ -748,27 +765,46 @@ export class DemoRuntimeFacade {
   }
 
   private async tryHandleAtomicInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision | null> {
+    if (input.currentLayoutDraft && this.shouldRouteToLayoutDraftRefine(input.userInput)) return null
     if (!this.shouldAttemptAtomicInstruction(input.userInput)) return null
     const context = buildDialogueContext({ scheduleState: input.scheduleState, userInput: input.userInput, currentSchedule: input.currentSchedule })
     const recognizedIntent = await this.intentRecognizer.recognize(context)
-    if (!['insert', 'move', 'delete', 'replace'].includes(recognizedIntent.type)) return null
-    const result = await this.buildMicroEditCommand(input, recognizedIntent.reasoning, recognizedIntent)
+    const recognizedAction = this.asRuntimeAtomicAction(recognizedIntent.type)
+    const detectedAction = this.detectAtomicAction(input.userInput.replace(/\s+/g, ''))
+    const fallbackIntent = detectedAction
+      ? {
+          type: detectedAction,
+          confidence: 0.55,
+          reasoning: recognizedIntent.reasoning || `fallback:${detectedAction}`,
+        } satisfies MicroEditIntent
+      : null
+    const intent = recognizedAction ? recognizedIntent : fallbackIntent
+    if (!intent || !this.asRuntimeAtomicAction(intent.type)) return null
+
+    const result = await this.buildMicroEditCommand(input, intent.reasoning, intent)
     return this.buildMicroEditDecisionWithContinuationFallback(
       input,
       result,
-      recognizedIntent.reasoning,
-      this.asRuntimeAtomicAction(recognizedIntent.type),
+      intent.reasoning,
+      this.asRuntimeAtomicAction(intent.type),
     )
   }
 
   private shouldAttemptAtomicInstruction(userInput: string): boolean {
     const normalized = userInput.replace(/\s+/g, '')
-    if (!/(插入|插个|插一|添加节目|安排节目|删除|删掉|移除|移动|后移|前移|顺延|延后|提前|换成|替换成|替换为|改成|改为)/.test(normalized)) return false
+    if (!/(插入|插个|插一|添加节目|安排节目|来个|来一条|来一档|放个|上个|删除|删掉|移除|移动|后移|前移|顺延|延后|提前|替换|换成|替换成|替换为|改成|改为)/.test(normalized)) return false
     const hasExactTime = /(\d{1,2})(点半|点(\d{1,2})分?|[:：]\d{2})/.test(normalized)
     const hasQuotedTitle = /《[^》]+》/.test(normalized)
     const hasBroadScope = /(全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全部|都|统一|整体)/.test(normalized)
     const hasLayoutCue = /(版面|栏目|剧场|时段)/.test(normalized)
     return !((hasBroadScope || hasLayoutCue) && !hasExactTime && !hasQuotedTitle)
+  }
+
+  private shouldRouteToLayoutDraftRefine(userInput: string): boolean {
+    const normalized = userInput.replace(/\s+/g, '')
+    const hasDraftCue = /(草案|版面草案|当前版面|版面|时段)/.test(normalized)
+    const hasDraftRefineVerb = /(删除|删掉|移除|去掉|替换|换成|替换成|替换为|改成|改为|调整为)/.test(normalized)
+    return hasDraftCue && hasDraftRefineVerb
   }
 
   private shouldBypassPendingAtomicClarification(userInput: string): boolean {
@@ -791,10 +827,24 @@ export class DemoRuntimeFacade {
   private buildPendingAtomicClarification(input: RuntimeSubmitInput, reasoning: string, preferredAction?: RuntimeAtomicAction | null): RuntimePendingAtomicClarification {
     const normalized = input.userInput.replace(/\s+/g, '')
     const action = preferredAction ?? this.detectAtomicAction(normalized)
-    const targetTimeHint = this.extractAtomicTimeHint(input.userInput)
-    const programNameHint = this.extractQuotedProgramName(input.userInput)
-    const missingFields = this.resolveAtomicMissingFields(action, normalized, { targetTimeHint, programNameHint })
-    const followUpQuestion = this.buildAtomicClarificationPrompt(action, { targetTimeHint, programNameHint, missingFields })
+    const slots = mergeRuntimeAtomicSlots(
+      input.pendingAtomicClarification?.slots ?? {},
+      this.extractAtomicSlotHints(input.userInput, action),
+    )
+    const targetTimeHint = slots.targetTimeHint ?? slots.targetTime
+    const programNameHint = slots.programName ?? slots.rawProgramText
+    const runtimeMissingFields = action
+      ? deriveAtomicMissingFieldsFromSlots(action, slots)
+      : ['target_time'] satisfies RuntimeAtomicMissingField[]
+    const missingFields = this.mapAtomicMissingFieldsToLegacy(runtimeMissingFields)
+    const followUpQuestion = this.buildAtomicClarificationPrompt(action, {
+      targetTimeHint,
+      programNameHint,
+      replacementProgramName: slots.replacementProgramName,
+      direction: slots.direction,
+      offsetSeconds: slots.offsetSeconds,
+      missingFields,
+    })
     const summaryTarget = targetTimeHint || programNameHint || '当前目标节目'
     return {
       action,
@@ -804,6 +854,7 @@ export class DemoRuntimeFacade {
       collectedUserInput: input.userInput,
       targetTimeHint,
       programNameHint,
+      slots,
       missingFields,
       followUpQuestion,
     }
@@ -946,6 +997,9 @@ export class DemoRuntimeFacade {
       {
         targetTimeHint,
         programNameHint,
+        replacementProgramName: pendingContext.slots.replacementProgramName,
+        direction: pendingContext.slots.direction,
+        offsetSeconds: pendingContext.slots.offsetSeconds,
         missingFields: this.mapAtomicMissingFieldsToLegacy(missingFields),
       },
     )
@@ -968,14 +1022,14 @@ export class DemoRuntimeFacade {
     const replacementProgramName = pendingContext.slots.replacementProgramName ?? ''
     switch (pendingContext.action) {
       case 'delete':
-        return `删除${targetTimeText}的节目${targetProgram ? `《${targetProgram}》` : ''}`
+        return `删除${targetTimeText}${targetProgram ? `的《${targetProgram}》` : '的节目'}`
       case 'move': {
         const directionText = pendingContext.slots.direction === 'backward' ? '前移' : '后移'
         const offsetText = this.formatAtomicOffset(pendingContext.slots.offsetSeconds)
-        return `把${targetTimeText}的节目${directionText}${offsetText}`
+        return `把${targetTimeText}${targetProgram ? `的《${targetProgram}》` : '的节目'}${directionText}${offsetText}`
       }
       case 'replace':
-        return `把${targetTimeText}的节目替换成《${replacementProgramName}》`
+        return `把${targetTimeText}${targetProgram ? `的《${targetProgram}》` : '的节目'}替换成《${replacementProgramName}》`
       case 'insert': {
         const programText = pendingContext.slots.programName
           ?? pendingContext.slots.rawProgramText
@@ -1028,7 +1082,70 @@ export class DemoRuntimeFacade {
     if (/(后移|前移|移动|顺一下|挪一下|顺延|延后|提前)/.test(normalized)) return 'move'
     if (/(删除|删掉|移除)/.test(normalized)) return 'delete'
     if (/(替换|换成|替换成|替换为|换掉|改掉|改成|改为)/.test(normalized)) return 'replace'
-    if (/(插入|添加节目|添加|安排节目|安排)/.test(normalized)) return 'insert'
+    if (/(插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/.test(normalized)) return 'insert'
+    return null
+  }
+
+  private extractAtomicSlotHints(userInput: string, action: RuntimeAtomicAction | null): Partial<RuntimeAtomicSlotBag> {
+    const slots: Partial<RuntimeAtomicSlotBag> = {}
+    const timeSlot = this.extractAtomicTimeSlot(userInput)
+    if (timeSlot) {
+      slots.targetTime = timeSlot.targetTime
+      slots.targetTimeHint = timeSlot.targetTimeHint
+    }
+
+    const programNameHint = this.extractAtomicProgramHint(userInput, action)
+    if (programNameHint) {
+      slots.programName = programNameHint
+      if (action === 'insert') {
+        slots.rawProgramText = programNameHint
+      }
+    }
+
+    if (action === 'move') {
+      const offsetSlot = this.extractAtomicOffsetSlot(userInput)
+      if (offsetSlot) {
+        slots.direction = offsetSlot.direction
+        slots.offsetSeconds = offsetSlot.offsetSeconds
+      } else {
+        const directionHint = this.extractAtomicDirectionHint(userInput)
+        if (directionHint) {
+          slots.direction = directionHint
+        }
+      }
+    }
+
+    if (action === 'replace') {
+      const replacementProgramName = this.extractAtomicReplacementProgramName(userInput)
+      if (replacementProgramName) {
+        slots.replacementProgramName = replacementProgramName
+      }
+    }
+
+    return slots
+  }
+
+  private extractAtomicTimeSlot(userInput: string): { targetTime: string; targetTimeHint: string } | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const patterns = [
+      /(\d{1,2})[:：](\d{2})/,
+      /(\d{1,2})点半/,
+      /(\d{1,2})点(?:(\d{1,2})分?)?/,
+    ]
+
+    for (const pattern of patterns) {
+      const match = pattern.exec(normalized)
+      if (!match?.[0]) continue
+      const targetTime = pattern.source.includes('点半')
+        ? this.normalizeAtomicTime(`${match[1]}:30`)
+        : this.normalizeAtomicTime(`${match[1]}:${match[2] ?? '00'}`)
+      if (!targetTime) continue
+      return {
+        targetTime,
+        targetTimeHint: match[0],
+      }
+    }
+
     return null
   }
 
@@ -1042,43 +1159,148 @@ export class DemoRuntimeFacade {
     return match?.[1]?.trim()
   }
 
-  private resolveAtomicMissingFields(action: RuntimeAtomicAction | null, normalized: string, hints: { targetTimeHint?: string; programNameHint?: string }): string[] {
-    const hasOffset = /\d+(分钟|小时|分|秒)/.test(normalized)
-    const hasTarget = Boolean(hints.targetTimeHint || hints.programNameHint || /那个|那条|那段|前面|后面|刚才|这个节目|这条节目/.test(normalized))
-    const hasReplacement = /(替换成|替换为|换成|改成|改为).+/.test(normalized)
-    const missing: string[] = []
+  private extractAtomicProgramHint(userInput: string, action: RuntimeAtomicAction | null): string | undefined {
+    const quotedProgramName = this.extractQuotedProgramName(userInput)
+    if (quotedProgramName) return quotedProgramName
 
-    if (action === 'move') {
-      if (!hasTarget) missing.push('target')
-      if (!hasOffset) missing.push('offset')
-      return missing
+    switch (action) {
+      case 'insert':
+        return this.extractAtomicProgramHintFromPatterns(userInput, [
+          /(?:插入节目|插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)(.+)$/u,
+        ])
+      case 'delete':
+        return this.extractAtomicProgramHintFromPatterns(userInput, [
+          /(?:删除|删掉|移除|去掉)(.+)$/u,
+          /把(.+?)(?:删除|删掉|移除|去掉)/u,
+        ])
+      case 'move':
+        return this.extractAtomicProgramHintFromPatterns(userInput, [
+          /把(.+?)(?:后移|前移|移动|顺一下|挪一下|顺延|延后|提前)/u,
+        ])
+      case 'replace':
+        return this.extractAtomicProgramHintFromPatterns(userInput, [
+          /把(.+?)(?:替换成|替换为|换成|换掉|改掉|改成|改为)/u,
+        ])
+      default:
+        return undefined
     }
-    if (action === 'delete') {
-      if (!hasTarget) missing.push('target')
-      return missing
-    }
-    if (action === 'replace') {
-      if (!hasTarget) missing.push('target')
-      if (!hasReplacement) missing.push('replacement')
-      return missing
-    }
-    if (action === 'insert') {
-      if (!hints.targetTimeHint) missing.push('target')
-      if (!hints.programNameHint) missing.push('program')
-      return missing
-    }
-    return ['target']
   }
 
-  private buildAtomicClarificationPrompt(action: RuntimeAtomicAction | null, input: { targetTimeHint?: string; programNameHint?: string; missingFields: string[] }): string {
+  private extractAtomicProgramHintFromPatterns(userInput: string, patterns: RegExp[]): string | undefined {
+    for (const pattern of patterns) {
+      const matched = pattern.exec(userInput)?.[1]?.trim()
+      const normalized = this.normalizeAtomicProgramHint(matched)
+      if (normalized) {
+        return normalized
+      }
+    }
+    return undefined
+  }
+
+  private extractAtomicReplacementProgramName(userInput: string): string | undefined {
+    const explicitProgramName = userInput.match(
+      /(?:替换成|替换为|换成|改成|改为)(.+)$/u,
+    )?.[1]?.trim()
+    return this.normalizeAtomicProgramHint(explicitProgramName)
+  }
+
+  private extractAtomicOffsetSlot(userInput: string): { direction: 'forward' | 'backward'; offsetSeconds: number } | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const hourOffsetMatch =
+      normalized.match(/([前后])移(\d{1,2})小时/) ||
+      normalized.match(/(提前|延后|顺延)(\d{1,2})小时/)
+    if (hourOffsetMatch) {
+      const directionToken = hourOffsetMatch[1] ?? ''
+      return {
+        direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
+        offsetSeconds: Number(hourOffsetMatch[2] ?? '1') * 3600,
+      }
+    }
+
+    const minuteOffsetMatch =
+      normalized.match(/([前后])移(\d{1,2})分钟/) ||
+      normalized.match(/(提前|延后|顺延)(\d{1,2})分钟/)
+    if (minuteOffsetMatch) {
+      const directionToken = minuteOffsetMatch[1] ?? ''
+      return {
+        direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
+        offsetSeconds: Number(minuteOffsetMatch[2] ?? '1') * 60,
+      }
+    }
+
+    return null
+  }
+
+  private extractAtomicDirectionHint(userInput: string): 'forward' | 'backward' | undefined {
+    const normalized = userInput.replace(/\s+/g, '')
+    if (/(前移|提前)/.test(normalized)) return 'backward'
+    if (/(后移|延后|顺延)/.test(normalized)) return 'forward'
+    return undefined
+  }
+
+  private normalizeAtomicTime(timeText: string): string | null {
+    const match = timeText.match(/(\d{1,2})[:：]?(\d{2})?(?:[:：]?(\d{2}))?/)
+    if (!match) return null
+
+    const hours = (match[1] ?? '00').padStart(2, '0')
+    const minutes = (match[2] ?? '00').padStart(2, '0')
+    const seconds = (match[3] ?? '00').padStart(2, '0')
+    return `${hours}:${minutes}:${seconds}`
+  }
+
+  private normalizeAtomicProgramHint(value?: string): string | undefined {
+    if (!value) return undefined
+    const normalized = value
+      .replace(/^[，,：:\s]+/, '')
+      .replace(/^(?:把|将|在|于)\s*/u, '')
+      .replace(/^(?:\d{1,2}(?:[:：]\d{2})?|\d{1,2}点(?:半|\d{1,2}分?)?)(?:的)?/u, '')
+      .replace(/[，。！？!?]/g, '')
+      .replace(/^(?:的|节目名|节目|栏目|我要|我想要|想要|我想看|想看|要看|来个|来一条|来一档|放个|上个|这条|那条|这个|那个)+/, '')
+      .replace(/(?:吧|呀|啊|呢)$/u, '')
+      .trim()
+
+    if (!normalized) return undefined
+    if (/^\d{1,2}(?:[:：]\d{2})?$/.test(normalized)) return undefined
+    if (/^\d{1,2}点(?:半|\d{1,2}分?)?$/.test(normalized)) return undefined
+    if (/^(节目|栏目|这条|那条|这个节目|那个节目)$/.test(normalized)) return undefined
+    return normalized
+  }
+
+  private buildAtomicClarificationPrompt(action: RuntimeAtomicAction | null, input: { targetTimeHint?: string; programNameHint?: string; replacementProgramName?: string; direction?: 'forward' | 'backward'; offsetSeconds?: number; missingFields: string[] }): string {
     if (action === 'move') {
       if (input.missingFields.includes('target') && input.missingFields.includes('offset')) return '这句话更像是在调整具体节目，但现在还缺少目标节目和移动幅度。请补充准确时间点或节目名称，以及前移/后移多久，例如“把 09:00 的《看东方》后移 30 分钟”。'
-      if (input.missingFields.includes('target')) return '已经识别到你是在移动节目，但还缺少明确目标。请补充准确时间点或节目名称，例如“把 09:00 的《看东方》后移 30 分钟”。'
+      if (input.missingFields.includes('target')) {
+        const moveText = input.direction ? `${input.direction === 'backward' ? '前移' : '后移'}${this.formatAtomicOffset(input.offsetSeconds)}` : '移动'
+        if (input.programNameHint) {
+          return `已经识别到你想把《${input.programNameHint}》${moveText}，还缺少准确时间点，例如“把 09:00 的《${input.programNameHint}》${moveText}”。`
+        }
+        return '已经识别到你是在移动节目，但还缺少明确目标。请补充准确时间点或节目名称，例如“把 09:00 的《看东方》后移 30 分钟”。'
+      }
       return `已经定位到 ${input.targetTimeHint || input.programNameHint || '目标节目'}，还需要你补充移动幅度，例如“后移 30 分钟”。`
     }
-    if (action === 'delete') return '这句话更像是在删除某条已排节目。请补充准确时间点或节目名称，例如“删除 09:30 的《午间30分》”。'
-    if (action === 'replace') return '这句话更像是在替换某条已排节目。请补充准确时间点或节目名称，以及要换成的新节目，例如“把 10:00 的《看东方》替换成《东方新闻》”。'
-    if (action === 'insert') return '这句话更像是在插入节目。请补充目标时间点和节目名称，例如“在 09:00 插入《看东方》”。'
+    if (action === 'delete') {
+      if (input.programNameHint && input.missingFields.includes('target')) {
+        return `已经识别到你想删除《${input.programNameHint}》，还缺少准确时间点，例如“删除 09:30 的《${input.programNameHint}》”。`
+      }
+      return '这句话更像是在删除某条已排节目。请补充准确时间点或节目名称，例如“删除 09:30 的《午间30分》”。'
+    }
+    if (action === 'replace') {
+      if (input.missingFields.includes('target') && input.missingFields.includes('replacement')) return '这句话更像是在替换某条已排节目。请补充准确时间点或节目名称，以及要换成的新节目，例如“把 10:00 的《看东方》替换成《东方新闻》”。'
+      if (input.missingFields.includes('target')) {
+        if (input.programNameHint || input.replacementProgramName) {
+          return `已经识别到你要把${input.programNameHint ? `《${input.programNameHint}》` : '当前节目'}替换成《${input.replacementProgramName ?? '新节目'}》，还缺少目标时间点，例如“把 10:00 的${input.programNameHint ? `《${input.programNameHint}》` : '节目'}替换成《${input.replacementProgramName ?? '新节目'}》”。`
+        }
+        return '已经识别到你是在替换节目，但还缺少准确的目标时间点或节目名称。'
+      }
+      return `已经定位到 ${input.targetTimeHint || input.programNameHint || '目标节目'}，还需要你补充替换后的新节目名称，例如“替换成《东方新闻》”。`
+    }
+    if (action === 'insert') {
+      if (input.missingFields.includes('target') && input.missingFields.includes('program')) return '这句话更像是在插入节目。请补充目标时间点和节目名称，例如“在 09:00 插入《看东方》”。'
+      if (input.missingFields.includes('target')) {
+        return `已经识别到你想插入《${input.programNameHint || '节目'}》，还缺少目标时间点，例如“在 09:00 插入《${input.programNameHint || '看东方'}》”。`
+      }
+      return `已经定位到 ${input.targetTimeHint || '目标时间'}，还需要你补充节目名称，例如“在 ${input.targetTimeHint || '09:00'} 插入《看东方》”。`
+    }
     return '这句话更像是在调整具体节目，但现在还不够形成可执行命令。请补充明确的时间点、节目名称或动作，例如“把 09:00 的《看东方》后移 30 分钟”。'
   }
 
@@ -1171,7 +1393,11 @@ export class DemoRuntimeFacade {
       draft.warnings = warnings
       sourceLabel = '已按你的要求更新当前版面草案。'
     } else {
-      const existing = this.resolveExistingLayoutDraft(input, userIntent, ignoreExistingLayout)
+      const existing = !ignoreExistingLayout && input.currentLayoutDraft
+        ? { draft: input.currentLayoutDraft, label: '已基于当前版面草案按你的要求生成调整后的版面草案。' }
+        : this.shouldPreferReferenceLayout(classification, ignoreExistingLayout)
+          ? this.resolveExistingLayoutDraft(input, userIntent, false)
+          : null
       if (existing && this.shouldApplyIntentOnExistingDraft(classification, existing.draft)) {
         const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, currentDraft: existing.draft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
         const specValidation = this.layoutDraftValidator.validateSpec(spec)
@@ -1459,7 +1685,7 @@ export class DemoRuntimeFacade {
         channelName: input.scheduleState.channelName,
         date: input.scheduleState.date,
         targetTime,
-        programName: deleteParams?.programName ?? replaceParams?.programName,
+        programName: deleteParams?.programName,
         items: input.currentSchedule.map(asRuntimeItem),
       })
       if (resolution.status === 'none') return { command: null, message: `没有找到 ${targetTime} 对应的节目，请确认时间或节目名称。`, explanation: resolution.reasoning || reasoning, details: { targetTime, targetResolution: { matchedBy: resolution.matchedBy } } }
@@ -1473,7 +1699,7 @@ export class DemoRuntimeFacade {
             summary: `请选择 ${targetTime} 要${intent.type === 'delete' ? '删除' : intent.type === 'move' ? '移动' : '替换'}的节目`,
             reasoning: resolution.reasoning || reasoning,
             targetTime,
-            programName: deleteParams?.programName ?? replaceParams?.programName,
+            programName: deleteParams?.programName,
             candidates: resolution.candidates.map(asRuntimeItem),
             selectedItemId: null,
             moveConfig: moveParams
@@ -1544,6 +1770,38 @@ export class DemoRuntimeFacade {
       ? '当前节目单暂未发现明显问题，暂时没有可执行的自动修复项。'
       : `已先完成问题分析，发现 ${report.summary.totalIssues} 个问题。当前自动修复仍需按问题清单逐步处理，建议先确认修复范围。`
     return { kind: 'message', feedback: createFeedback(content, 'validation', '问题分析', { explanation: classification.reasoning, details: { summary: report.summary, issues: report.issues.slice(0, 5), nextStep: '如需继续处理，请明确要修复的时段、问题类型，或先调整版面草案。' } }) }
+  }
+
+  private async buildLayoutAnalysisDecision(classification: TaskClassification, input: RuntimeSubmitInput): Promise<RuntimeDecision> {
+    const report = this.scheduleCommandBus.validate({
+      scheduleDate: input.scheduleState.date,
+      channelId: input.scheduleState.channelId,
+    })
+    const layoutReference = getEffectiveLayoutReference(input.scheduleState.channelId, input.scheduleState.date)
+    const runtimeLayoutEntry = getRuntimeLayoutEntry(input.scheduleState.channelId, input.scheduleState.date)
+    const analysis = await this.layoutAnalysisService.analyze({
+      channelId: input.scheduleState.channelId,
+      channelName: input.scheduleState.channelName,
+      date: input.scheduleState.date,
+      userInput: input.userInput,
+      currentSchedule: input.currentSchedule,
+      validationReport: report,
+      layoutReference,
+      runtimeLayoutEntry,
+    })
+
+    return {
+      kind: 'message',
+      feedback: createFeedback(
+        analysis.content,
+        'planning',
+        '版面分析',
+        {
+          explanation: classification.reasoning,
+          details: analysis.details,
+        },
+      ),
+    }
   }
 
   private buildAtomicFallbackFeedback(pending: RuntimePendingAtomicClarification, contentOverride?: string, explanation?: string): RuntimeFeedback {

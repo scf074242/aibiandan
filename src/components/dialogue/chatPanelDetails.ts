@@ -33,6 +33,16 @@ export const isOrchestrationOverviewDetails = (details?: DetailMap): boolean =>
 export const isLayoutImportDetails = (details?: DetailMap): boolean =>
   details?.summaryKind === 'layout_import'
 
+export const isLayoutAnalysisDetails = (details?: DetailMap): boolean =>
+  details?.summaryKind === 'layout_analysis'
+
+const formatLayoutAnalysisMode = (details?: DetailMap): string => {
+  if (!details) return ''
+  if (details.webResearchStatus === 'unavailable') return '用户要求联网，但当前仅按本地数据分析'
+  if (details.webResearchStatus === 'provided') return '已结合外部补充材料分析'
+  return ''
+}
+
 const isNoCandidateCase = (details: DetailMap) => details.error === 'No candidates found'
 
 export const extractWarnings = (details?: DetailMap): string[] => {
@@ -162,6 +172,29 @@ export const buildDetailsSummary = (
       '导入提醒',
       Array.isArray(details.warnings)
         ? details.warnings.filter((item: unknown): item is string => typeof item === 'string').join('；')
+        : '',
+    )
+    return items.slice(0, 6)
+  }
+
+  if (isLayoutAnalysisDetails(details)) {
+    const items: DetailSummaryItem[] = []
+    const pushItem = (label: string, value?: string) => {
+      const normalized = value?.trim()
+      if (!normalized) return
+      items.push({ label, value: normalized })
+    }
+
+    pushItem('编排条目', typeof details.itemCount === 'number' ? `${details.itemCount} 条` : '')
+    pushItem('版面命中', typeof details.alignedSlotCount === 'number' && typeof details.slotCount === 'number' ? `${details.alignedSlotCount}/${details.slotCount}` : '')
+    pushItem('结构偏差', typeof details.mismatchSlotCount === 'number' ? `${details.mismatchSlotCount} 个时段` : '')
+    pushItem('空缺时段', typeof details.emptySlotCount === 'number' && details.emptySlotCount > 0 ? `${details.emptySlotCount} 个` : '')
+    pushItem('校验结果', formatValidationSummaryText(details.validationSummary))
+    pushItem('分析方式', formatLayoutAnalysisMode(details))
+    pushItem(
+      '优化建议',
+      Array.isArray(details.suggestions)
+        ? details.suggestions.filter((item: unknown): item is string => typeof item === 'string').slice(0, 2).join('；')
         : '',
     )
     return items.slice(0, 6)

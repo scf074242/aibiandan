@@ -127,6 +127,81 @@ describe('LayoutIntentRecognizer', () => {
     expect(result.confidence).toBeGreaterThan(0.8)
   })
 
+  it('会把当前版面编排分析诉求识别为 layout_analysis', async () => {
+    const recognizer = new LayoutIntentRecognizer({
+      chat: vi.fn(async () => {
+        throw new Error('skip llm')
+      }),
+    } as never)
+
+    const result = await recognizer.recognize({
+      scheduleState: createScheduleState(),
+      userInput: '请分析当前版面编排，给我一份业务分析报告',
+    })
+
+    expect(result.mode).toBe('layout_analysis')
+    expect(result.confidence).toBeGreaterThan(0.9)
+  })
+
+  it('已有版面草案时也不会把明确的分析诉求改写成版面草案', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        mode: 'layout_prepare',
+        confidence: 0.99,
+        reasoning: '误判成重新生成版面草案',
+        ignoreExistingLayout: true,
+      }),
+    }))
+    const recognizer = new LayoutIntentRecognizer({
+      chat,
+    } as never)
+
+    const result = await recognizer.recognize({
+      scheduleState: createScheduleState(),
+      userInput: '请分析当前版面编排，从节目编辑视角给我一份报告',
+      currentLayoutDraft: createDraft(),
+    })
+
+    expect(chat).not.toHaveBeenCalled()
+    expect(result.mode).toBe('layout_analysis')
+    expect(result.reasoning).toContain('分析当前实际编排效果')
+  })
+
+  it('当前已有草案时会把删除草案时段识别为版面微调', async () => {
+    const chat = vi.fn(async () => {
+      throw new Error('skip llm')
+    })
+    const recognizer = new LayoutIntentRecognizer({
+      chat,
+    } as never)
+
+    const result = await recognizer.recognize({
+      scheduleState: createScheduleState(),
+      userInput: '删除6点的草案',
+      currentLayoutDraft: createDraft(),
+    })
+
+    expect(chat).not.toHaveBeenCalled()
+    expect(result.mode).toBe('layout_refine')
+    expect(result.reasoning).toContain('草案')
+  })
+
+  it('会把优化当前版面的表达识别为新的草案生成', async () => {
+    const recognizer = new LayoutIntentRecognizer({
+      chat: vi.fn(async () => {
+        throw new Error('skip llm')
+      }),
+    } as never)
+
+    const result = await recognizer.recognize({
+      scheduleState: createScheduleState(),
+      userInput: '请优化当前版面编排',
+    })
+
+    expect(result.mode).toBe('layout_prepare')
+    expect(result.ignoreExistingLayout).toBe(true)
+  })
+
   it('会把更像原子调整但信息不完整的表达识别为 atomic_fallback', async () => {
     const recognizer = new LayoutIntentRecognizer({
       chat: vi.fn(async () => {

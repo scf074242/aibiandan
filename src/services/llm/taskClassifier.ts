@@ -122,6 +122,27 @@ export class TaskClassifier {
       }
     }
 
+    if (this.hasLayoutAnalysisIntent(normalized)) {
+      return {
+        mode: 'layout_analysis',
+        confidence: 0.94,
+        reasoning: '用户明确希望从业务视角分析当前版面编排，应先输出分析报告，再决定是否进入优化草案流程。',
+      }
+    }
+
+    if (this.hasLayoutOptimizationIntent(normalized)) {
+      return {
+        mode: 'layout_prepare',
+        confidence: 0.9,
+        reasoning: '用户明确提出优化当前版面编排，按产品流程应先生成一份新的待确认版面草案。',
+        suggestedParams: {
+          userIntent: userInput.trim() || '优化当前版面编排',
+          ignoreExistingLayout: true,
+          targetTimeRange,
+        },
+      }
+    }
+
     if (this.isVagueLayoutRequest(normalized)) {
       return {
         mode: 'clarify',
@@ -292,13 +313,16 @@ export class TaskClassifier {
 1. layout_prepare：先准备版面草案，再让用户确认
 2. layout_refine：微调当前版面草案
 3. layout_commit：用户确认当前版面草案，可以开始编排
-4. validate_only：仅做校验或问题分析
-5. clarify：信息不足，需要追问
+4. layout_analysis：分析当前实际编排并输出业务报告
+5. validate_only：仅做校验或问题分析
+6. clarify：信息不足，需要追问
 
 识别原则：
 - 原子节目单命令（插入、删除、移动、替换）已经在上游处理，这里不要再返回 micro_edit。
 - 用户提到“全天编排”“补齐空窗”“填充节目单”这类启动编排的话术时，也要先返回 layout_prepare，而不是直接执行编排。
 - 如果用户在描述“某个时段按某类内容铺排版面”，优先判断为 layout_prepare 或 layout_refine。
+- 如果用户要求“分析当前版面编排/当前节目单结构/从编辑视角出报告”，返回 layout_analysis。
+- 如果用户要求“优化当前版面/优化当前编排”，优先返回 layout_prepare，让系统先生成新的版面草案。
 - 如果用户像是在调整具体节目条目，但缺少足够的时间点、节目名或动作参数，返回 clarify。
 - 如果用户表达过于模糊，例如既没有范围也没有内容偏好，返回 clarify。
 
@@ -341,7 +365,7 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
       }
 
       const result = JSON.parse(jsonMatch[0])
-      const validModes: TaskMode[] = ['validate_only', 'repair_only', 'clarify', 'layout_prepare', 'layout_refine', 'layout_commit', 'full_generate', 'partial_generate', 'micro_edit']
+      const validModes: TaskMode[] = ['validate_only', 'repair_only', 'layout_analysis', 'clarify', 'layout_prepare', 'layout_refine', 'layout_commit', 'full_generate', 'partial_generate', 'micro_edit']
 
       if (!validModes.includes(result.mode)) {
         throw new Error(`Invalid mode: ${result.mode}`)
@@ -408,6 +432,19 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
 
   private hasValidateIntent(input: string): boolean {
     return this.hasAny(input, ['校验', '检查', '验证', '核对', '审查', '查看问题'])
+  }
+
+  private hasLayoutAnalysisIntent(input: string): boolean {
+    const hasAnalysisVerb = this.hasAny(input, ['分析', '评估', '研判', '诊断', '梳理'])
+    const hasLayoutTarget = this.hasAny(input, ['当前版面', '版面编排', '当前编排', '当前节目单', '节目单编排', '节目编排', '编排情况'])
+    const hasEditorialCue = /编辑视角|业务分析|文字版报告|分析报告/.test(input)
+    return (hasAnalysisVerb && hasLayoutTarget) || (hasLayoutTarget && hasEditorialCue) || (hasAnalysisVerb && hasEditorialCue)
+  }
+
+  private hasLayoutOptimizationIntent(input: string): boolean {
+    const hasOptimizeVerb = this.hasAny(input, ['优化', '调优', '重构', '重新梳理', '重做'])
+    const hasTarget = this.hasAny(input, ['当前版面', '版面', '当前编排', '编排', '节目单'])
+    return hasOptimizeVerb && hasTarget
   }
 
   private hasRepairIntent(input: string): boolean {

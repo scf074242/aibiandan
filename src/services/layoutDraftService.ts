@@ -379,6 +379,20 @@ const extractTimeRange = (input: string): { start: string; end: string } | undef
 
 const isRemoveInstruction = (input: string): boolean => ['删除', '删掉', '移除', '去掉'].some((keyword) => input.includes(keyword))
 
+const isDeterministicRemoveRefine = (
+  input: LayoutDraftRefineInput,
+): boolean => {
+  const normalized = normalizeInput(input.userInput)
+  if (!isRemoveInstruction(normalized)) {
+    return false
+  }
+  return Boolean(
+    extractTimeRange(normalized)
+    || extractSingleTimePoint(normalized)
+    || extractRefineSemanticLabel(input.userInput, input.semanticLabel),
+  )
+}
+
 const extractSingleTimePoint = (input: string): string | undefined => {
   if (input.includes('到') || input.includes('至') || input.includes('-')) {
     return undefined
@@ -419,7 +433,7 @@ const extractRefineSemanticLabel = (input: string, semanticLabel?: string): stri
   const matched = normalized.match(/(?:删除|删掉|移除|去掉)(.+)$/u)
   const cleaned = matched?.[1]
     ?.replace(/^(\d{1,2}(?::\d{1,2})?点半?|\d{1,2}:\d{2})的?/u, '')
-    ?.replace(/(?:节目|栏目|时段)+$/u, '')
+    ?.replace(/(?:节目|栏目|时段|草案|版面草案|版面)+$/u, '')
     ?.trim()
   return cleaned || undefined
 }
@@ -522,6 +536,21 @@ const replaceRange = (
   return nextSegments.sort((left, right) => left.startTime.localeCompare(right.startTime))
 }
 
+const expandCoverageToSegments = (
+  coverage: { start: string; end: string },
+  segments: LayoutDraftSpecSegment[],
+): { start: string; end: string } => {
+  if (segments.length === 0) {
+    return coverage
+  }
+  const starts = segments.map((segment) => segment.startTime)
+  const ends = segments.map((segment) => segment.endTime)
+  return {
+    start: [coverage.start, ...starts].sort()[0]!,
+    end: [coverage.end, ...ends].sort().at(-1)!,
+  }
+}
+
 export class LayoutDraftService {
   constructor(private llmClient: LLMClient) {}
 
@@ -542,6 +571,9 @@ export class LayoutDraftService {
 
   async refineSpec(input: LayoutDraftRefineInput): Promise<LayoutDraftSpec> {
     const fallback = this.buildRefinedFallbackSpec(input)
+    if (isDeterministicRemoveRefine(input)) {
+      return fallback
+    }
 
     try {
       const response = await this.llmClient.chat(this.buildRefinePrompt(input), {
@@ -643,7 +675,7 @@ export class LayoutDraftService {
         }, replacement)
       })
       return {
-        coverage: input.currentDraft.coverage,
+        coverage: expandCoverageToSegments(input.currentDraft.coverage, nextSegments),
         segments: nextSegments,
       }
     }
@@ -661,9 +693,10 @@ export class LayoutDraftService {
 
     if (isRemoveInstruction(normalized) && matchedSegments.length > 0) {
       const matchedIds = new Set(matchedSegments.map((segment) => segment.id ?? `${segment.startTime}-${segment.endTime}-${segment.label}`))
+      const nextSegments = existingSegments.filter((segment) => !matchedIds.has(segment.id ?? `${segment.startTime}-${segment.endTime}-${segment.label}`))
       return {
-        coverage: input.currentDraft.coverage,
-        segments: existingSegments.filter((segment) => !matchedIds.has(segment.id ?? `${segment.startTime}-${segment.endTime}-${segment.label}`)),
+        coverage: expandCoverageToSegments(input.currentDraft.coverage, nextSegments),
+        segments: nextSegments,
       }
     }
 
@@ -675,17 +708,19 @@ export class LayoutDraftService {
           }
         : input.currentDraft.coverage)
 
+    const nextSegments = replaceRange(existingSegments, replacementRange, {
+      id: `draft-refined-${Date.now()}`,
+      label: guess.label,
+      startTime: replacementRange.start,
+      endTime: replacementRange.end,
+      programType: guess.programType,
+      queryHints: guess.queryHints,
+      sequential: guess.sequential,
+    })
+
     return {
-      coverage: input.currentDraft.coverage,
-      segments: replaceRange(existingSegments, replacementRange, {
-        id: `draft-refined-${Date.now()}`,
-        label: guess.label,
-        startTime: replacementRange.start,
-        endTime: replacementRange.end,
-        programType: guess.programType,
-        queryHints: guess.queryHints,
-        sequential: guess.sequential,
-      }),
+      coverage: expandCoverageToSegments(input.currentDraft.coverage, nextSegments),
+      segments: nextSegments,
     }
   }
 

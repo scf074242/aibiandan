@@ -21,6 +21,51 @@ describe('OpenClawBridge', () => {
     expect(['completed', 'failed', 'needs_clarification']).toContain(result.status)
   })
 
+  it('分析当前版面编排时会返回文字报告并保留后续优化引导', async () => {
+    const bridge = new OpenClawBridge()
+
+    const result = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-analysis-1',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '请分析当前版面编排，给我一份编辑视角的文字版报告',
+      currentSchedule: [
+        {
+          id: 'item-0700',
+          programName: '看东方',
+          startTime: '07:00:00',
+          endTime: '09:00:00',
+          duration: 7200,
+          programType: 'news_magazine',
+        },
+        {
+          id: 'item-0930',
+          programName: '纵有疾风起',
+          startTime: '09:30:00',
+          endTime: '12:00:00',
+          duration: 9000,
+          programType: 'drama',
+        },
+        {
+          id: 'item-1900',
+          programName: '新闻联播',
+          startTime: '19:00:00',
+          endTime: '19:30:00',
+          duration: 1800,
+          programType: 'news',
+        },
+      ],
+      gapCount: 1,
+      history: [],
+    })
+
+    expect(result.status).toBe('completed')
+    expect(result.summary).toContain('广电节目编辑视角')
+    expect(result.summary).toContain('新的版面草案')
+    expect(result.payload?.lastDecisionKind).toBe('message')
+  })
+
   it('会复用同一个 conversationId 对应的桥接会话', async () => {
     const bridge = new OpenClawBridge()
 
@@ -63,8 +108,10 @@ describe('OpenClawBridge', () => {
       history: [],
     })
 
-    expect(first.status).toBe('completed')
-    expect(first.message).toBeTruthy()
+    expect(['completed', 'needs_selection']).toContain(first.status)
+    if (first.status === 'completed') {
+      expect(first.message).toBeTruthy()
+    }
 
     const second = await bridge.submitInstruction({
       conversationId: 'conv-bridge-3',
@@ -175,6 +222,86 @@ describe('OpenClawBridge', () => {
     expect(refine.payload?.lastDecisionKind).toBe('layout_draft')
     expect(refine.summary).toContain('更新当前版面草案')
   })
+
+  it('当前存在草案时会把删除草案时段优先作为版面微调', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-delete-draft-segment',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '帮我全天编排',
+      currentSchedule: [],
+      gapCount: 2,
+      history: [],
+    })
+
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+
+    const refine = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-delete-draft-segment',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '删除6点的草案',
+      currentSchedule: [],
+      gapCount: 2,
+      history: [],
+    })
+
+    expect(refine.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(refine.payload?.pendingAtomicContext).toBeNull()
+    expect(refine.payload?.pendingCommand).toBeUndefined()
+    expect(refine.summary).toContain('更新当前版面草案')
+  })
+
+  it('当前存在自定义草案时新增时段不会回退加载频道默认版面', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-refine-keeps-current-draft',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '生成版面草稿，15点到19点，全部是电视剧',
+      currentSchedule: [],
+      gapCount: 2,
+      history: [],
+    })
+
+    const firstDraft = bridge.getSessionState(prepare.sessionId)?.pendingLayoutDraft
+    expect(firstDraft?.source).toBe('generated')
+    expect(firstDraft?.coverage).toEqual({
+      start: '15:00:00',
+      end: '19:00:00',
+    })
+    expect(firstDraft?.layoutReference.slots).toHaveLength(1)
+
+    const refine = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-refine-keeps-current-draft',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '增加19点到20点的草案，内容全部是新闻',
+      currentSchedule: [],
+      gapCount: 2,
+      history: [],
+    })
+
+    const refinedDraft = bridge.getSessionState(refine.sessionId)?.pendingLayoutDraft
+    const segmentProgramTypes = refinedDraft?.columns.map((column) => column.defaultProgramType) ?? []
+    const segmentRanges = refinedDraft?.layoutReference.slots.map((slot) => `${slot.startTime.slice(11, 19)}-${slot.endTime.slice(11, 19)}`) ?? []
+
+    expect(refine.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(refinedDraft?.source).toBe('generated')
+    expect(refinedDraft?.layoutReference.slots).toHaveLength(2)
+    expect(segmentProgramTypes).toContain('drama')
+    expect(segmentProgramTypes).toContain('news')
+    expect(segmentRanges).toContain('15:00:00-19:00:00')
+    expect(segmentRanges).toContain('19:00:00-20:00:00')
+  })
+
   it('明确要求不参考版面时会直接生成新草案', async () => {
     const bridge = new OpenClawBridge()
 

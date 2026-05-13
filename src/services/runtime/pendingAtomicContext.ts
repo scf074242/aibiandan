@@ -75,25 +75,38 @@ export const buildPendingAtomicContextFromClarification = (
   pending: RuntimePendingAtomicClarification,
   timestamp: string = nowIso(),
   source?: RuntimePendingAtomicContextSource,
-): RuntimePendingAtomicContext => ({
-  action: pending.action,
-  phase: 'clarifying',
-  summary: pending.summary,
-  reasoning: pending.reasoning,
-  originalUserInput: source?.originalUserInput ?? pending.originalUserInput,
-  collectedUserInput: source?.collectedUserInput ?? pending.collectedUserInput,
-  slots: {
+): RuntimePendingAtomicContext => {
+  const mergedSlots: RuntimeAtomicSlotBag = {
     ...(source?.slots ?? {}),
-    targetTimeHint: pending.targetTimeHint,
-    programName: pending.programNameHint,
-  },
-  missingFields: pending.missingFields.map(mapClarificationMissingField),
-  followUpQuestion: pending.followUpQuestion,
-  attemptCount: source?.attemptCount ?? 0,
-  createdAt: source?.createdAt ?? timestamp,
-  updatedAt: timestamp,
-  expiresAt: source?.expiresAt,
-})
+    ...(pending.slots ?? {}),
+  }
+
+  if (!mergedSlots.targetTimeHint && pending.targetTimeHint) {
+    mergedSlots.targetTimeHint = pending.targetTimeHint
+  }
+  if (!mergedSlots.programName && pending.programNameHint) {
+    mergedSlots.programName = pending.programNameHint
+  }
+  if (!mergedSlots.rawProgramText && pending.action === 'insert' && mergedSlots.programName) {
+    mergedSlots.rawProgramText = mergedSlots.programName
+  }
+
+  return {
+    action: pending.action,
+    phase: 'clarifying',
+    summary: pending.summary,
+    reasoning: pending.reasoning,
+    originalUserInput: source?.originalUserInput ?? pending.originalUserInput,
+    collectedUserInput: source?.collectedUserInput ?? pending.collectedUserInput,
+    slots: mergedSlots,
+    missingFields: pending.missingFields.map(mapClarificationMissingField),
+    followUpQuestion: pending.followUpQuestion,
+    attemptCount: source?.attemptCount ?? 0,
+    createdAt: source?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    expiresAt: source?.expiresAt,
+  }
+}
 
 export const rehydratePendingAtomicClarificationFromAtomicContext = (
   pending: RuntimePendingAtomicContext,
@@ -123,6 +136,7 @@ export const rehydratePendingAtomicClarificationFromAtomicContext = (
     collectedUserInput: pending.collectedUserInput,
     targetTimeHint: pending.slots.targetTimeHint ?? pending.slots.targetTime,
     programNameHint: pending.slots.programName ?? pending.slots.rawProgramText,
+    slots: pending.slots,
     missingFields,
     followUpQuestion: pending.followUpQuestion,
   }
@@ -197,27 +211,28 @@ export const deriveAtomicMissingFieldsFromSlots = (
   action: RuntimeAtomicAction | null,
   slots: RuntimeAtomicSlotBag,
 ): RuntimeAtomicMissingField[] => {
-  const hasTarget = Boolean(slots.targetTime || slots.targetTimeHint || slots.programName || slots.rawProgramText)
+  const hasTargetTime = Boolean(slots.targetTime || slots.targetTimeHint)
+  const hasProgramHint = Boolean(slots.programName || slots.rawProgramText)
   switch (action) {
     case 'move': {
       const missing: RuntimeAtomicMissingField[] = []
-      if (!hasTarget) missing.push('target_time')
+      if (!hasTargetTime) missing.push('target_time')
       if (!slots.direction) missing.push('direction')
       if (typeof slots.offsetSeconds !== 'number') missing.push('offset')
       return missing
     }
     case 'delete':
-      return hasTarget ? [] : ['target_time']
+      return hasTargetTime ? [] : ['target_time']
     case 'replace': {
       const missing: RuntimeAtomicMissingField[] = []
-      if (!hasTarget) missing.push('target_time')
+      if (!hasTargetTime) missing.push('target_time')
       if (!slots.replacementProgramName) missing.push('replacement_program')
       return missing
     }
     case 'insert': {
       const missing: RuntimeAtomicMissingField[] = []
-      if (!slots.targetTime && !slots.targetTimeHint) missing.push('target_time')
-      if (!slots.programName && !slots.rawProgramText && !slots.semanticLabel && !slots.programTypeHint) missing.push('program_name')
+      if (!hasTargetTime) missing.push('target_time')
+      if (!hasProgramHint && !slots.semanticLabel && !slots.programTypeHint) missing.push('program_name')
       return missing
     }
     default:

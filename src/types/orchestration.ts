@@ -13,6 +13,7 @@ export type TaskMode =
   | 'micro_edit'
   | 'validate_only'
   | 'repair_only'
+  | 'layout_analysis'
   | 'clarify'
   | 'layout_prepare'
   | 'layout_refine'
