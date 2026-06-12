@@ -185,4 +185,25 @@ describe('DemoRuntimeFacade layout draft refine', () => {
     expect(result.draft.layoutReference.slots.some((slot) => slot.id === 'slot-3')).toBe(false)
     expect(result.draft.warnings?.some((warning) => warning.includes('空档'))).toBe(true)
   })
+
+  it('会把放弃当前草案的上下文命令识别为清空待确认版面', async () => {
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '不要这个草案',
+      currentSchedule: [],
+      currentLayoutDraft: createDraft(),
+      currentLayoutDraftMode: 'full_generate',
+      history: [],
+    })
+
+    expect(result.kind).toBe('layout_draft_clear')
+    if (result.kind !== 'layout_draft_clear') {
+      throw new Error('expected layout draft clear decision')
+    }
+
+    expect(result.feedback.content).toContain('已取消')
+    expect(result.feedback.details?.draftId).toBe('draft-1')
+  })
 })

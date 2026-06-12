@@ -6,6 +6,7 @@ import type {
   TaskMode,
 } from '@/types/orchestration'
 import type { ChatMessage } from '@/types/llm'
+import { looksLikeProgramSchedulingRequest, parseSchedulingTimeRange } from '@/services/schedulingIntentHeuristics'
 import { LLMClient } from './llmClient'
 
 export interface TaskClassifierInput {
@@ -146,8 +147,53 @@ export class TaskClassifier {
     if (this.isVagueLayoutRequest(normalized)) {
       return {
         mode: 'clarify',
+        confidence: looksLikeProgramSchedulingRequest(userInput) ? 0.55 : 0.92,
+        reasoning: looksLikeProgramSchedulingRequest(userInput)
+          ? '检测到节目编排相关表达，但规则信息不足，应交给 LLM 判断是生成草案还是追问。'
+          : '检测到版面相关表达，但缺少明确范围或内容偏好，需要先补充版面信息。',
+      }
+    }
+
+    if (this.shouldStartOrchestrationFromLayout(normalized, scheduleState)) {
+      return {
+        mode: 'layout_prepare',
         confidence: 0.92,
-        reasoning: '检测到版面相关表达，但缺少明确范围或内容偏好，需要先补充版面信息。',
+        reasoning: '用户正在发起编排或补排流程，按产品规则应先生成待确认的版面草案。',
+        suggestedParams: {
+          userIntent: userInput.trim() || '生成版面草案',
+          targetTimeRange: targetTimeRange ?? (scheduleState.isEmpty ? { start: '06:00:00', end: '23:59:59' } : undefined),
+        },
+      }
+    }
+
+    if (this.hasValidateIntent(normalized)) {
+      return {
+        mode: 'validate_only',
+        confidence: 0.85,
+        reasoning: '用户明确要求执行校验。',
+      }
+    }
+
+    if (this.hasRepairIntent(normalized)) {
+      return {
+        mode: 'validate_only',
+        confidence: 0.88,
+        reasoning: '用户提到了修复，但当前产品流程会先输出问题分析结果，再决定后续处理方案。',
+      }
+    }
+
+    if (
+      looksLikeProgramSchedulingRequest(userInput)
+      && !LAYOUT_CONTENT_KEYWORDS.some((keyword) => normalized.includes(keyword))
+    ) {
+      return {
+        mode: 'clarify',
+        confidence: 0.55,
+        reasoning: '检测到节目编排领域的开放标签，固定规则不足以安全区分版面草案、草案调整或追问，应交给 LLM 判别。',
+        suggestedParams: {
+          userIntent: userInput.trim(),
+          targetTimeRange,
+        },
       }
     }
 
@@ -218,31 +264,17 @@ export class TaskClassifier {
       }
     }
 
-    if (this.shouldStartOrchestrationFromLayout(normalized, scheduleState)) {
+    if (looksLikeProgramSchedulingRequest(userInput)) {
       return {
-        mode: 'layout_prepare',
-        confidence: 0.92,
-        reasoning: '用户正在发起编排或补排流程，按产品规则应先生成待确认的版面草案。',
+        mode: 'clarify',
+        confidence: 0.55,
+        reasoning: LAYOUT_CONTENT_KEYWORDS.some((keyword) => normalized.includes(keyword))
+          ? '检测到节目编排领域的开放表达，但规则信息不足，应交给 LLM 映射到版面草案、草案调整或追问。'
+          : '检测到节目编排领域的开放标签，固定规则不足以安全区分版面草案、草案调整或追问，应交给 LLM 判别。',
         suggestedParams: {
-          userIntent: userInput.trim() || '生成版面草案',
-          targetTimeRange: targetTimeRange ?? (scheduleState.isEmpty ? { start: '06:00:00', end: '23:59:59' } : undefined),
+          userIntent: userInput.trim(),
+          targetTimeRange,
         },
-      }
-    }
-
-    if (this.hasValidateIntent(normalized)) {
-      return {
-        mode: 'validate_only',
-        confidence: 0.85,
-        reasoning: '用户明确要求执行校验。',
-      }
-    }
-
-    if (this.hasRepairIntent(normalized)) {
-      return {
-        mode: 'validate_only',
-        confidence: 0.88,
-        reasoning: '用户提到了修复，但当前产品流程会先输出问题分析结果，再决定后续处理方案。',
       }
     }
 
@@ -321,6 +353,9 @@ export class TaskClassifier {
 - 原子节目单命令（插入、删除、移动、替换）已经在上游处理，这里不要再返回 micro_edit。
 - 用户提到“全天编排”“补齐空窗”“填充节目单”这类启动编排的话术时，也要先返回 layout_prepare，而不是直接执行编排。
 - 如果用户在描述“某个时段按某类内容铺排版面”，优先判断为 layout_prepare 或 layout_refine。
+- 如果用户说“准备一个/制作一份/生成一份”某个时间范围的轮播单、播单、直播单、户外直播单，也应返回 layout_prepare；例如“准备一个14:00到15:00的静安寺户外直播轮播单”。
+- 对地点、活动、户外直播等开放业务短语，不要要求用户改成固定节目类型；可把 suggestedParams.userIntent 保留为原始业务意图，并给出 targetTimeRange。
+- 对节目单、编排单、串联单、特别报道、主题活动、商圈/会场直播、节庆/赛事预热等开放业务话术，只要用户是在请求排播、生成、补排、调整、校验、分析或修复，都必须映射到上述已有模式；信息不足时返回 clarify，但不要当成非编排闲聊。
 - 如果用户要求“分析当前版面编排/当前节目单结构/从编辑视角出报告”，返回 layout_analysis。
 - 如果用户要求“优化当前版面/优化当前编排”，优先返回 layout_prepare，让系统先生成新的版面草案。
 - 如果用户像是在调整具体节目条目，但缺少足够的时间点、节目名或动作参数，返回 clarify。
@@ -396,7 +431,16 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
     }
 
     if (llmResult.confidence >= this.config.confidenceThreshold) {
-      return llmResult
+      return {
+        ...llmResult,
+        suggestedParams: {
+          ...ruleResult.suggestedParams,
+          ...llmResult.suggestedParams,
+          targetTimeRange:
+            llmResult.suggestedParams?.targetTimeRange
+            ?? ruleResult.suggestedParams?.targetTimeRange,
+        },
+      }
     }
 
     if (ruleResult.mode === llmResult.mode) {
@@ -431,13 +475,14 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
   }
 
   private hasValidateIntent(input: string): boolean {
-    return this.hasAny(input, ['校验', '检查', '验证', '核对', '审查', '查看问题'])
+    return this.hasAny(input, ['校验', '检查', '验证', '核对', '审查', '体检', '查看问题', '看看问题', '有没有问题', '有无问题', '找出问题', '排查问题', '查问题', '查一下', '查查', '看看', '看一下'])
+      || /(?:有没有|有无).*(?:问题|空窗|空缺|冲突|重叠|风险|断档)/.test(input)
   }
 
   private hasLayoutAnalysisIntent(input: string): boolean {
-    const hasAnalysisVerb = this.hasAny(input, ['分析', '评估', '研判', '诊断', '梳理'])
-    const hasLayoutTarget = this.hasAny(input, ['当前版面', '版面编排', '当前编排', '当前节目单', '节目单编排', '节目编排', '编排情况'])
-    const hasEditorialCue = /编辑视角|业务分析|文字版报告|分析报告/.test(input)
+    const hasAnalysisVerb = this.hasAny(input, ['分析', '评估', '研判', '诊断', '梳理', '复盘'])
+    const hasLayoutTarget = this.hasAny(input, ['当前版面', '版面编排', '当前编排', '当前节目单', '节目单编排', '节目编排', '编排情况', '播单', '编排单', '串联单'])
+    const hasEditorialCue = /编辑视角|业务分析|业务视角|编导视角|文字版报告|分析报告/.test(input)
     return (hasAnalysisVerb && hasLayoutTarget) || (hasLayoutTarget && hasEditorialCue) || (hasAnalysisVerb && hasEditorialCue)
   }
 
@@ -448,7 +493,7 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
   }
 
   private hasRepairIntent(input: string): boolean {
-    return this.hasAny(input, ['修复', '修正', '改正', '解决', '处理问题', '自动修复'])
+    return this.hasAny(input, ['修复', '修正', '改正', '解决', '处理问题', '自动修复', '修一下', '修一修', '修掉', '消掉', '处理掉'])
   }
 
   private hasEditIntent(input: string): boolean {
@@ -459,6 +504,7 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
     const exactKeywords = [
       '补齐空窗',
       '补空窗',
+      '补掉空窗',
       '空窗补排',
       '补排',
       '自动补排',
@@ -475,7 +521,7 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
     }
 
     const hasDomainTarget = ['空窗', '节目单', '编单'].some((keyword) => input.includes(keyword))
-    const hasFillVerb = ['补齐', '补全', '填充', '补上'].some((keyword) => input.includes(keyword))
+    const hasFillVerb = ['补齐', '补全', '填充', '补上', '补掉'].some((keyword) => input.includes(keyword))
     return hasDomainTarget && hasFillVerb
   }
 
@@ -560,8 +606,7 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
   }
 
   private containsExplicitTimeRange(input: string): boolean {
-    return /(\d{1,2})(:\d{1,2})?(点|点半)(到|至|-)(\d{1,2})(:\d{1,2})?(点|点半)/.test(input)
-      || /(\d{1,2}:\d{2})(到|至|-)(\d{1,2}:\d{2})/.test(input)
+    return Boolean(parseSchedulingTimeRange(input))
   }
 
   private extractEditIntent(input: string): string {
@@ -587,39 +632,7 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
   }
 
   private extractTimeRange(input: string): { start: string; end: string } | undefined {
-    const actualColonRange = input.match(/(\d{1,2}:\d{2})(?:到|至|-)(\d{1,2}:\d{2})/)
-    if (actualColonRange) {
-      return {
-        start: this.normalizeClock(actualColonRange[1]!),
-        end: this.normalizeClock(actualColonRange[2]!),
-      }
-    }
-
-    const actualPointRange = input.match(/(\d{1,2})(?::(\d{1,2}))?(?:点|点半)(?:到|至|-)(\d{1,2})(?::(\d{1,2}))?(?:点|点半)/)
-    if (actualPointRange) {
-      return {
-        start: this.normalizeClock(`${actualPointRange[1]}:${actualPointRange[2] ?? '00'}`),
-        end: this.normalizeClock(`${actualPointRange[3]}:${actualPointRange[4] ?? '00'}`),
-      }
-    }
-
-    if (input.includes('上午')) {
-      return { start: '06:00:00', end: '12:00:00' }
-    }
-    if (input.includes('中午') || input.includes('午间')) {
-      return { start: '12:00:00', end: '14:00:00' }
-    }
-    if (input.includes('下午')) {
-      return { start: '13:00:00', end: '18:00:00' }
-    }
-    if (input.includes('晚间') || input.includes('晚上')) {
-      return { start: '18:00:00', end: '23:00:00' }
-    }
-    if (input.includes('深夜') || input.includes('凌晨')) {
-      return { start: '23:00:00', end: '23:59:59' }
-    }
-
-    return undefined
+    return parseSchedulingTimeRange(input)
   }
 
   private extractActualLayoutLabel(input: string): string | null {
@@ -707,13 +720,6 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
       '忽略当前版面参考',
       '忽略当前版面',
     ].some((keyword) => input.includes(keyword))
-  }
-
-  private normalizeClock(clock: string): string {
-    const [hourText, minuteText = '00'] = clock.split(':')
-    const hour = Math.max(0, Math.min(23, Number(hourText)))
-    const minute = Math.max(0, Math.min(59, Number(minuteText)))
-    return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:00`
   }
 
   private normalizeLegacyLlmClassification(result: TaskClassification): TaskClassification {

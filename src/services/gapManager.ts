@@ -109,6 +109,9 @@ export class GapManager {
         endTime: slot.endTime,
         constraints: {
           allowedTypes: [slot.programType],
+          maxDuration: (new Date(slot.endTime).getTime() - new Date(slot.startTime).getTime()) / 1000,
+          fixedStart: true,
+          fixedEnd: true,
         },
         metadata: {
           source: 'layout',
@@ -232,6 +235,9 @@ export class GapManager {
         endTime: slot.endTime,
         constraints: {
           allowedTypes: slot.preferredProgramTypes?.length ? slot.preferredProgramTypes : [slot.programType],
+          maxDuration: (new Date(slot.endTime).getTime() - new Date(slot.startTime).getTime()) / 1000,
+          fixedStart: true,
+          fixedEnd: true,
         },
         metadata: {
           source: 'layout',
@@ -283,6 +289,9 @@ export class GapManager {
             constraints: {
               ...gap.constraints,
               allowedTypes: slot.preferredProgramTypes?.length ? slot.preferredProgramTypes : [slot.programType],
+              maxDuration: (segmentEnd - segmentStart) / 1000,
+              fixedStart: true,
+              fixedEnd: true,
             },
             metadata: {
               source: 'layout',

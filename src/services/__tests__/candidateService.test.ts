@@ -165,6 +165,29 @@ describe('CandidateService', () => {
     expect((result.candidates[0] as { selectionMode?: string } | undefined)?.selectionMode).toBe('rerun')
   })
 
+  it('栏目候选不会超过当前空窗结束边界', async () => {
+    const service = getCandidateService()
+    const result = await service.queryCandidates(
+      createGap({
+        startTime: iso('14:30:00'),
+        endTime: iso('15:00:00'),
+        duration: 1800,
+      }),
+      {
+        targetTimeRange: { start: iso('14:30:00'), end: iso('15:00:00') },
+        expectedDuration: { min: 60, max: 1800 },
+        channelId: 'dragon',
+        columnId: '101',
+        programTypePreference: ['news_magazine', 'news'],
+        searchKeywords: ['静安寺户外直播'],
+        excludeUsed: false,
+      },
+    )
+
+    expect(result.candidates.length).toBeGreaterThan(0)
+    expect(result.candidates.every((candidate) => candidate.duration <= 1800)).toBe(true)
+  })
+
   it('searchPrograms 会过滤已排节目并保留名称匹配结果', async () => {
     const atomicCapabilities = getAtomicCapabilities()
     await atomicCapabilities.replaceAllItems([
@@ -211,5 +234,23 @@ describe('CandidateService', () => {
     expect(strictResult).toHaveLength(0)
     expect(fallbackResult.length).toBeGreaterThan(0)
     expect(fallbackResult.every((candidate) => candidate.programName.includes('看东方'))).toBe(true)
+  })
+
+  it.each([
+    ['健康节目', 'health'],
+    ['一档纪录片', 'documentary'],
+    ['现场导视', 'news_magazine'],
+  ])('searchPrograms 支持用类别口语检索替换候选: %s', async (programName, expectedType) => {
+    const service = getCandidateService()
+
+    const result = await service.searchPrograms({
+      channelId: 'dragon',
+      columnStrategy: 'prefer_channel',
+      programName,
+      limit: 5,
+    })
+
+    expect(result.length).toBeGreaterThan(0)
+    expect(result.some((candidate) => candidate.programType === expectedType)).toBe(true)
   })
 })

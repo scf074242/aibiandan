@@ -12,6 +12,7 @@ import type {
   TokenUsageStats,
 } from '@/types/llm'
 import { loadLLMConfig, validateLLMConfig } from './llmConfig'
+import { createLocalDemoLlmResponse, isPlaceholderApiKey } from './localDemoLlm'
 
 export class LLMClient {
   private client: OpenAI | null = null
@@ -23,6 +24,7 @@ export class LLMClient {
     requestCount: 0,
   }
   private recentRequestTraces: LLMRequestTrace[] = []
+  private cachedFatalConfigError: Error | null = null
 
   constructor(config?: Partial<LLMConfig>) {
     this.config = config ? { ...loadLLMConfig(), ...config } : loadLLMConfig()
@@ -52,6 +54,7 @@ export class LLMClient {
    */
   updateConfig(config: Partial<LLMConfig>): void {
     this.config = { ...this.config, ...config }
+    this.cachedFatalConfigError = null
     this.initClient()
   }
 
@@ -59,14 +62,25 @@ export class LLMClient {
    * 发送聊天请求
    */
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<LLMResponse> {
+    if (!this.client && isPlaceholderApiKey(this.config.apiKey)) {
+      const localResponse = createLocalDemoLlmResponse(messages)
+      if (localResponse) {
+        return localResponse
+      }
+    }
     if (!this.client) {
       throw new Error('LLM client not initialized. Please check your configuration.')
+    }
+    if (this.cachedFatalConfigError) {
+      throw this.cachedFatalConfigError
     }
 
     const maxRetries = 3
     let lastError: Error | null = null
+    let attempts = 0
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
+      attempts = attempt + 1
       try {
         const response = await this.client.chat.completions.create({
           model: this.config.model,
@@ -100,6 +114,13 @@ export class LLMClient {
         lastError = this.normalizeError(error)
         console.warn(`LLM request failed (attempt ${attempt + 1}/${maxRetries}):`, error)
 
+        if (!this.isRetriableError(error)) {
+          if (this.isFatalConfigError(error)) {
+            this.cachedFatalConfigError = lastError
+          }
+          break
+        }
+
         // 指数退避
         if (attempt < maxRetries - 1) {
           const delay = Math.pow(2, attempt) * 1000
@@ -109,7 +130,7 @@ export class LLMClient {
     }
 
     throw new Error(
-      `LLM request failed after ${maxRetries} attempts: ${lastError?.message}`,
+      `LLM request failed after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${lastError?.message}`,
     )
   }
 
@@ -241,6 +262,32 @@ export class LLMClient {
     }
 
     return new Error('LLM 请求失败，请检查配置和网络连接。')
+  }
+
+  private isRetriableError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+      return true
+    }
+
+    const maybeStatus = (error as Error & { status?: number }).status
+    if (!maybeStatus) {
+      return true
+    }
+
+    if (maybeStatus === 400 || maybeStatus === 401 || maybeStatus === 403) {
+      return false
+    }
+
+    return maybeStatus === 408 || maybeStatus === 409 || maybeStatus === 429 || maybeStatus >= 500
+  }
+
+  private isFatalConfigError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+      return false
+    }
+
+    const maybeStatus = (error as Error & { status?: number }).status
+    return maybeStatus === 401 || maybeStatus === 403
   }
 }
 

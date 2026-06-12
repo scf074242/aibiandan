@@ -83,11 +83,11 @@ export class IntentRecognizer {
 
   private ruleBasedRecognize(userInput: string): MicroEditIntent {
     const normalized = userInput.replace(/\s+/g, '')
-    const hasInsertVerb = /(插入|插个|插一|加一条|添加节目|安排节目)/.test(normalized)
-    const hasMoveVerb = /(移动|后移|前移|顺延|延后|提前)/.test(normalized)
-    const hasDeleteVerb = /(删除|删掉|去掉|移除)/.test(normalized)
-    const hasReplaceVerb = /(换成|替换成|改成|替换为|改为)/.test(normalized)
-    const hasProgramCue = /(节目|看东方|电视剧|新闻|栏目|午间30|中国考古)/.test(normalized)
+    const hasInsertVerb = /(插入|插个|插一|加一条|加一档|加个|加一段|加一些|添加节目|安排节目|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选))/.test(normalized)
+    const hasMoveVerb = /(移动|后移|前移|顺延|延后|提前|往后挪|往前挪|挪一下|顺一下|顺一个)/.test(normalized)
+    const hasDeleteVerb = /(删除|删掉|去掉|移除|撤掉|拿掉)/.test(normalized)
+    const hasReplaceVerb = /(换成|换掉|替换|替换成|改成|替换为|改为)/.test(normalized)
+    const hasProgramCue = /(节目|那条|这条|那档|这档|看东方|东方新闻|电视剧|新闻|预告|导视|垫片|纪录片|纪实|综艺|栏目|短剧|少儿|动画|养生|健康|午间30|中国考古|《[^》]+》)/.test(normalized)
 
     if (hasDeleteVerb && hasProgramCue) {
       return {

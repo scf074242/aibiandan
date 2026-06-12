@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RuntimeDecision } from '../runtime/demoRuntimeFacade'
+import type { LayoutDraft } from '@/types/orchestration'
 import type { RuntimeBridgeSessionState } from '../runtime/runtimeSessionStore'
 import { OpenClawHostAdapter, type OpenClawHostOutboundEnvelope } from '../openclaw/openClawHostAdapter'
 
@@ -17,6 +18,43 @@ const buildSessionState = (decision?: RuntimeDecision): RuntimeBridgeSessionStat
   },
   lastDecision: decision,
   updatedAt: new Date().toISOString(),
+})
+
+const buildDraft = (): LayoutDraft => ({
+  id: 'draft-commit-1',
+  channelId: 'dragon',
+  date: '2026-04-07',
+  version: 1,
+  source: 'generated',
+  userIntent: '下午电视剧',
+  coverage: {
+    start: '13:00:00',
+    end: '18:00:00',
+  },
+  layoutReference: {
+    id: 'layout-commit-1',
+    name: '下午电视剧草案',
+    slots: [
+      {
+        id: 'slot-1300',
+        channelId: 'dragon',
+        startTime: '2026-04-07T13:00:00+08:00',
+        endTime: '2026-04-07T18:00:00+08:00',
+        columnId: 'runtime-column:drama',
+      },
+    ],
+  },
+  columns: [
+    {
+      columnId: 'runtime-column:drama',
+      columnName: '下午电视剧',
+      channelId: 'dragon',
+      defaultProgramType: 'drama',
+      source: 'generated',
+      semanticLabel: '下午电视剧',
+      isSequential: true,
+    },
+  ],
 })
 
 class FakeBridge {
@@ -173,6 +211,60 @@ describe('OpenClawHostAdapter', () => {
     expect(peerMessages.some((message) => message.type === 'bigbiandan.orchestration')).toBe(true)
   })
 
+  it('会在自然语言确认版面后把 layout_commit 转发为页面侧编排请求', async () => {
+    const draft = buildDraft()
+    const commitDecision: RuntimeDecision = {
+      kind: 'layout_commit',
+      feedback: {
+        content: '已确认当前版面草案，准备按该版面开始编排。',
+        processType: 'planning',
+        processTypeLabel: '版面草案确认',
+      },
+      draft,
+      orchestrationRequest: {
+        userInput: '确认版面',
+        mode: 'full_generate',
+        reasoning: '用户确认当前版面草案并开始编排。',
+        layoutDraft: draft,
+      },
+    }
+    const bridge = new FakeBridge()
+    bridge.session = buildSessionState(commitDecision)
+    const onOrchestrationRequest = vi.fn()
+
+    const adapter = new OpenClawHostAdapter({
+      bridge: bridge as never,
+      getContext: () => ({
+        channelId: 'dragon',
+        channelName: '东方卫视',
+        date: '2026-04-07',
+        currentSchedule: [],
+        gapCount: 1,
+      }),
+      onOrchestrationRequest,
+      getOrchestrationSnapshot: () => ({
+        channelId: 'dragon',
+        channelName: '东方卫视',
+        date: '2026-04-07',
+        status: 'running',
+        isRunning: true,
+      }),
+      hostWindow: null,
+    })
+
+    const response = await adapter.handleEnvelope({
+      type: 'bigbiandan.submit',
+      requestId: 'req-layout-commit',
+      payload: {
+        conversationId: 'agent:main:main',
+        text: '确认版面',
+      },
+    })
+
+    expect(response?.type).toBe('bigbiandan.result')
+    expect(onOrchestrationRequest).toHaveBeenCalledWith(commitDecision.orchestrationRequest)
+  })
+
   it('支持仅通过 conversationId 查询当前会话状态', async () => {
     const adapter = new OpenClawHostAdapter({
       bridge: new FakeBridge() as never,
@@ -201,4 +293,3 @@ describe('OpenClawHostAdapter', () => {
     })
   })
 })
-

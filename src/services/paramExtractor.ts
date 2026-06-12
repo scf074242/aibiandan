@@ -1,5 +1,7 @@
 ﻿import type { LLMClient } from './llm/llmClient'
 import type { DialogueContext } from './dialogueContext'
+import { parseAtomicOffset } from './atomicOffsetParser'
+import { parseAtomicClockExpression } from './atomicTimeParser'
 
 export interface InsertParams {
   targetTime: string
@@ -30,7 +32,7 @@ export class ParamExtractor {
 
   async extractInsertParams(context: DialogueContext): Promise<InsertParams | null> {
     const ruleBased = this.ruleBasedExtractInsert(context.userInput)
-    if (ruleBased && !this.shouldRefineWithContext(context, 'insert', ruleBased.programName)) {
+    if (ruleBased && !this.shouldRefineWithContext(context, 'insert', ruleBased.programName, ruleBased.rawProgramText)) {
       return ruleBased
     }
     if (!ruleBased && !this.hasExplicitTargetTimeHint(context)) {
@@ -217,8 +219,9 @@ export class ParamExtractor {
     const timeMatch =
       normalized.match(/在?(\d{1,2})点(?:(\d{1,2})分)?/) ||
       normalized.match(/在?(\d{1,2})[:：](\d{2})/)
-    const insertVerbMatched = /(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目|来个|来一条|来一档|放个|上个)/.test(normalized)
-    const programMatch = normalized.match(/(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加个节目|插个节目|来个|来一条|来一档|放个|上个)(.*)$/)
+    const insertVerbPattern = /(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加一档|加个|加个节目|加一段|加一些|插个节目|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)(?:的)?)/
+    const insertVerbMatched = insertVerbPattern.test(normalized)
+    const programMatch = normalized.match(new RegExp(`${insertVerbPattern.source}(.*)$`))
 
     if (!timeMatch || !insertVerbMatched) return null
 
@@ -233,10 +236,13 @@ export class ParamExtractor {
 
   private ruleBasedExtractMove(userInput: string): MoveParams | null {
     const normalized = userInput.replace(/\s+/g, '')
-    if (!/(移动|后移|前移|顺延|延后|提前)/.test(normalized)) return null
+    if (!/(移动|后移|前移|顺延|延后|提前|往后挪|往前挪|挪一下|顺一下|顺一个)/.test(normalized)) return null
 
     const timeMatch = this.findTimeExpression(normalized)
     const offset = this.extractOffsetFromNormalized(normalized)
+      ?? (/(顺一下|顺一个|挪一下)/.test(normalized)
+        ? { direction: 'forward' as const, offsetSeconds: 300 }
+        : null)
     if (!timeMatch || !offset) return null
 
     return {
@@ -248,7 +254,7 @@ export class ParamExtractor {
 
   private ruleBasedExtractDelete(userInput: string): DeleteParams | null {
     const normalized = userInput.replace(/\s+/g, '')
-    if (!/(删除|删掉|移除|去掉)/.test(normalized)) return null
+    if (!/(删除|删掉|移除|去掉|撤掉|拿掉)/.test(normalized)) return null
 
     const timeMatch = this.findTimeExpression(normalized)
     if (!timeMatch) return null
@@ -256,7 +262,7 @@ export class ParamExtractor {
     const quotedProgramName = normalized.match(/《([^》]+)》/)?.[1]?.trim()
     const programFragment = quotedProgramName
       ?? this.normalizeProgramSelection(normalized.slice(timeMatch.index + timeMatch.matchedText.length))
-      ?? this.normalizeProgramSelection(normalized.slice(0, timeMatch.index).replace(/^(?:删除|删掉|移除|去掉)/, ''))
+      ?? this.normalizeProgramSelection(normalized.slice(0, timeMatch.index).replace(/^(?:删除|删掉|移除|去掉|撤掉|拿掉)/, ''))
 
     return {
       targetTime: timeMatch.targetTime,
@@ -267,7 +273,7 @@ export class ParamExtractor {
   private ruleBasedExtractReplace(userInput: string): ReplaceParams | null {
     const normalized = userInput.replace(/\s+/g, '')
     const timeMatch = this.findTimeExpression(normalized)
-    const replacementMatch = normalized.match(/(?:替换成|替换为|换成|改成|改为)(.+)$/)
+    const replacementMatch = normalized.match(/(?:替换成|替换为|替换|换掉成|换成|换掉|改成|改为)(.+)$/)
     if (!timeMatch || !replacementMatch?.[1]) return null
 
     const replacementProgramName = this.normalizeProgramSelection(replacementMatch[1])
@@ -280,67 +286,19 @@ export class ParamExtractor {
   }
 
   private findTimeExpression(normalized: string): { targetTime: string; matchedText: string; index: number } | null {
-    const patterns = [
-      /(\d{1,2})[:：](\d{2})/,
-      /(\d{1,2})点半/,
-      /(\d{1,2})点(?:(\d{1,2})分?)?/,
-    ]
-
-    for (const pattern of patterns) {
-      const match = pattern.exec(normalized)
-      if (!match?.[0] || typeof match.index !== 'number') continue
-      if (pattern.source.includes('点半')) {
-        const targetTime = this.normalizeTime(`${match[1]}:30`)
-        if (!targetTime) continue
-        return {
-          targetTime,
-          matchedText: match[0],
-          index: match.index,
-        }
-      }
-
-      const targetTime = this.normalizeTime(`${match[1]}:${match[2] ?? '00'}`)
-      if (!targetTime) continue
-      return {
-        targetTime,
-        matchedText: match[0],
-        index: match.index,
-      }
-    }
-
-    return null
+    return parseAtomicClockExpression(normalized)
   }
 
   private extractOffsetFromNormalized(normalized: string): { direction: 'forward' | 'backward'; offsetSeconds: number } | null {
-    const hourOffsetMatch =
-      normalized.match(/([前后])移(\d{1,2})小时/) ||
-      normalized.match(/(提前|延后|顺延)(\d{1,2})小时/)
-    if (hourOffsetMatch) {
-      const directionToken = hourOffsetMatch[1] ?? ''
-      return {
-        direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
-        offsetSeconds: Number(hourOffsetMatch[2] ?? '1') * 3600,
-      }
-    }
-
-    const minuteOffsetMatch =
-      normalized.match(/([前后])移(\d{1,2})分钟/) ||
-      normalized.match(/(提前|延后|顺延)(\d{1,2})分钟/)
-    if (minuteOffsetMatch) {
-      const directionToken = minuteOffsetMatch[1] ?? ''
-      return {
-        direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
-        offsetSeconds: Number(minuteOffsetMatch[2] ?? '1') * 60,
-      }
-    }
-
-    return null
+    return parseAtomicOffset(normalized)
   }
 
   private normalizeProgramSelection(value?: string): string | undefined {
     if (!value) return undefined
     const normalized = value
       .replace(/[，。！？!?]/g, '')
+      .replace(/^(?:一档|一个|一条|一期|一部|个|条|档|期|部)/, '')
+      .replace(/^(?:适合的|合适的|当前的|更适合[^的]*的?)/, '')
       .replace(/^(?:的|节目|栏目|补充说明[:：]?|要删除的|删除的|这条|那条|这个|那个)+/, '')
       .replace(/(?:补充说明[:：]?)+$/g, '')
       .trim()
@@ -363,6 +321,7 @@ export class ParamExtractor {
     context: DialogueContext,
     intentType: 'insert' | 'move' | 'delete' | 'replace',
     programName?: string,
+    rawProgramText?: string,
   ): boolean {
     if (context.currentSchedule.length === 0) {
       return false
@@ -379,6 +338,9 @@ export class ParamExtractor {
     }
 
     if (intentType === 'insert') {
+      if (context.targetTimeHints.length > 0 && rawProgramText?.trim()) {
+        return false
+      }
       return hasProgramHint || hasTimeHints
     }
 
@@ -460,7 +422,8 @@ export class ParamExtractor {
     const normalized = value
       .replace(/^(一档|一个|一条|一期|一部|个|条|档|期|部)/, '')
       .replace(/^(适合的|合适的|当前的)/, '')
-      .replace(/^(节目名|节目|栏目|我要|我想要|想要|我想看|想看|要看|来个|来一条|来一档|放个|上个)\s*/, '')
+      .replace(/^(节目名|节目|栏目|我要|我想要|想要|我想看|想看|要看|来个|来一条|来一档|放个|上个|推荐|找|查|有没有适合的?|有没有可用的?|有没有候选的?)\s*/, '')
+      .replace(/(?:候选节目|候选|可选节目|可用节目)$/u, '')
       .replace(/[，。！？!?]/g, '')
       .replace(/(?:吧|呀|啊|呢)$/u, '')
       .trim()
@@ -484,7 +447,7 @@ export class ParamExtractor {
     const normalized = value.replace(/\s+/g, '')
     if (!normalized) return true
     if (/^(节目|栏目|内容|片子|合适的节目|当前的节目)$/.test(normalized)) return true
-    return /^(新闻|资讯|电视剧|剧场|综艺|纪录片|纪实|少儿|动画|评论|访谈|养生|健康|娱乐|电影|短剧)(节目|栏目|内容)?$/.test(normalized)
+    return /^(新闻|资讯|预告|导视|垫片|现场导视|电视剧|剧场|综艺|纪录片|纪实|少儿|动画|评论|访谈|养生|健康|娱乐|电影|短剧)(节目|栏目|内容)?$/.test(normalized)
   }
 
   private inferProgramTypeHint(value?: string): string | undefined {
@@ -492,7 +455,7 @@ export class ParamExtractor {
     const normalized = value.replace(/\s+/g, '')
     const mappings: Array<{ pattern: RegExp; type: string }> = [
       { pattern: /(新闻|快报|联播)/, type: 'news' },
-      { pattern: /(资讯|观察|Eye)/i, type: 'news_magazine' },
+      { pattern: /(资讯|观察|预告|导视|垫片|Eye)/i, type: 'news_magazine' },
       { pattern: /(电视剧|剧场|短剧|剧情)/, type: 'drama' },
       { pattern: /(综艺|娱乐)/, type: 'entertainment' },
       { pattern: /(养生|健康)/, type: 'health' },
@@ -507,7 +470,7 @@ export class ParamExtractor {
     if (value) {
       const normalized = value.replace(/\s+/g, '')
       if (/(新闻|快报|联播)/.test(normalized)) return '新闻'
-      if (/(资讯|观察|Eye)/i.test(normalized)) return '资讯'
+      if (/(资讯|观察|预告|导视|垫片|Eye)/i.test(normalized)) return '资讯'
       if (/(电视剧|剧场|短剧|剧情)/.test(normalized)) return '剧场'
       if (/(综艺|娱乐)/.test(normalized)) return '娱乐'
       if (/(养生|健康)/.test(normalized)) return '养生'

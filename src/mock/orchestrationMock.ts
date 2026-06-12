@@ -107,9 +107,10 @@ export const orchestrationDemoColumns: ColumnDefinition[] = [
   { columnId: '109', columnName: '锵点', channelId: 'dragon', defaultProgramType: 'commentary' },
   { columnId: '123', columnName: '两说', channelId: 'dragon', defaultProgramType: 'commentary' },
   { columnId: '124', columnName: '梦想剧场', channelId: 'dragon', defaultProgramType: 'drama', isSequential: true },
+  { columnId: '125', columnName: '东方纪实', channelId: 'dragon', defaultProgramType: 'documentary' },
 ]
 
-export const orchestrationDemoProgramDefinitions: ProgramDefinition[] = [
+const seedProgramDefinitions: ProgramDefinition[] = [
   { programId: 'P115001', programName: '东方快报', columnId: '115', programType: 'news' },
   { programId: 'P101001', programName: '看东方', columnId: '101', programType: 'news_magazine' },
   { programId: 'P107001', programName: '潮童天下', columnId: '107', programType: 'kids' },
@@ -132,7 +133,7 @@ export const orchestrationDemoProgramDefinitions: ProgramDefinition[] = [
   { programId: 'P124001', programName: '归路', columnId: '124', programType: 'drama' },
 ]
 
-export const orchestrationDemoProgramInstances: ProgramInstance[] = [
+const seedProgramInstances: ProgramInstance[] = [
   { instanceId: 'I115001-0001', programId: 'P115001', programCode: '002601150001', instanceName: '东方快报 06时整点', duration: 900, issueNo: '0001' },
   { instanceId: 'I115001-0002', programId: 'P115001', programCode: '002601150002', instanceName: '东方快报 06时15分', duration: 900, issueNo: '0002' },
   { instanceId: 'I115001-0003', programId: 'P115001', programCode: '002601150003', instanceName: '东方快报 06时30分', duration: 900, issueNo: '0003' },
@@ -166,6 +167,216 @@ export const orchestrationDemoProgramInstances: ProgramInstance[] = [
   { instanceId: 'I109001-0001', programId: 'P109001', programCode: '002601090001', instanceName: '锵点·当日观察', duration: 1800, issueNo: '0001' },
   { instanceId: 'I123001-0001', programId: 'P123001', programCode: '002601230001', instanceName: '两说', duration: 1800, issueNo: '0001' },
   { instanceId: 'I124001-0001', programId: 'P124001', programCode: '002601240001', instanceName: '梦想剧场：归路 第1集', duration: 1800, adBreaks: buildInternalAdBreaks(1800, 'drama'), issueNo: '0001' },
+]
+
+type GeneratedProgramSeries = {
+  columnId: string
+  codePrefix: string
+  duration: number
+  episodeCount: number
+  programType: string
+  titles: string[]
+}
+
+const generatedProgramSeries: GeneratedProgramSeries[] = [
+  {
+    columnId: '115',
+    codePrefix: '115',
+    duration: 900,
+    episodeCount: 24,
+    programType: 'news',
+    titles: ['东方快报', '上海早新闻', '长三角快讯', '民生速递'],
+  },
+  {
+    columnId: '101',
+    codePrefix: '101',
+    duration: 1800,
+    episodeCount: 12,
+    programType: 'news_magazine',
+    titles: ['看东方·城市更新', '看东方·民生现场', '看东方·长三角时间', '看东方·创新上海', '看东方·海派生活'],
+  },
+  {
+    columnId: '107',
+    codePrefix: '107',
+    duration: 1800,
+    episodeCount: 10,
+    programType: 'kids',
+    titles: ['潮童天下', '成长进行时', '少年梦工厂', '童声看世界', '亲子周末'],
+  },
+  {
+    columnId: '112',
+    codePrefix: '112',
+    duration: 2700,
+    episodeCount: 32,
+    programType: 'drama',
+    titles: ['繁花', '问心', '纵有疾风起', '追光的日子', '大江大河', '小欢喜'],
+  },
+  {
+    columnId: '102',
+    codePrefix: '102',
+    duration: 1800,
+    episodeCount: 20,
+    programType: 'news',
+    titles: ['午间30分', '午间新闻眼', '午间上海', '午间长三角'],
+  },
+  {
+    columnId: '104',
+    codePrefix: '104',
+    duration: 1800,
+    episodeCount: 12,
+    programType: 'news_magazine',
+    titles: ['ShanghaiEye', '环球交叉点', '国际城市观察', '海外看上海'],
+  },
+  {
+    columnId: '105',
+    codePrefix: '105',
+    duration: 1800,
+    episodeCount: 12,
+    programType: 'health',
+    titles: ['名医话养生', '健康上海', '活到100岁', '中医有方', '银龄课堂'],
+  },
+  {
+    columnId: '113',
+    codePrefix: '113',
+    duration: 2700,
+    episodeCount: 30,
+    programType: 'drama',
+    titles: ['烟火人家', '城中之城', '山海情', '人世间', '理想之城', '装台'],
+  },
+  {
+    columnId: '106',
+    codePrefix: '106',
+    duration: 1800,
+    episodeCount: 10,
+    programType: 'entertainment',
+    titles: ['东方新娱乐', '文娱新天地', '极限挑战精选', '我们的歌精选', '今晚开放麦精选', '舞台2026'],
+  },
+  {
+    columnId: '103',
+    codePrefix: '103',
+    duration: 1800,
+    episodeCount: 20,
+    programType: 'news',
+    titles: ['东方新闻', '上海新闻', '新闻夜线', '财经观察'],
+  },
+  {
+    columnId: '118',
+    codePrefix: '118',
+    duration: 1800,
+    episodeCount: 20,
+    programType: 'news',
+    titles: ['新闻联播', '东方晚间新闻', '长三角新闻联播'],
+  },
+  {
+    columnId: '119',
+    codePrefix: '119',
+    duration: 2700,
+    episodeCount: 36,
+    programType: 'drama',
+    titles: ['玫瑰的故事', '承欢记', '南来北往', '父辈的荣耀', '欢乐颂', '三十而已'],
+  },
+  {
+    columnId: '120',
+    codePrefix: '120',
+    duration: 1800,
+    episodeCount: 12,
+    programType: 'drama',
+    titles: ['东方看大剧', '剧耀东方', '剧集风云榜', '幕后看大剧'],
+  },
+  {
+    columnId: '121',
+    codePrefix: '121',
+    duration: 1800,
+    episodeCount: 16,
+    programType: 'drama',
+    titles: ['夜色正浓', '春风寄梦', '海上繁星', '转角遇见你', '向阳而生'],
+  },
+  {
+    columnId: '122',
+    codePrefix: '122',
+    duration: 1800,
+    episodeCount: 12,
+    programType: 'commentary',
+    titles: ['今晚', '今晚观察', '城市会客厅', '东方圆桌'],
+  },
+  {
+    columnId: '109',
+    codePrefix: '109',
+    duration: 1800,
+    episodeCount: 12,
+    programType: 'commentary',
+    titles: ['锵点', '热点面对面', '新闻深一度', '这就是中国精选'],
+  },
+  {
+    columnId: '123',
+    codePrefix: '123',
+    duration: 1800,
+    episodeCount: 12,
+    programType: 'commentary',
+    titles: ['两说', '双城记', '观点交锋', '民生圆桌'],
+  },
+  {
+    columnId: '124',
+    codePrefix: '124',
+    duration: 1800,
+    episodeCount: 24,
+    programType: 'drama',
+    titles: ['归路', '平凡之路', '打开生活的正确方式', '心居', '流金岁月'],
+  },
+  {
+    columnId: '125',
+    codePrefix: '125',
+    duration: 1800,
+    episodeCount: 12,
+    programType: 'documentary',
+    titles: ['东方纪实', '人文上海', '江南文脉', '城市考古', '海上非遗'],
+  },
+]
+
+const generatedProgramDefinitions: ProgramDefinition[] = generatedProgramSeries.flatMap((series) =>
+  series.titles.map((title, titleIndex) => ({
+    programId: `G${series.codePrefix}${String(titleIndex + 1).padStart(3, '0')}`,
+    programName: title,
+    columnId: series.columnId,
+    programType: series.programType,
+  })),
+)
+
+const getGeneratedColumnName = (columnId: string) =>
+  orchestrationDemoColumns.find((column) => column.columnId === columnId)?.columnName ?? '节目'
+
+const generatedProgramInstances: ProgramInstance[] = generatedProgramSeries.flatMap((series) =>
+  series.titles.flatMap((title, titleIndex) => {
+    const programId = `G${series.codePrefix}${String(titleIndex + 1).padStart(3, '0')}`
+    const columnName = getGeneratedColumnName(series.columnId)
+    return Array.from({ length: series.episodeCount }, (_, issueIndex) => {
+      const issueNo = String(issueIndex + 1).padStart(4, '0')
+      const displayIssue = issueIndex + 1
+      const instanceName = series.programType === 'drama'
+        ? `${columnName}：${title} 第${displayIssue}集`
+        : `${title} 第${displayIssue}期`
+
+      return {
+        instanceId: `GI${series.codePrefix}${String(titleIndex + 1).padStart(3, '0')}-${issueNo}`,
+        programId,
+        programCode: `88${series.codePrefix}${String(titleIndex + 1).padStart(3, '0')}${issueNo}`,
+        instanceName,
+        duration: series.duration,
+        adBreaks: buildInternalAdBreaks(series.duration, series.programType),
+        issueNo,
+      }
+    })
+  }),
+)
+
+export const orchestrationDemoProgramDefinitions: ProgramDefinition[] = [
+  ...seedProgramDefinitions,
+  ...generatedProgramDefinitions,
+]
+
+export const orchestrationDemoProgramInstances: ProgramInstance[] = [
+  ...seedProgramInstances,
+  ...generatedProgramInstances,
 ]
 
 const layoutSeeds: Array<Omit<LayoutSlot, 'startTime' | 'endTime'> & { startClock: string; endClock: string }> = [

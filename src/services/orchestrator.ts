@@ -95,7 +95,7 @@ const DEFAULT_CONFIG: OrchestratorConfig = {
   enableAutoRepair: true,
   maxGapItems: 10,
   planningConcurrency: 1,
-  planningLlmTimeoutMs: 8000,
+  planningLlmTimeoutMs: 20000,
 }
 
 const AD_INSERTION_PACING_MS = 3000
@@ -904,11 +904,22 @@ export class Orchestrator extends EventEmitter {
     return [
       {
         role: 'system',
-        content: '你是电视节目单编排助手。请只输出 JSON PlanCommand，用于描述全局编排策略，而不是直接输出节目单。',
+        content: [
+          '你是电视节目单编排助手。请只输出 JSON PlanCommand，用于描述全局编排策略，而不是直接输出节目单。',
+          '必须严格输出一个 JSON 对象，不要使用 Markdown，不要输出解释文字。',
+          'JSON 结构固定为：',
+          '{"action":"plan","reasoning":"...","data":{"strategy":{"target":"demo-orchestration","referencePriority":["layout","history","library"],"allowFiller":true,"sequentialPreference":true,"riskPreference":"balanced"},"initialGapCount":1,"estimatedSteps":1}}',
+          'riskPreference 只能是 conservative、balanced、aggressive 之一。',
+        ].join('\n'),
       },
       {
         role: 'user',
-        content: `频道: ${this.session!.channelId}\n日期: ${this.session!.date}\n待处理空窗数: ${gapCount}`,
+        content: [
+          `频道: ${this.session!.channelId}`,
+          `日期: ${this.session!.date}`,
+          `待处理空窗数: ${gapCount}`,
+          '请根据空窗数量返回一份全局策略。estimatedSteps 通常等于待处理空窗数。',
+        ].join('\n'),
       },
     ]
   }
@@ -1133,7 +1144,6 @@ export function getOrchestrator(
 export function resetOrchestrator(): void {
   globalOrchestrator = null
 }
-
 
 
 

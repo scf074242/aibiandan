@@ -98,7 +98,7 @@ export class CandidateService {
     const filtered = this.candidates
       .filter((candidate) => candidate.channelId === criteria.channelId)
       .filter((candidate) => allowedProgramIds.size === 0 || allowedProgramIds.has(candidate.programId))
-      .filter((candidate) => this.matchesDuration(candidate, criteria))
+      .filter((candidate) => this.matchesDuration(candidate, criteria, gap))
       .filter((candidate) => this.matchesProgramType(candidate, criteria.programTypePreference))
       .filter((candidate) => this.matchesUsageState(candidate, criteria.excludeUsed))
     const keywordMatched = criteria.searchKeywords?.length
@@ -159,6 +159,7 @@ export class CandidateService {
     keyword: string,
     allowedProgramIds: Set<string> | null,
   ): ProgramCandidate[] {
+    const keywordProgramTypes = this.inferProgramTypesFromKeyword(keyword)
     return this.candidates
       .filter((candidate) => candidate.channelId === params.channelId)
       .filter((candidate) => !allowedProgramIds || allowedProgramIds.has(candidate.programId))
@@ -166,9 +167,25 @@ export class CandidateService {
       .filter((candidate) => {
         if (!keyword) return true
         const haystack = `${candidate.programName} ${candidate.programCode}`.toLowerCase()
-        return haystack.includes(keyword)
+        return haystack.includes(keyword) || keywordProgramTypes.includes(candidate.programType)
       })
       .filter((candidate) => !this.isScheduledProgramCode(candidate.programCode))
+  }
+
+  private inferProgramTypesFromKeyword(keyword: string): string[] {
+    const normalized = keyword.replace(/\s+/g, '').toLowerCase()
+    if (!normalized) return []
+    const mappings: Array<{ pattern: RegExp; types: string[] }> = [
+      { pattern: /(新闻|快报|联播)/, types: ['news'] },
+      { pattern: /(资讯|专题|预告|导视|垫片|直播|现场|服务|提醒|交通|天气|社区|发布会|展会|eye)/i, types: ['news_magazine'] },
+      { pattern: /(电视剧|剧场|短剧|连续剧|影视)/, types: ['drama'] },
+      { pattern: /(综艺|娱乐)/, types: ['entertainment'] },
+      { pattern: /(健康|养生)/, types: ['health'] },
+      { pattern: /(评论|访谈|观察|观点|民生)/, types: ['commentary'] },
+      { pattern: /(少儿|动画|亲子|儿童)/, types: ['kids'] },
+      { pattern: /(纪录片|纪实)/, types: ['documentary'] },
+    ]
+    return mappings.find((item) => item.pattern.test(normalized))?.types ?? []
   }
 
   private scoreCandidate(candidate: ProgramCandidate, gap: GapInfo, criteria: CandidateQueryCriteria): number {
@@ -515,9 +532,13 @@ export class CandidateService {
       })
   }
 
-  private matchesDuration(candidate: ProgramCandidate, criteria: CandidateQueryCriteria): boolean {
-    if (criteria.columnId) {
+  private matchesDuration(candidate: ProgramCandidate, criteria: CandidateQueryCriteria, gap?: GapInfo): boolean {
+    if (criteria.columnId && gap?.constraints.fixedEnd) {
       return true
+    }
+
+    if (criteria.columnId) {
+      return candidate.duration <= criteria.expectedDuration.max
     }
 
     return (

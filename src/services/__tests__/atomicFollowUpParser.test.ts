@@ -48,6 +48,59 @@ describe('AtomicFollowUpParser', () => {
     expect(result?.slots.targetTime).toBeUndefined()
   })
 
+  it('能从中文时间补参中提取目标时间', () => {
+    const parser = new AtomicFollowUpParser()
+
+    const result = parser.parse({
+      pendingContext: createPendingInsertContext(),
+      userInput: '两点半',
+    })
+
+    expect(result?.slots.targetTime).toBe('14:30:00')
+    expect(result?.slots.targetTimeHint).toBe('两点半')
+  })
+
+  it('能从中文数字移动补参中提取偏移量', () => {
+    const parser = new AtomicFollowUpParser()
+
+    const result = parser.parse({
+      pendingContext: {
+        ...createPendingInsertContext(),
+        action: 'move',
+        slots: {
+          targetTime: '09:00:00',
+        },
+        missingFields: ['offset'],
+      },
+      userInput: '后移五分钟',
+    })
+
+    expect(result?.slots.direction).toBe('forward')
+    expect(result?.slots.offsetSeconds).toBe(300)
+  })
+
+  it('移动上下文里能把节目名补参保留下来继续等待时间', () => {
+    const parser = new AtomicFollowUpParser()
+
+    const result = parser.parse({
+      pendingContext: {
+        ...createPendingInsertContext(),
+        action: 'move',
+        originalUserInput: '后移30分钟',
+        collectedUserInput: '后移30分钟',
+        slots: {
+          direction: 'forward',
+          offsetSeconds: 1800,
+        },
+        missingFields: ['target_time'],
+      },
+      userInput: '看东方',
+    })
+
+    expect(result?.slots.programName).toBe('看东方')
+    expect(result?.slots.offsetSeconds).toBeUndefined()
+  })
+
   it('能从更口语化的插入补参里提取节目名', () => {
     const parser = new AtomicFollowUpParser()
 

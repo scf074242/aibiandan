@@ -649,6 +649,9 @@ const confirmLayoutDraft = () => {
 
   const draft = pendingLayoutDraft.value
   const mode = pendingLayoutDraftMode.value
+  if (bridgeSessionId.value) {
+    openClawBridge.clearLayoutDraft(bridgeSessionId.value)
+  }
   clearPendingLayoutDraftState()
   emit('orchestrateRequested', {
     userInput: '按当前版面开始编排',
@@ -884,6 +887,11 @@ const applyRuntimeDecision = async (decision: RuntimeDecision) => {
         draft: decision.draft,
         feasibilityReport: decision.feasibilityReport,
       })
+      return
+    case 'layout_draft_clear':
+      appendRuntimeFeedback(decision.feedback)
+      pendingAtomicContext.value = null
+      clearPendingLayoutDraftState()
       return
     case 'layout_commit':
       appendRuntimeFeedback(decision.feedback)
@@ -1612,7 +1620,7 @@ const startStepProgress = (content: string) => {
       label: '耗时',
       elapsedMs,
     }
-  }, 10)
+  }, 250)
   activeStepTimerIds.add(timerId)
 
   let completed = false
@@ -1680,7 +1688,7 @@ const startPersistentThinking = (
       label: '耗时',
       elapsedMs: Math.max(0, Date.now() - startedAtMs),
     }
-  }, 10)
+  }, 250)
   activeStepTimerIds.add(timerId)
 
   return {
@@ -4155,4 +4163,3 @@ onBeforeUnmount(() => {
   }
 }
 </style>
-

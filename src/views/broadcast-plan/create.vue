@@ -451,9 +451,15 @@
             </h3>
             <p class="ai-sidebar-subtitle">围绕当前频道、日期和时间空窗，直接补齐、调整或校验编单。</p>
           </div>
-          <el-button link @click="aiSidebarVisible = false">
-            <el-icon><Close /></el-icon>
-          </el-button>
+          <div class="ai-sidebar-actions">
+            <el-button link @click="llmConfigVisible = true">
+              <el-icon><Setting /></el-icon>
+              LLM配置
+            </el-button>
+            <el-button link @click="aiSidebarVisible = false">
+              <el-icon><Close /></el-icon>
+            </el-button>
+          </div>
         </div>
         <div class="ai-sidebar-content">
           <ChatPanel
@@ -492,6 +498,9 @@
       @save="handleSaveItem"
       @delete="handleDeleteItemById"
     />
+    <el-dialog v-model="llmConfigVisible" title="LLM 配置" width="520px" destroy-on-close>
+      <LLMConfigPanel />
+    </el-dialog>
   </div>
 </template>
 
@@ -508,7 +517,8 @@ import {
   View,
   WarningFilled,
   ChatDotRound,
-  Close
+  Close,
+  Setting,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import ScheduleItemDialog from './components/ScheduleItemDialog.vue'
@@ -570,6 +580,7 @@ import { getOpenClawHostAdapter } from '@/services/openclaw/openClawHostAdapter'
 import type { GapProcessingStatus } from '@/types/orchestration'
 import type { LayoutDraft, ValidationReport, ValidationIssue } from '@/types/orchestration'
 import ChatPanel from '@/components/dialogue/ChatPanel.vue'
+import LLMConfigPanel from '@/components/llm/LLMConfigPanel.vue'
 import OpenClawDemoPanel from './components/OpenClawDemoPanel.vue'
 import { getScheduleValidationService } from '@/services/scheduleValidationService'
 
@@ -731,6 +742,9 @@ const registerItemRowRef = (itemId: string, element: Element | { $el?: Element }
       : null
 
   if (resolvedElement) {
+    if (itemRowRefs.get(itemId) === resolvedElement) {
+      return
+    }
     itemRowRefs.set(itemId, resolvedElement)
     itemRowRefVersion.value += 1
     return
@@ -1067,6 +1081,7 @@ const showLayoutReference = ref(false)
 
 // AI 编排相关状态
 const aiSidebarVisible = ref(true)
+const llmConfigVisible = ref(false)
 const atomicCapabilities = getAtomicCapabilities()
 const scheduleCommandBus = getScheduleCommandBus()
 const manualCommandAdapter = getManualCommandAdapter()
@@ -2801,6 +2816,12 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 14px;
   align-items: start;
+}
+
+.ai-sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .ai-sidebar-heading {

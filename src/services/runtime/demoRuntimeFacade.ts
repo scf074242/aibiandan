@@ -23,6 +23,10 @@ import { getLayoutDraftValidator } from '@/services/layoutDraftValidator'
 import { getLayoutDraftFeasibilityService } from '@/services/layoutDraftFeasibilityService'
 import { getLayoutIntentRecognizer, type LayoutIntentRecognition } from '@/services/layoutIntentRecognizer'
 import { getLayoutAnalysisService } from '@/services/layoutAnalysisService'
+import { getAtomicCapabilities } from '@/services/atomicCapabilities'
+import { parseAtomicOffset } from '@/services/atomicOffsetParser'
+import { parseAtomicClockExpression, parseAtomicTimeRange } from '@/services/atomicTimeParser'
+import { looksLikeProgramSchedulingRequest } from '@/services/schedulingIntentHeuristics'
 import { getOrchestrationDemoLayout } from '@/mock/orchestrationMock'
 import {
   buildPendingAtomicContextFromClarification,
@@ -44,7 +48,7 @@ export type RuntimeDetailMap = Record<string, unknown>
 export type RuntimeProcessType = 'planning' | 'selection' | 'execution' | 'validation' | 'general'
 export interface RuntimeFeedback { content: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; processType: RuntimeProcessType; processTypeLabel: string }
 export interface RuntimeScheduleItem { id: string; programCode?: string; programName?: string; startTime: string; endTime: string; duration?: number; programType?: string }
-export interface RuntimePendingCommand { command: OrchestrationCommand; summary: string; successMessage?: string; reasoning: string; details?: RuntimeDetailMap }
+export interface RuntimePendingCommand { command: OrchestrationCommand; commands?: OrchestrationCommand[]; summary: string; successMessage?: string; reasoning: string; details?: RuntimeDetailMap }
 export interface RuntimePendingTargetSelection { action: 'delete' | 'move' | 'replace'; summary: string; reasoning: string; targetTime: string; programName?: string; candidates: RuntimeScheduleItem[]; selectedItemId: string | null; moveConfig?: { direction: 'forward' | 'backward'; offsetSeconds: number }; replaceProgramName?: string; resolutionDetails?: RuntimeDetailMap }
 export interface RuntimeInsertRecommendationCandidate { candidateId: string; programName: string; programCode: string; duration: number; programType: string; score: number; confidence: number; reasonTags: string[] }
 export interface RuntimePendingInsertRecommendation { action: 'insert'; summary: string; reasoning: string; originalUserInput: string; collectedUserInput: string; targetTime: string; rawProgramText?: string; semanticLabel?: string; programTypeHint?: string; recommendedCandidates: RuntimeInsertRecommendationCandidate[]; selectedCandidateId: string | null }
@@ -66,6 +70,7 @@ export type RuntimeDecision =
   | { kind: 'execute_command'; execution: RuntimeExecutionPlan }
   | { kind: 'orchestration'; feedback: RuntimeFeedback; orchestrationRequest: RuntimeOrchestrationRequest }
   | { kind: 'layout_draft'; feedback: RuntimeFeedback; draft: LayoutDraft; feasibilityReport: DraftFeasibilityReport; orchestrationMode: Extract<TaskMode, 'full_generate' | 'partial_generate'> }
+  | { kind: 'layout_draft_clear'; feedback: RuntimeFeedback }
   | { kind: 'layout_commit'; feedback: RuntimeFeedback; draft: LayoutDraft; orchestrationRequest: RuntimeOrchestrationRequest }
 
 type RuntimeMicroEditBuildResult = { command: OrchestrationCommand | null; message?: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; successMessage?: string; pendingTargetSelection?: RuntimePendingTargetSelection; pendingInsertRecommendation?: RuntimePendingInsertRecommendation }
@@ -75,6 +80,10 @@ type RuntimePendingAtomicContinuationResult =
 
 const DEFAULT_BROADCAST_WINDOW = { start: '06:00:00', end: '23:59:59' }
 const toClockText = (value: string) => value.includes('T') ? (value.split('T')[1]?.slice(0, 8) ?? value) : (value.length === 5 ? `${value}:00` : value)
+const clockToSeconds = (value: string) => {
+  const [hours = '0', minutes = '0', seconds = '0'] = toClockText(value).split(':')
+  return Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds)
+}
 const normalizeDateTime = (date: string, timeText: string) => timeText.includes('T') ? (timeText.includes('+08:00') ? timeText : `${timeText}+08:00`) : `${date}T${toClockText(timeText)}+08:00`
 const formatLocalDateTime = (ts: number) => { const d = new Date(ts); return `${d.getFullYear()}-${`${d.getMonth() + 1}`.padStart(2, '0')}-${`${d.getDate()}`.padStart(2, '0')}T${`${d.getHours()}`.padStart(2, '0')}:${`${d.getMinutes()}`.padStart(2, '0')}:${`${d.getSeconds()}`.padStart(2, '0')}+08:00` }
 const offsetDateTime = (dateTime: string, offsetSeconds: number) => formatLocalDateTime(new Date(dateTime).getTime() + offsetSeconds * 1000)
@@ -108,6 +117,19 @@ export class DemoRuntimeFacade {
   private readonly layoutAnalysisService = getLayoutAnalysisService(this.llmClient)
 
   async submitInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision> {
+    const initialFastSystemClassification = this.classifyFastSystemIntent(input.userInput)
+    if (initialFastSystemClassification) {
+      if (initialFastSystemClassification.mode === 'validate_only') {
+        return this.buildValidationDecision(initialFastSystemClassification, input)
+      }
+      if (initialFastSystemClassification.mode === 'repair_only') {
+        return this.buildRepairAnalysisDecision(initialFastSystemClassification, input)
+      }
+      if (initialFastSystemClassification.mode === 'layout_analysis') {
+        return await this.buildLayoutAnalysisDecision(initialFastSystemClassification, input)
+      }
+    }
+
     let effectiveInput = input
     const pendingAtomicContextContinuation = await this.tryContinuePendingAtomicContext(input)
     if (pendingAtomicContextContinuation) {
@@ -118,8 +140,27 @@ export class DemoRuntimeFacade {
     const pendingAtomicDecision = await this.tryContinuePendingAtomicClarification(effectiveInput)
     if (pendingAtomicDecision) return pendingAtomicDecision
 
+    const layoutDraftClearDecision = this.tryClearLayoutDraft(effectiveInput)
+    if (layoutDraftClearDecision) return layoutDraftClearDecision
+
+    const batchRangeDecision = this.tryHandleBatchRangeInstruction(effectiveInput)
+    if (batchRangeDecision) return batchRangeDecision
+
     const atomicDecision = await this.tryHandleAtomicInstruction(effectiveInput)
     if (atomicDecision) return atomicDecision
+
+    const fastSystemClassification = this.classifyFastSystemIntent(effectiveInput.userInput)
+    if (fastSystemClassification) {
+      if (fastSystemClassification.mode === 'validate_only') {
+        return this.buildValidationDecision(fastSystemClassification, effectiveInput)
+      }
+      if (fastSystemClassification.mode === 'repair_only') {
+        return this.buildRepairAnalysisDecision(fastSystemClassification, effectiveInput)
+      }
+      if (fastSystemClassification.mode === 'layout_analysis') {
+        return await this.buildLayoutAnalysisDecision(fastSystemClassification, effectiveInput)
+      }
+    }
 
     const layoutRecognition = await this.layoutIntentRecognizer.recognize({
       scheduleState: effectiveInput.scheduleState,
@@ -246,8 +287,103 @@ export class DemoRuntimeFacade {
   }
 
   async executePendingCommand(input: RuntimeExecutePendingCommandInput): Promise<RuntimeExecutedResult> {
+    if (input.pendingCommand.commands?.length) {
+      if (input.pendingCommand.details?.actionType === 'batch_move') {
+        return this.executeBatchMovePendingCommand(input)
+      }
+      const result = await this.scheduleCommandBus.executeBatch(input.pendingCommand.commands, { scheduleDate: input.scheduleDate, channelId: input.channelId })
+      return {
+        success: result.success,
+        command: input.pendingCommand.command,
+        message: result.success ? (input.pendingCommand.successMessage || result.message) : (result.error || result.message),
+        error: result.error,
+        summary: input.pendingCommand.summary,
+        thinking: result.success ? '批量命令已执行完成。' : '批量命令执行失败，未能完成本次修改。',
+        explanation: input.pendingCommand.reasoning,
+        details: input.pendingCommand.details,
+        data: result.data,
+        affectedTimeRanges: result.affectedTimeRanges,
+        validationReport: result.validationReport,
+        validationSummary: buildValidationSummary(result.validationReport),
+      }
+    }
     const result = await this.scheduleCommandBus.execute(input.pendingCommand.command, { scheduleDate: input.scheduleDate, channelId: input.channelId })
     return { success: result.success, command: input.pendingCommand.command, message: result.success ? (input.pendingCommand.successMessage || result.message) : (result.error || result.message), error: result.error, summary: input.pendingCommand.summary, thinking: result.success ? '命令已执行完成。' : '命令执行失败，未能完成本次修改。', explanation: input.pendingCommand.reasoning, details: input.pendingCommand.details, data: result.data, affectedTimeRanges: result.affectedTimeRanges, validationReport: result.validationReport, validationSummary: buildValidationSummary(result.validationReport) }
+  }
+
+  private async executeBatchMovePendingCommand(input: RuntimeExecutePendingCommandInput): Promise<RuntimeExecutedResult> {
+    const commands = input.pendingCommand.commands?.filter((command): command is MoveCommand => command.action === 'move') ?? []
+    if (commands.length === 0) {
+      return {
+        success: false,
+        command: input.pendingCommand.command,
+        message: '批量平移缺少可执行命令。',
+        error: 'missing_batch_move_commands',
+        summary: input.pendingCommand.summary,
+        thinking: '批量平移执行前没有找到逐条移动命令。',
+        explanation: input.pendingCommand.reasoning,
+        details: input.pendingCommand.details,
+      }
+    }
+
+    const atomicCapabilities = getAtomicCapabilities()
+    const allItems = atomicCapabilities.getAllItems()
+    const moveByItemId = new Map(commands.map((command) => [command.data.itemId, command]))
+    const affectedTimeRanges: { start: string; end: string }[] = []
+    const updatedItems = allItems.map((item) => {
+      const command = moveByItemId.get(item.id)
+      if (!command) return item
+      const durationSeconds = item.duration ?? Math.max(0, (new Date(item.endTime).getTime() - new Date(item.startTime).getTime()) / 1000)
+      const newStartMs = new Date(command.data.newStartTime).getTime()
+      const newEndTime = formatLocalDateTime(newStartMs + durationSeconds * 1000)
+      affectedTimeRanges.push({ start: item.startTime, end: item.endTime })
+      affectedTimeRanges.push({ start: command.data.newStartTime, end: newEndTime })
+      return {
+        ...item,
+        startTime: command.data.newStartTime,
+        endTime: newEndTime,
+      }
+    })
+
+    const missingIds = commands
+      .map((command) => command.data.itemId)
+      .filter((itemId) => !allItems.some((item) => item.id === itemId))
+    if (missingIds.length > 0) {
+      return {
+        success: false,
+        command: input.pendingCommand.command,
+        message: `批量平移失败，找不到 ${missingIds.length} 条节目。`,
+        error: `missing_items:${missingIds.join(',')}`,
+        summary: input.pendingCommand.summary,
+        thinking: '确认执行时节目单上下文已变化，预演中的部分节目不存在。',
+        explanation: input.pendingCommand.reasoning,
+        details: {
+          ...(input.pendingCommand.details ?? {}),
+          missingIds,
+        },
+      }
+    }
+
+    const result = await atomicCapabilities.replaceAllItems(updatedItems)
+    const validationReport = this.scheduleCommandBus.validate({ scheduleDate: input.scheduleDate, channelId: input.channelId })
+
+    return {
+      success: result.success,
+      command: input.pendingCommand.command,
+      message: result.success ? (input.pendingCommand.successMessage || `已完成 ${commands.length} 条节目的批量平移。`) : (result.error || '批量平移执行失败。'),
+      error: result.error,
+      summary: input.pendingCommand.summary,
+      thinking: result.success ? '已按预演文件一次性写回批量平移结果。' : '批量平移写回失败，节目单未完成更新。',
+      explanation: input.pendingCommand.reasoning,
+      details: input.pendingCommand.details,
+      data: {
+        ...(result.data ?? {}),
+        commandCount: commands.length,
+      },
+      affectedTimeRanges,
+      validationReport,
+      validationSummary: buildValidationSummary(validationReport),
+    }
   }
 
   private isConfidentLayoutIntent(recognition: LayoutIntentRecognition): boolean { return recognition.mode !== 'clarify' && recognition.mode !== 'atomic_fallback' && recognition.confidence >= 0.72 }
@@ -769,13 +905,13 @@ export class DemoRuntimeFacade {
     if (!this.shouldAttemptAtomicInstruction(input.userInput)) return null
     const context = buildDialogueContext({ scheduleState: input.scheduleState, userInput: input.userInput, currentSchedule: input.currentSchedule })
     const recognizedIntent = await this.intentRecognizer.recognize(context)
-    const recognizedAction = this.asRuntimeAtomicAction(recognizedIntent.type)
+    const recognizedAction = this.asRuntimeAtomicAction(recognizedIntent?.type)
     const detectedAction = this.detectAtomicAction(input.userInput.replace(/\s+/g, ''))
     const fallbackIntent = detectedAction
       ? {
           type: detectedAction,
           confidence: 0.55,
-          reasoning: recognizedIntent.reasoning || `fallback:${detectedAction}`,
+          reasoning: recognizedIntent?.reasoning || `fallback:${detectedAction}`,
         } satisfies MicroEditIntent
       : null
     const intent = recognizedAction ? recognizedIntent : fallbackIntent
@@ -792,24 +928,337 @@ export class DemoRuntimeFacade {
 
   private shouldAttemptAtomicInstruction(userInput: string): boolean {
     const normalized = userInput.replace(/\s+/g, '')
-    if (!/(插入|插个|插一|添加节目|安排节目|来个|来一条|来一档|放个|上个|删除|删掉|移除|移动|后移|前移|顺延|延后|提前|替换|换成|替换成|替换为|改成|改为)/.test(normalized)) return false
-    const hasExactTime = /(\d{1,2})(点半|点(\d{1,2})分?|[:：]\d{2})/.test(normalized)
+    if (!/(插入|插个|插一|加一条|加一档|加个|加一段|加一些|添加节目|安排节目|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)|删除|删掉|移除|去掉|撤掉|拿掉|移动|后移|前移|顺延|延后|提前|往后挪|往前挪|替换|换成|换掉|替换成|替换为|改成|改为)/.test(normalized)) return false
+    const hasExactTime = Boolean(parseAtomicClockExpression(normalized))
+    const hasExplicitAtomicVerb = /(插入|插个|插一|加一条|加一档|加个|加一段|加一些|添加节目|添加|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)|删除|删掉|移除|去掉|撤掉|拿掉|移动|后移|前移|顺延|延后|提前|往后挪|往前挪|替换|换成|换掉|替换成|替换为|改成|改为)/.test(normalized)
+    const hasStrongAtomicVerb = /(插入|插个|插一|添加节目|添加|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)|删除|删掉|移除|去掉|撤掉|拿掉|移动|后移|前移|顺延|延后|提前|往后挪|往前挪|替换|换成|换掉|替换成|替换为|改成|改为)/.test(normalized)
+    const hasSchedulingDeliverableCue = /(轮播单|直播单|播单|节目单|编排单|串联单|排单|版面|一版|一份)/.test(normalized)
+    const hasRelativeInsertAnchor = Boolean(this.extractRelativeInsertAnchor(userInput))
+    if (hasRelativeInsertAnchor) return true
+    if (looksLikeProgramSchedulingRequest(userInput) && !hasExactTime && !hasStrongAtomicVerb) {
+      return false
+    }
+    if (
+      looksLikeProgramSchedulingRequest(userInput)
+      && !hasExplicitAtomicVerb
+      && (!hasExactTime || hasSchedulingDeliverableCue)
+    ) {
+      return false
+    }
     const hasQuotedTitle = /《[^》]+》/.test(normalized)
     const hasBroadScope = /(全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全部|都|统一|整体)/.test(normalized)
     const hasLayoutCue = /(版面|栏目|剧场|时段)/.test(normalized)
-    return !((hasBroadScope || hasLayoutCue) && !hasExactTime && !hasQuotedTitle)
+    const detectedAction = this.detectAtomicAction(normalized)
+    const hasNonInsertProgramAnchor = Boolean(
+      detectedAction && detectedAction !== 'insert' && this.extractAtomicProgramHint(userInput, detectedAction),
+    )
+    return !((hasBroadScope || hasLayoutCue) && !hasExactTime && !hasQuotedTitle && !hasNonInsertProgramAnchor)
   }
 
   private shouldRouteToLayoutDraftRefine(userInput: string): boolean {
     const normalized = userInput.replace(/\s+/g, '')
     const hasDraftCue = /(草案|版面草案|当前版面|版面|时段)/.test(normalized)
-    const hasDraftRefineVerb = /(删除|删掉|移除|去掉|替换|换成|替换成|替换为|改成|改为|调整为)/.test(normalized)
-    return hasDraftCue && hasDraftRefineVerb
+    const hasDraftRefineVerb = /(删除|删掉|移除|去掉|撤掉|拿掉|替换|换成|换掉|替换成|替换为|改成|改为|调整为)/.test(normalized)
+    const hasTimeOrDaypartCue = Boolean(parseAtomicClockExpression(normalized))
+      || /(全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨)/.test(normalized)
+    return hasDraftRefineVerb && (hasDraftCue || hasTimeOrDaypartCue)
+  }
+
+  private tryHandleBatchRangeInstruction(input: RuntimeSubmitInput): RuntimeDecision | null {
+    const normalized = input.userInput.replace(/\s+/g, '')
+    const action = this.detectBatchRangeAction(normalized)
+    if (!action) return null
+
+    const range = this.extractBatchRange(normalized)
+    if (!range) return null
+
+    const matchedItems = this.findItemsFullyInsideRange(input.currentSchedule, range)
+    const offset = action === 'move'
+      ? this.extractAtomicOffsetSlot(input.userInput)
+      : null
+
+    if (action === 'move' && !offset) {
+      return {
+        kind: 'message',
+        feedback: createFeedback(
+          `已识别为 ${range.start}-${range.end} 范围内节目的批量平移，但还缺少移动幅度，例如“整体后移5分钟”。`,
+          'execution',
+          '批量预演',
+          {
+            explanation: '范围批量平移必须先生成可确认的预演，不能拆成不可见的单条移动命令。',
+            details: {
+              actionType: 'batch_move',
+              scope: range,
+              matchedCount: matchedItems.length,
+              matchedItems: matchedItems.map(asRuntimeItem),
+              isExecutable: false,
+              validation: {
+                status: 'missing_offset',
+                message: '缺少整体前移或后移的时间幅度。',
+              },
+            },
+          },
+        ),
+      }
+    }
+
+    if (matchedItems.length === 0) {
+      return {
+        kind: 'message',
+        feedback: createFeedback(
+          `当前 ${range.start}-${range.end} 范围内没有可批量${action === 'delete' ? '删除' : '平移'}的已编排节目。`,
+          'execution',
+          '批量预演',
+          {
+            explanation: '范围批量命令已被识别，但命中集合为空，因此不能生成可执行批量处理文件。',
+            details: {
+              actionType: action === 'delete' ? 'batch_delete' : 'batch_move',
+              scope: range,
+              matchedCount: 0,
+              matchedItems: [],
+              isExecutable: false,
+              validation: {
+                status: 'empty_scope',
+                message: '当前范围内没有命中的节目。',
+              },
+            },
+          },
+        ),
+      }
+    }
+
+    const operations = action === 'delete'
+      ? matchedItems.map((item) => ({
+          action: 'delete',
+          itemId: item.id,
+          programName: item.programName,
+          sourceTimeRange: { start: toClockText(item.startTime), end: toClockText(item.endTime) },
+        }))
+      : matchedItems.map((item) => {
+          const shift = offset!.direction === 'backward' ? -Math.abs(offset!.offsetSeconds) : Math.abs(offset!.offsetSeconds)
+          const newStartTime = offsetDateTime(normalizeDateTime(input.scheduleState.date, item.startTime), shift)
+          const newEndTime = offsetDateTime(normalizeDateTime(input.scheduleState.date, item.endTime), shift)
+          return {
+            action: 'move',
+            itemId: item.id,
+            programName: item.programName,
+            sourceTimeRange: { start: toClockText(item.startTime), end: toClockText(item.endTime) },
+            proposedTimeRange: { start: toClockText(newStartTime), end: toClockText(newEndTime) },
+          }
+        })
+    const commands: OrchestrationCommand[] = action === 'delete'
+      ? matchedItems.map((item): DeleteCommand => ({
+          action: 'delete',
+          reasoning: '范围批量删除预演确认后执行。',
+          data: { itemId: item.id },
+        }))
+      : matchedItems.map((item): MoveCommand => {
+          const shift = offset!.direction === 'backward' ? -Math.abs(offset!.offsetSeconds) : Math.abs(offset!.offsetSeconds)
+          const newStartTime = offsetDateTime(normalizeDateTime(input.scheduleState.date, item.startTime), shift)
+          return {
+            action: 'move',
+            reasoning: '范围批量平移预演确认后执行。',
+            data: { itemId: item.id, newStartTime },
+          }
+        })
+
+    if (action === 'move') {
+      const validation = this.validateBatchMovePreview(input, range, matchedItems, operations)
+      if (!validation.ok) {
+        return {
+          kind: 'message',
+          feedback: createFeedback(
+            `已生成 ${range.start}-${range.end} 的批量平移预演，但发现 ${validation.issues.length} 个风险，暂不能执行。`,
+            'execution',
+            '批量预演',
+            {
+              explanation: '批量平移在确认前必须通过范围外冲突和播出边界校验。',
+              details: {
+                fileId: `batch-preview:${input.scheduleState.date}:${range.start}-${range.end}:${action}`,
+                actionType: 'batch_move',
+                scope: range,
+                matchedCount: matchedItems.length,
+                matchedItems: matchedItems.map(asRuntimeItem),
+                operations,
+                previewSummary: {
+                  affectedRange: range,
+                  actionText: `整体${offset!.direction === 'backward' ? '前移' : '后移'}${this.formatAtomicOffset(offset!.offsetSeconds)}`,
+                  operationCount: operations.length,
+                },
+                validation: {
+                  status: 'blocked',
+                  issues: validation.issues,
+                },
+                isExecutable: false,
+              },
+            },
+          ),
+        }
+      }
+    }
+
+    const actionText = action === 'delete'
+      ? '批量删除'
+      : `整体${offset!.direction === 'backward' ? '前移' : '后移'}${this.formatAtomicOffset(offset!.offsetSeconds)}`
+
+    const pendingCommand: RuntimePendingCommand = {
+      command: commands[0]!,
+      commands,
+      summary: `${range.start}-${range.end} ${actionText} ${matchedItems.length} 条节目`,
+      successMessage: `已完成 ${range.start}-${range.end} ${matchedItems.length} 条节目的${actionText}。`,
+      reasoning: '范围批量命令需要先预演并确认，再统一执行。',
+      details: {
+        fileId: `batch-preview:${input.scheduleState.date}:${range.start}-${range.end}:${action}`,
+        actionType: action === 'delete' ? 'batch_delete' : 'batch_move',
+        scope: range,
+        matchedCount: matchedItems.length,
+        matchedItems: matchedItems.map(asRuntimeItem),
+        operations,
+        previewSummary: {
+          affectedRange: range,
+          actionText,
+          operationCount: operations.length,
+        },
+        validation: {
+          status: 'passed',
+          message: '预演校验通过，等待用户确认后执行。',
+        },
+        isExecutable: true,
+      },
+    }
+
+    return {
+      kind: 'pending_command',
+      feedback: createFeedback(
+        `已生成 ${range.start}-${range.end} 的${actionText}预演，命中 ${matchedItems.length} 条节目。请确认后执行批量处理。`,
+        'execution',
+        '待确认修改',
+        {
+          explanation: '范围批量命令需要先展示批量处理文件和预演结果，避免静默修改多条节目。',
+          details: pendingCommand.details,
+        },
+      ),
+      pendingCommand,
+    }
+  }
+
+  private validateBatchMovePreview(
+    input: RuntimeSubmitInput,
+    range: { start: string; end: string },
+    matchedItems: RuntimeScheduleItem[],
+    operations: Array<Record<string, unknown>>,
+  ): { ok: boolean; issues: string[] } {
+    const issues: string[] = []
+    const window = resolveBroadcastWindow(input.scheduleState.channelId, input.scheduleState.date)
+    const windowStart = clockToSeconds(window.start)
+    const windowEnd = clockToSeconds(window.end)
+    const matchedIds = new Set(matchedItems.map((item) => item.id))
+    const proposedRanges = operations
+      .map((operation) => ({
+        itemId: String(operation.itemId ?? ''),
+        programName: String(operation.programName ?? ''),
+        range: operation.proposedTimeRange as { start: string; end: string } | undefined,
+      }))
+      .filter((item): item is { itemId: string; programName: string; range: { start: string; end: string } } => Boolean(item.range))
+
+    for (const proposed of proposedRanges) {
+      const proposedStart = clockToSeconds(proposed.range.start)
+      const proposedEnd = clockToSeconds(proposed.range.end)
+      if (proposedStart < windowStart || proposedEnd > windowEnd || proposedEnd <= proposedStart) {
+        issues.push(`《${proposed.programName || proposed.itemId}》平移后超出编单时间范围 ${window.start}-${window.end}`)
+      }
+    }
+
+    for (let index = 0; index < proposedRanges.length; index += 1) {
+      const current = proposedRanges[index]!
+      const currentStart = clockToSeconds(current.range.start)
+      const currentEnd = clockToSeconds(current.range.end)
+      for (const next of proposedRanges.slice(index + 1)) {
+        if (currentStart < clockToSeconds(next.range.end) && currentEnd > clockToSeconds(next.range.start)) {
+          issues.push(`批量平移后《${current.programName || current.itemId}》与《${next.programName || next.itemId}》发生重叠`)
+        }
+      }
+    }
+
+    const outsideItems = input.currentSchedule.filter((item) => !matchedIds.has(item.id))
+    for (const proposed of proposedRanges) {
+      const proposedStart = clockToSeconds(proposed.range.start)
+      const proposedEnd = clockToSeconds(proposed.range.end)
+      for (const item of outsideItems) {
+        const outsideStart = clockToSeconds(item.startTime)
+        const outsideEnd = clockToSeconds(item.endTime)
+        if (proposedStart < outsideEnd && proposedEnd > outsideStart) {
+          issues.push(`批量平移后《${proposed.programName || proposed.itemId}》将与范围外节目《${item.programName || item.id}》重叠`)
+        }
+      }
+    }
+
+    return { ok: issues.length === 0, issues }
+  }
+
+  private detectBatchRangeAction(normalized: string): 'delete' | 'move' | null {
+    const hasBatchCue = /(全部|所有|整体|批量|一并|一起|整段|范围内|这段里|这段的|已排节目|已编排|现有.*节目)/.test(normalized)
+    if (!hasBatchCue) return null
+    if (/(删除|删掉|移除|去掉|撤掉|拿掉|清掉|清除)/.test(normalized)) return 'delete'
+    if (/(整体)?(后移|前移|顺延|延后|提前|往后挪|往前挪|平移|移动)/.test(normalized)) return 'move'
+    return null
+  }
+
+  private extractBatchRange(normalized: string): { start: string; end: string } | null {
+    const explicitRange = this.extractExplicitAtomicTimeRange(normalized)
+    if (explicitRange) return explicitRange
+
+    if (/上午/.test(normalized)) return { start: '06:00:00', end: '12:00:00' }
+    if (/(中午|午间)/.test(normalized)) return { start: '12:00:00', end: '14:00:00' }
+    if (/下午/.test(normalized)) return { start: '13:00:00', end: '18:00:00' }
+    if (/(晚间|晚上|夜间)/.test(normalized)) return { start: '18:00:00', end: '23:00:00' }
+    if (/(全天|整天|全日)/.test(normalized)) return { start: '06:00:00', end: '23:59:59' }
+    return null
+  }
+
+  private findItemsFullyInsideRange(
+    items: RuntimeScheduleItem[],
+    range: { start: string; end: string },
+  ): RuntimeScheduleItem[] {
+    const rangeStart = clockToSeconds(range.start)
+    const rangeEnd = clockToSeconds(range.end)
+    return [...items]
+      .filter((item) => {
+        const itemStart = clockToSeconds(item.startTime)
+        const itemEnd = clockToSeconds(item.endTime)
+        return itemStart >= rangeStart && itemEnd <= rangeEnd
+      })
+      .sort((a, b) => clockToSeconds(a.startTime) - clockToSeconds(b.startTime))
+  }
+
+  private tryClearLayoutDraft(input: RuntimeSubmitInput): RuntimeDecision | null {
+    if (!input.currentLayoutDraft) return null
+    const normalized = input.userInput.replace(/\s+/g, '')
+    const isClearDraftIntent = /^(不要|不用|取消|清掉|清除|删除|删掉|放弃|先不用|先不要)(这个|当前|刚才的|原来的)?(版面草案|草案|版面)$/.test(normalized)
+      || /^(这个|当前|刚才的|原来的)?(版面草案|草案|版面)(不要了|不用了|取消掉|删掉|删除|清掉|清除|放弃)$/.test(normalized)
+      || /^(先)?不用这个版面(了)?$/.test(normalized)
+    if (!isClearDraftIntent) return null
+    return {
+      kind: 'layout_draft_clear',
+      feedback: createFeedback(
+        '已取消当前待确认版面草案。你可以重新描述版面需求，或继续上传/选择新的版面参考。',
+        'planning',
+        '已取消',
+        {
+          explanation: '用户明确表示放弃当前待确认版面草案，因此清空草案上下文，不再进入编排确认或草案微调。',
+          details: {
+            draftId: input.currentLayoutDraft.id,
+            layoutSource: input.currentLayoutDraft.source,
+            coverage: input.currentLayoutDraft.coverage,
+          },
+        },
+      ),
+    }
   }
 
   private shouldBypassPendingAtomicClarification(userInput: string): boolean {
     const normalized = userInput.replace(/\s+/g, '')
-    if (/(按这个版面开始编排|按该版面开始编排|确认版面|采用这个版面|用这个版面编排)/.test(normalized)) return true
+    if (/(按这个版面开始编排|按该版面开始编排|确认版面|采用这个版面|用这个版面编排|就按这个版面|就按这个草案|按这个版面|按这个草案|照这个版面|照这个草案|这个版面可以|这个草案可以|可以开始编排|没问题开始编排)/.test(normalized)) return true
     if (/(帮我全天编排|全天编排|整天编排|帮我填充全天节目|填充全天节目|补齐当前所有空窗|补齐当前空窗|补齐空窗|补齐当前所有空缺|补齐当前空缺)/.test(normalized)) return true
     if (/(版面|栏目|剧场|时段|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全天|整天|全日)/.test(normalized)) return true
     return /(\d{1,2}(?::\d{2})?点?.*)(到|至|-).*(\d{1,2}(?::\d{2})?点?)/.test(normalized)
@@ -820,8 +1269,46 @@ export class DemoRuntimeFacade {
     return this.mergePendingCollectedInput(pending.collectedUserInput, userInput)
   }
 
-  private asRuntimeAtomicAction(type: MicroEditIntent['type']): RuntimeAtomicAction | null {
-    return ['insert', 'move', 'delete', 'replace'].includes(type) ? type as RuntimeAtomicAction : null
+  private asRuntimeAtomicAction(type?: MicroEditIntent['type']): RuntimeAtomicAction | null {
+    return type && ['insert', 'move', 'delete', 'replace'].includes(type) ? type as RuntimeAtomicAction : null
+  }
+
+  private classifyFastSystemIntent(userInput: string): TaskClassification | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const hasScheduleTarget = /(节目单|编排单|串联单|播单|编单|单子|这张单|这份单|排期|播出表|当前编排|节目编排|版面编排|当前版面|编排情况|当前)/.test(normalized)
+    const hasProblemCue = /(问题|异常|冲突|风险|重叠|撞播|空窗|空缺|断档|缺口|时长不对|非法时间|负时长|素材缺失|素材为空|未关联)/.test(normalized)
+    const hasFillCue = /(补齐|补上|补掉|补排|填充|填满|排满).*(空窗|空缺|缺口|节目)|(空窗|空缺|缺口).*(补齐|补上|补掉|补排|填充|填满|排满)/.test(normalized)
+
+    const hasAnalysisVerb = /(分析|评估|研判|诊断|梳理|复盘|报告|编辑视角|业务分析|业务视角|编导视角)/.test(normalized)
+    const hasAnalysisTarget = /(当前版面|版面编排|当前编排|当前节目单|节目单编排|节目编排|编排情况|播单|编排单|串联单)/.test(normalized)
+    if (hasAnalysisVerb && hasAnalysisTarget) {
+      return {
+        mode: 'layout_analysis',
+        confidence: 0.94,
+        reasoning: '规则快速识别到用户需要分析当前编排，应直接进入编排分析流程。',
+      }
+    }
+
+    const hasRepairVerb = /(修复|修正|改正|解决|处理问题|自动修复|修一下|修一修|修掉|消掉|处理掉)/.test(normalized)
+    const hasRepairTarget = /(节目单|编排|版面|播单|单子|问题|异常|冲突|风险|重叠|撞播|空窗|空缺|断档|缺口)/.test(normalized)
+    if (hasRepairVerb && hasRepairTarget) {
+      return {
+        mode: 'validate_only',
+        confidence: 0.88,
+        reasoning: '规则快速识别到用户提出修复诉求，当前流程先输出问题分析结果。',
+      }
+    }
+
+    const hasValidationVerb = /(校验|检查|验证|核对|审查|体检|查看问题|看看问题|有没有问题|有无问题|有没有.*(问题|空窗|空缺|冲突|重叠|风险|断档)|有无.*(问题|空窗|空缺|冲突|重叠|风险|断档)|找出问题|排查问题|查问题|查一下|查查|看看|看一下|冲突|风险|重叠|断档)/.test(normalized)
+    if (!hasFillCue && hasValidationVerb && (hasScheduleTarget || hasProblemCue)) {
+      return {
+        mode: 'validate_only',
+        confidence: 0.9,
+        reasoning: '规则快速识别到用户需要校验或检查当前编排问题。',
+      }
+    }
+
+    return null
   }
 
   private buildPendingAtomicClarification(input: RuntimeSubmitInput, reasoning: string, preferredAction?: RuntimeAtomicAction | null): RuntimePendingAtomicClarification {
@@ -1079,10 +1566,10 @@ export class DemoRuntimeFacade {
   }
 
   private detectAtomicAction(normalized: string): RuntimeAtomicAction | null {
-    if (/(后移|前移|移动|顺一下|挪一下|顺延|延后|提前)/.test(normalized)) return 'move'
-    if (/(删除|删掉|移除)/.test(normalized)) return 'delete'
+    if (/(后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前)/.test(normalized)) return 'move'
+    if (/(删除|删掉|移除|去掉|撤掉|拿掉)/.test(normalized)) return 'delete'
     if (/(替换|换成|替换成|替换为|换掉|改掉|改成|改为)/.test(normalized)) return 'replace'
-    if (/(插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/.test(normalized)) return 'insert'
+    if (/(插入|插个|插一|加一条|加一档|加个|加一段|加一些|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选))/.test(normalized)) return 'insert'
     return null
   }
 
@@ -1126,27 +1613,10 @@ export class DemoRuntimeFacade {
   }
 
   private extractAtomicTimeSlot(userInput: string): { targetTime: string; targetTimeHint: string } | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    const patterns = [
-      /(\d{1,2})[:：](\d{2})/,
-      /(\d{1,2})点半/,
-      /(\d{1,2})点(?:(\d{1,2})分?)?/,
-    ]
-
-    for (const pattern of patterns) {
-      const match = pattern.exec(normalized)
-      if (!match?.[0]) continue
-      const targetTime = pattern.source.includes('点半')
-        ? this.normalizeAtomicTime(`${match[1]}:30`)
-        : this.normalizeAtomicTime(`${match[1]}:${match[2] ?? '00'}`)
-      if (!targetTime) continue
-      return {
-        targetTime,
-        targetTimeHint: match[0],
-      }
-    }
-
-    return null
+    const parsed = parseAtomicClockExpression(userInput)
+    return parsed
+      ? { targetTime: parsed.targetTime, targetTimeHint: parsed.matchedText }
+      : null
   }
 
   private extractAtomicTimeHint(userInput: string): string | undefined {
@@ -1166,16 +1636,17 @@ export class DemoRuntimeFacade {
     switch (action) {
       case 'insert':
         return this.extractAtomicProgramHintFromPatterns(userInput, [
-          /(?:插入节目|插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)(.+)$/u,
+          /(?:插入节目|插入|插个|插一|加一条|加一档|加个|加一段|加一些|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)(?:的)?)(.+)$/u,
         ])
       case 'delete':
         return this.extractAtomicProgramHintFromPatterns(userInput, [
-          /(?:删除|删掉|移除|去掉)(.+)$/u,
-          /把(.+?)(?:删除|删掉|移除|去掉)/u,
+          /(?:删除|删掉|移除|去掉|撤掉|拿掉)(.+)$/u,
+          /把(.+?)(?:删除|删掉|移除|去掉|撤掉|拿掉)/u,
         ])
       case 'move':
         return this.extractAtomicProgramHintFromPatterns(userInput, [
-          /把(.+?)(?:后移|前移|移动|顺一下|挪一下|顺延|延后|提前)/u,
+          /把(.+?)(?:后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前)/u,
+          /(.+?)(?:后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前)/u,
         ])
       case 'replace':
         return this.extractAtomicProgramHintFromPatterns(userInput, [
@@ -1205,36 +1676,13 @@ export class DemoRuntimeFacade {
   }
 
   private extractAtomicOffsetSlot(userInput: string): { direction: 'forward' | 'backward'; offsetSeconds: number } | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    const hourOffsetMatch =
-      normalized.match(/([前后])移(\d{1,2})小时/) ||
-      normalized.match(/(提前|延后|顺延)(\d{1,2})小时/)
-    if (hourOffsetMatch) {
-      const directionToken = hourOffsetMatch[1] ?? ''
-      return {
-        direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
-        offsetSeconds: Number(hourOffsetMatch[2] ?? '1') * 3600,
-      }
-    }
-
-    const minuteOffsetMatch =
-      normalized.match(/([前后])移(\d{1,2})分钟/) ||
-      normalized.match(/(提前|延后|顺延)(\d{1,2})分钟/)
-    if (minuteOffsetMatch) {
-      const directionToken = minuteOffsetMatch[1] ?? ''
-      return {
-        direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
-        offsetSeconds: Number(minuteOffsetMatch[2] ?? '1') * 60,
-      }
-    }
-
-    return null
+    return parseAtomicOffset(userInput)
   }
 
   private extractAtomicDirectionHint(userInput: string): 'forward' | 'backward' | undefined {
     const normalized = userInput.replace(/\s+/g, '')
-    if (/(前移|提前)/.test(normalized)) return 'backward'
-    if (/(后移|延后|顺延)/.test(normalized)) return 'forward'
+    if (/(前移|提前|往前挪)/.test(normalized)) return 'backward'
+    if (/(后移|延后|顺延|往后挪|顺一下|顺一个|挪一下)/.test(normalized)) return 'forward'
     return undefined
   }
 
@@ -1253,9 +1701,12 @@ export class DemoRuntimeFacade {
     const normalized = value
       .replace(/^[，,：:\s]+/, '')
       .replace(/^(?:把|将|在|于)\s*/u, '')
+      .replace(/^(?:当前节目单|当前编排|当前播单|当前编单|左侧节目单|左侧表|表里|单子里|节目单里|编排单里|播单里|已排节目|已经排的)(?:中|里|里的|内|上)?(?:的)?/u, '')
+      .replace(/^(?:按节目名|按名称|名字叫|名称叫)(?:的)?/u, '')
       .replace(/^(?:\d{1,2}(?:[:：]\d{2})?|\d{1,2}点(?:半|\d{1,2}分?)?)(?:的)?/u, '')
       .replace(/[，。！？!?]/g, '')
-      .replace(/^(?:的|节目名|节目|栏目|我要|我想要|想要|我想看|想看|要看|来个|来一条|来一档|放个|上个|这条|那条|这个|那个)+/, '')
+      .replace(/^(?:的|节目名|节目|栏目|我要|我想要|想要|我想看|想看|要看|加一条|加一档|加个|加一段|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐|找|查|有没有适合的?|有没有可用的?|有没有候选的?|这条|那条|这个|那个)+/, '')
+      .replace(/(?:候选节目|候选|可选节目|可用节目)$/u, '')
       .replace(/(?:吧|呀|啊|呢)$/u, '')
       .trim()
 
@@ -1393,10 +1844,13 @@ export class DemoRuntimeFacade {
       draft.warnings = warnings
       sourceLabel = '已按你的要求更新当前版面草案。'
     } else {
+      const referenceLayout = !ignoreExistingLayout && !input.currentLayoutDraft
+        ? this.resolveExistingLayoutDraft(input, userIntent, false)
+        : null
       const existing = !ignoreExistingLayout && input.currentLayoutDraft
         ? { draft: input.currentLayoutDraft, label: '已基于当前版面草案按你的要求生成调整后的版面草案。' }
-        : this.shouldPreferReferenceLayout(classification, ignoreExistingLayout)
-          ? this.resolveExistingLayoutDraft(input, userIntent, false)
+        : referenceLayout?.draft.source === 'uploaded' || this.shouldPreferReferenceLayout(classification, ignoreExistingLayout)
+          ? referenceLayout
           : null
       if (existing && this.shouldApplyIntentOnExistingDraft(classification, existing.draft)) {
         const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, currentDraft: existing.draft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
@@ -1406,7 +1860,9 @@ export class DemoRuntimeFacade {
         warnings = dedupeStrings([...specValidation.warnings.map((item) => item.message), ...specValidation.errors.filter((issue) => issue.code === 'segment_gap').map((item) => item.message)])
         draft = this.layoutDraftCompiler.compile(spec, { channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userIntent, source: existing.draft.source, version: (existing.draft.version ?? 1) + 1 })
         draft.warnings = warnings
-        sourceLabel = '已基于当前版面参考按你的要求生成调整后的版面草案。'
+        sourceLabel = existing.draft === input.currentLayoutDraft
+          ? '已按你的要求更新当前版面草案。'
+          : '已基于当前版面参考按你的要求生成调整后的版面草案。'
       } else if (existing) {
         draft = existing.draft
         warnings = existing.draft.warnings ?? []
@@ -1433,6 +1889,7 @@ export class DemoRuntimeFacade {
 
   private commitLayoutDraft(input: RuntimeSubmitInput, classification: TaskClassification): RuntimeDecision {
     const draft = input.currentLayoutDraft
+      ?? this.resolveExistingLayoutDraft(input, input.userInput, false)?.draft
     if (!draft) return { kind: 'message', feedback: createFeedback('当前还没有可确认的版面草案，请先生成或导入版面后再开始编排。', 'planning', '版面草案', { explanation: classification.reasoning }) }
     const mode = this.resolvePreferredOrchestrationMode(input)
     return { kind: 'layout_commit', feedback: createFeedback('已确认当前版面草案，准备按该版面开始编排。', 'planning', '版面草案确认', { explanation: classification.reasoning, details: { draftId: draft.id, layoutSource: draft.source } }), draft, orchestrationRequest: { userInput: input.userInput, mode, reasoning: classification.reasoning, layoutDraft: draft } }
@@ -1588,7 +2045,12 @@ export class DemoRuntimeFacade {
     const reasoning = intent.reasoning || fallbackReasoning
 
     if (intent.type === 'insert') {
-      const params = await this.paramExtractor.extractInsertParams(context)
+      let params = await this.paramExtractor.extractInsertParams(context)
+      if (!params) {
+        const programAnchored = this.resolveProgramAnchoredInsertParams(input, reasoning)
+        if (programAnchored.result) return programAnchored.result
+        params = programAnchored.params
+      }
       if (!params) return { command: null, message: '未能识别插入目标时间，请重新描述。', explanation: reasoning }
       const columnId = findSlotColumnIdByTime(input.scheduleState.channelId, input.scheduleState.date, normalizeDateTime(input.scheduleState.date, params.targetTime))
       const { candidates, searchMode } = await this.searchInsertCandidates({
@@ -1669,11 +2131,31 @@ export class DemoRuntimeFacade {
     }
 
     if (intent.type === 'delete' || intent.type === 'move' || intent.type === 'replace') {
-      const params = intent.type === 'delete'
+      let params = intent.type === 'delete'
         ? await this.paramExtractor.extractDeleteParams(context)
         : intent.type === 'move'
           ? await this.paramExtractor.extractMoveParams(context)
           : await this.paramExtractor.extractReplaceParams(context)
+      const rangeAnchored = this.resolveTimeRangeAnchoredAtomicParams(input, intent.type, reasoning)
+      if (rangeAnchored.result) return rangeAnchored.result
+      if (rangeAnchored.params) {
+        params = rangeAnchored.params
+      }
+      if (!params) {
+        const adjacentAnchored = this.resolveAdjacentProgramAnchoredAtomicParams(input, intent.type, reasoning)
+        if (adjacentAnchored.result) return adjacentAnchored.result
+        params = adjacentAnchored.params
+      }
+      if (!params) {
+        const ordinalAnchored = this.resolveOrdinalAnchoredAtomicParams(input, intent.type, reasoning)
+        if (ordinalAnchored.result) return ordinalAnchored.result
+        params = ordinalAnchored.params
+      }
+      if (!params) {
+        const programAnchored = this.resolveProgramAnchoredAtomicParams(input, intent.type, reasoning)
+        if (programAnchored.result) return programAnchored.result
+        params = programAnchored.params
+      }
       if (!params) return { command: null, message: '未能识别目标时间，请重新描述。', explanation: reasoning }
       const targetTime = params.targetTime
       const deleteParams = intent.type === 'delete' ? params as DeleteParams : null
@@ -1728,6 +2210,757 @@ export class DemoRuntimeFacade {
     }
 
     return { command: null, message: '当前指令不属于已支持的原子修改能力。', explanation: reasoning }
+  }
+
+  private resolveOrdinalAnchoredAtomicParams(
+    input: RuntimeSubmitInput,
+    action: 'delete' | 'move' | 'replace',
+    reasoning: string,
+  ): { params: DeleteParams | MoveParams | ReplaceParams | null; result?: RuntimeMicroEditBuildResult } {
+    const selected = this.findScheduleItemByOrdinalReference(input.userInput, input.currentSchedule)
+    if (!selected) return { params: null }
+
+    const targetTime = toClockText(selected.startTime)
+    if (action === 'delete') {
+      return {
+        params: {
+          targetTime,
+          programName: selected.programName,
+        },
+      }
+    }
+
+    if (action === 'move') {
+      const offset = this.extractAtomicOffsetSlot(input.userInput)
+      if (!offset) {
+        return {
+          params: null,
+          result: {
+            command: null,
+            message: `已经定位到第${this.describeScheduleOrdinal(selected, input.currentSchedule)}条《${selected.programName || selected.id}》，还需要补充移动幅度，例如“后移30分钟”。`,
+            explanation: reasoning,
+            details: {
+              matchedItem: asRuntimeItem(selected),
+              targetTime,
+              targetResolution: { matchedBy: ['schedule_ordinal'] },
+            },
+          },
+        }
+      }
+      return {
+        params: {
+          targetTime,
+          direction: offset.direction,
+          offsetSeconds: offset.offsetSeconds,
+        },
+      }
+    }
+
+    const replacementProgramName = this.extractAtomicReplacementProgramName(input.userInput)
+    if (!replacementProgramName) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `已经定位到第${this.describeScheduleOrdinal(selected, input.currentSchedule)}条《${selected.programName || selected.id}》，还需要补充要替换成的新节目。`,
+          explanation: reasoning,
+          details: {
+            matchedItem: asRuntimeItem(selected),
+            targetTime,
+            targetResolution: { matchedBy: ['schedule_ordinal'] },
+          },
+        },
+      }
+    }
+
+    return {
+      params: {
+        targetTime,
+        programName: replacementProgramName,
+      },
+    }
+  }
+
+  private resolveTimeRangeAnchoredAtomicParams(
+    input: RuntimeSubmitInput,
+    action: 'delete' | 'move' | 'replace',
+    reasoning: string,
+  ): { params: DeleteParams | MoveParams | ReplaceParams | null; result?: RuntimeMicroEditBuildResult } {
+    const range = this.extractExplicitAtomicTimeRange(input.userInput)
+    if (!range) return { params: null }
+
+    const matchedItems = input.currentSchedule.filter((item) => (
+      toClockText(item.startTime) === range.start
+      && toClockText(item.endTime) === range.end
+    ))
+
+    if (matchedItems.length === 0) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `没有找到与 ${range.start}-${range.end} 完整匹配的节目，请补充准确时间点或节目名称。`,
+          explanation: reasoning,
+          details: {
+            targetTimeRange: range,
+            targetResolution: { matchedBy: ['exact_time_range'] },
+          },
+        },
+      }
+    }
+
+    const moveConfig = action === 'move'
+      ? this.extractAtomicOffsetSlot(input.userInput) ?? undefined
+      : undefined
+    const replaceProgramName = action === 'replace'
+      ? this.extractAtomicReplacementProgramName(input.userInput)
+      : undefined
+
+    if (action === 'move' && !moveConfig) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `已经定位到 ${range.start}-${range.end} 这段节目，还需要补充移动幅度，例如“后移30分钟”。`,
+          explanation: reasoning,
+          details: {
+            targetTimeRange: range,
+            targetCandidates: matchedItems.map(asRuntimeItem),
+            targetResolution: { matchedBy: ['exact_time_range'] },
+          },
+        },
+      }
+    }
+
+    if (action === 'replace' && !replaceProgramName) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `已经定位到 ${range.start}-${range.end} 这段节目，还需要补充要替换成的新节目。`,
+          explanation: reasoning,
+          details: {
+            targetTimeRange: range,
+            targetCandidates: matchedItems.map(asRuntimeItem),
+            targetResolution: { matchedBy: ['exact_time_range'] },
+          },
+        },
+      }
+    }
+
+    if (matchedItems.length > 1) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `当前节目单中存在多个 ${range.start}-${range.end} 候选，请确认要${action === 'delete' ? '删除' : action === 'move' ? '移动' : '替换'}哪一条。`,
+          explanation: reasoning,
+          pendingTargetSelection: {
+            action,
+            summary: `请选择 ${range.start}-${range.end} 要${action === 'delete' ? '删除' : action === 'move' ? '移动' : '替换'}的节目`,
+            reasoning,
+            targetTime: range.start,
+            candidates: matchedItems.map(asRuntimeItem),
+            selectedItemId: null,
+            moveConfig,
+            replaceProgramName,
+            resolutionDetails: {
+              targetTimeRange: range,
+              targetResolution: { matchedBy: ['exact_time_range'] },
+            },
+          },
+        },
+      }
+    }
+
+    const selected = matchedItems[0]!
+    if (action === 'delete') {
+      return {
+        params: {
+          targetTime: range.start,
+          programName: selected.programName,
+        },
+      }
+    }
+
+    if (action === 'move') {
+      return {
+        params: {
+          targetTime: range.start,
+          direction: moveConfig!.direction,
+          offsetSeconds: moveConfig!.offsetSeconds,
+        },
+      }
+    }
+
+    return {
+      params: {
+        targetTime: range.start,
+        programName: replaceProgramName!,
+      },
+    }
+  }
+
+  private extractExplicitAtomicTimeRange(userInput: string): { start: string; end: string } | null {
+    return parseAtomicTimeRange(userInput)
+  }
+
+  private resolveAdjacentProgramAnchoredAtomicParams(
+    input: RuntimeSubmitInput,
+    action: 'delete' | 'move' | 'replace',
+    reasoning: string,
+  ): { params: DeleteParams | MoveParams | ReplaceParams | null; result?: RuntimeMicroEditBuildResult } {
+    const reference = this.extractAdjacentProgramReference(input.userInput)
+    if (!reference) return { params: null }
+
+    const anchorItems = this.findScheduleItemsByProgramName(input.currentSchedule, reference.programName)
+    if (anchorItems.length === 0) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `没有在当前节目单中找到相邻锚点《${reference.programName}》，请补充准确时间点或节目名称。`,
+          explanation: reasoning,
+          details: {
+            anchorProgramName: reference.programName,
+            adjacentDirection: reference.direction,
+            targetResolution: { matchedBy: ['adjacent_program_anchor'] },
+          },
+        },
+      }
+    }
+
+    const sortedItems = this.sortScheduleItemsForOrdinal(input.currentSchedule)
+    const adjacentTargets = anchorItems
+      .map((anchor) => this.findAdjacentScheduleItem(anchor, sortedItems, reference.direction))
+      .filter((item): item is RuntimeScheduleItem => Boolean(item))
+    const uniqueTargets = Array.from(new Map(adjacentTargets.map((item) => [item.id, item])).values())
+
+    if (uniqueTargets.length === 0) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `《${reference.programName}》${reference.direction === 'before' ? '前面' : '后面'}没有可操作的相邻节目，请重新描述目标。`,
+          explanation: reasoning,
+          details: {
+            anchorProgramName: reference.programName,
+            adjacentDirection: reference.direction,
+            anchorCandidates: anchorItems.map(asRuntimeItem),
+            targetResolution: { matchedBy: ['adjacent_program_anchor'] },
+          },
+        },
+      }
+    }
+
+    const moveConfig = action === 'move'
+      ? this.extractAtomicOffsetSlot(input.userInput) ?? undefined
+      : undefined
+    const replaceProgramName = action === 'replace'
+      ? this.extractAtomicReplacementProgramName(input.userInput)
+      : undefined
+
+    if (action === 'move' && !moveConfig) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `已经定位到《${reference.programName}》${reference.direction === 'before' ? '前面' : '后面'}的节目，还需要补充移动幅度，例如“后移30分钟”。`,
+          explanation: reasoning,
+          details: {
+            anchorProgramName: reference.programName,
+            adjacentDirection: reference.direction,
+            targetCandidates: uniqueTargets.map(asRuntimeItem),
+            targetResolution: { matchedBy: ['adjacent_program_anchor'] },
+          },
+        },
+      }
+    }
+
+    if (action === 'replace' && !replaceProgramName) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `已经定位到《${reference.programName}》${reference.direction === 'before' ? '前面' : '后面'}的节目，还需要补充要替换成的新节目。`,
+          explanation: reasoning,
+          details: {
+            anchorProgramName: reference.programName,
+            adjacentDirection: reference.direction,
+            targetCandidates: uniqueTargets.map(asRuntimeItem),
+            targetResolution: { matchedBy: ['adjacent_program_anchor'] },
+          },
+        },
+      }
+    }
+
+    if (uniqueTargets.length > 1) {
+      const targetTime = toClockText(uniqueTargets[0]?.startTime ?? '')
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `当前节目单中存在多个《${reference.programName}》相邻候选，请确认要${action === 'delete' ? '删除' : action === 'move' ? '移动' : '替换'}哪一条。`,
+          explanation: reasoning,
+          pendingTargetSelection: {
+            action,
+            summary: `请选择要${action === 'delete' ? '删除' : action === 'move' ? '移动' : '替换'}的相邻节目`,
+            reasoning,
+            targetTime,
+            candidates: uniqueTargets.map(asRuntimeItem),
+            selectedItemId: null,
+            moveConfig,
+            replaceProgramName,
+            resolutionDetails: {
+              anchorProgramName: reference.programName,
+              adjacentDirection: reference.direction,
+              targetResolution: { matchedBy: ['adjacent_program_anchor'] },
+            },
+          },
+        },
+      }
+    }
+
+    const selected = uniqueTargets[0]!
+    const targetTime = toClockText(selected.startTime)
+    if (action === 'delete') {
+      return {
+        params: {
+          targetTime,
+          programName: selected.programName,
+        },
+      }
+    }
+
+    if (action === 'move') {
+      return {
+        params: {
+          targetTime,
+          direction: moveConfig!.direction,
+          offsetSeconds: moveConfig!.offsetSeconds,
+        },
+      }
+    }
+
+    return {
+      params: {
+        targetTime,
+        programName: replaceProgramName!,
+      },
+    }
+  }
+
+  private extractAdjacentProgramReference(userInput: string): { programName: string; direction: 'before' | 'after' } | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const relationPattern = '(前一条|后一条|前面那条|后面那条|前面的那条|后面的那条|前面那个节目|后面那个节目|前一个节目|后一个节目|上一条|下一条)'
+    const quoted = new RegExp(`《([^》]+)》(?:的)?${relationPattern}`, 'u').exec(normalized)
+    if (quoted?.[1] && quoted[2]) {
+      return {
+        programName: quoted[1].trim(),
+        direction: this.normalizeAdjacentDirection(quoted[2]),
+      }
+    }
+
+    const unquoted = new RegExp(`^(.+?)(?:的)?${relationPattern}`, 'u').exec(normalized)
+    if (!unquoted?.[1] || !unquoted[2]) return null
+
+    const programName = this.normalizeAdjacentProgramAnchorText(unquoted[1])
+    if (!programName) return null
+    return {
+      programName,
+      direction: this.normalizeAdjacentDirection(unquoted[2]),
+    }
+  }
+
+  private normalizeAdjacentDirection(token: string): 'before' | 'after' {
+    return /(前|上)/.test(token) ? 'before' : 'after'
+  }
+
+  private normalizeAdjacentProgramAnchorText(value: string): string | undefined {
+    const normalized = value
+      .replace(/^(?:把|将|在|于|对|给)?/u, '')
+      .replace(/^(?:删除|删掉|移除|去掉|撤掉|拿掉|移动|后移|前移|顺延|延后|提前|往后挪|往前挪|替换|换成|换掉|替换成|替换为|改成|改为)/u, '')
+      .replace(/^(?:当前节目单|当前编排|当前播单|当前编单|左侧节目单|左侧表|表里|单子里|节目单里|编排单里|播单里|已排节目|已经排的)(?:中|里|里的|内|上)?(?:的)?/u, '')
+      .replace(/[，。！？!?]/g, '')
+      .replace(/(?:节目|栏目)$/u, '')
+      .trim()
+    if (/^(?:最|第?[一二三四五六七八九十\d]+)$/.test(normalized)) return undefined
+    return normalized || undefined
+  }
+
+  private findAdjacentScheduleItem(anchor: RuntimeScheduleItem, sortedItems: RuntimeScheduleItem[], direction: 'before' | 'after'): RuntimeScheduleItem | null {
+    const index = sortedItems.findIndex((item) => item.id === anchor.id)
+    if (index < 0) return null
+    return direction === 'before'
+      ? sortedItems[index - 1] ?? null
+      : sortedItems[index + 1] ?? null
+  }
+
+  private findScheduleItemByOrdinalReference(userInput: string, items: RuntimeScheduleItem[]): RuntimeScheduleItem | null {
+    if (items.length === 0) return null
+    const normalized = userInput.replace(/\s+/g, '')
+    if (!/(第[一二三四五六七八九十\d]+(?:条|档|个|项|个节目|节目)?|[一二三四五六七八九十\d]+(?:条|档|个节目)|首条|第一条|第一个|最后一条|最后一个|末条|末尾|最末)/.test(normalized)) {
+      return null
+    }
+
+    const sortedItems = this.sortScheduleItemsForOrdinal(items)
+    if (/(最后一条|最后一个|末条|末尾|最末)/.test(normalized)) {
+      return sortedItems.at(-1) ?? null
+    }
+    if (/(首条|第一条|第一个)/.test(normalized)) {
+      return sortedItems[0] ?? null
+    }
+
+    const ordinalMatch =
+      normalized.match(/第([一二三四五六七八九十\d]+)(?:条|档|个|项|个节目|节目)?/)
+      || normalized.match(/([一二三四五六七八九十\d]+)(?:条|档|个节目)/)
+    const ordinalIndex = this.parseScheduleOrdinalIndex(ordinalMatch?.[1])
+    return ordinalIndex === null ? null : sortedItems[ordinalIndex] ?? null
+  }
+
+  private sortScheduleItemsForOrdinal(items: RuntimeScheduleItem[]): RuntimeScheduleItem[] {
+    return [...items].sort((a, b) => {
+      const byStart = toClockText(a.startTime).localeCompare(toClockText(b.startTime))
+      if (byStart !== 0) return byStart
+      return a.id.localeCompare(b.id)
+    })
+  }
+
+  private parseScheduleOrdinalIndex(token?: string): number | null {
+    if (!token) return null
+    if (/^\d+$/.test(token)) {
+      const numeric = Number(token)
+      return numeric > 0 ? numeric - 1 : null
+    }
+    const normalized = token.replace(/^第/, '')
+    const mapping: Record<string, number> = {
+      一: 0,
+      二: 1,
+      三: 2,
+      四: 3,
+      五: 4,
+      六: 5,
+      七: 6,
+      八: 7,
+      九: 8,
+      十: 9,
+    }
+    return Object.prototype.hasOwnProperty.call(mapping, normalized) ? mapping[normalized]! : null
+  }
+
+  private describeScheduleOrdinal(selected: RuntimeScheduleItem, items: RuntimeScheduleItem[]): string {
+    const index = this.sortScheduleItemsForOrdinal(items).findIndex((item) => item.id === selected.id)
+    return index >= 0 ? `${index + 1}` : ''
+  }
+
+  private resolveProgramAnchoredInsertParams(
+    input: RuntimeSubmitInput,
+    reasoning: string,
+  ): { params: InsertParams | null; result?: RuntimeMicroEditBuildResult } {
+    const anchor = this.extractRelativeInsertAnchor(input.userInput)
+    if (!anchor) return { params: null }
+
+    const candidates = this.findScheduleItemsByProgramName(input.currentSchedule, anchor.programName)
+    if (candidates.length === 0) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `没有在当前节目单中找到《${anchor.programName}》，请补充准确时间点或节目名称。`,
+          explanation: reasoning,
+          details: {
+            anchorProgramName: anchor.programName,
+            insertPosition: anchor.position,
+            rawProgramText: anchor.rawProgramText,
+            targetResolution: { matchedBy: ['program_name', 'relative_position'] },
+          },
+        },
+      }
+    }
+
+    if (candidates.length > 1) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `未能识别唯一插入位置：当前节目单中存在多个《${anchor.programName}》，请补充准确时间点或更具体节目名称。`,
+          explanation: reasoning,
+          details: {
+            anchorProgramName: anchor.programName,
+            candidateCount: candidates.length,
+            insertPosition: anchor.position,
+            rawProgramText: anchor.rawProgramText,
+            targetCandidates: candidates.map(asRuntimeItem),
+            targetResolution: { matchedBy: ['program_name', 'relative_position'] },
+          },
+        },
+      }
+    }
+
+    const selected = candidates[0]!
+    const targetTime = anchor.position === 'before'
+      ? toClockText(selected.startTime)
+      : toClockText(selected.endTime)
+    const programTypeHint = anchor.programTypeHint ?? this.inferInsertProgramTypeHint(anchor.rawProgramText)
+    return {
+      params: {
+        targetTime,
+        programName: anchor.insertProgramName,
+        rawProgramText: anchor.rawProgramText,
+        semanticLabel: anchor.semanticLabel ?? anchor.rawProgramText,
+        programTypeHint,
+      },
+    }
+  }
+
+  private resolveProgramAnchoredAtomicParams(
+    input: RuntimeSubmitInput,
+    action: 'delete' | 'move' | 'replace',
+    reasoning: string,
+  ): { params: DeleteParams | MoveParams | ReplaceParams | null; result?: RuntimeMicroEditBuildResult } {
+    if (!this.shouldResolveTargetByProgramAnchor(input.userInput)) {
+      return { params: null }
+    }
+
+    const programName = this.extractAtomicProgramHint(input.userInput, action)
+    if (!programName) {
+      return { params: null }
+    }
+
+    const candidates = this.findScheduleItemsByProgramName(input.currentSchedule, programName)
+    if (candidates.length === 0) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `没有在当前节目单中找到《${programName}》，请补充准确时间点或节目名称。`,
+          explanation: reasoning,
+          details: {
+            programName,
+            targetResolution: { matchedBy: ['program_name'] },
+          },
+        },
+      }
+    }
+
+    if (candidates.length > 1) {
+      const targetTime = candidates[0]?.startTime ?? ''
+      const moveConfig = action === 'move'
+        ? this.extractAtomicOffsetSlot(input.userInput) ?? undefined
+        : undefined
+      const replaceProgramName = action === 'replace'
+        ? this.extractAtomicReplacementProgramName(input.userInput)
+        : undefined
+      if (action === 'move' && !moveConfig) {
+        return {
+          params: null,
+          result: {
+            command: null,
+            message: `已经找到多个《${programName}》候选，还需要补充移动幅度。`,
+            explanation: reasoning,
+            details: { programName, candidateCount: candidates.length },
+          },
+        }
+      }
+      if (action === 'replace' && !replaceProgramName) {
+        return {
+          params: null,
+          result: {
+            command: null,
+            message: `已经找到多个《${programName}》候选，还需要补充要替换成的新节目。`,
+            explanation: reasoning,
+            details: { programName, candidateCount: candidates.length },
+          },
+        }
+      }
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `当前节目单中存在多个《${programName}》，请确认要${action === 'delete' ? '删除' : action === 'move' ? '移动' : '替换'}哪一条。`,
+          explanation: reasoning,
+          pendingTargetSelection: {
+            action,
+            summary: `请选择要${action === 'delete' ? '删除' : action === 'move' ? '移动' : '替换'}的《${programName}》`,
+            reasoning,
+            targetTime,
+            programName,
+            candidates: candidates.map(asRuntimeItem),
+            selectedItemId: null,
+            moveConfig,
+            replaceProgramName,
+            resolutionDetails: {
+              programName,
+              targetResolution: { matchedBy: ['program_name'] },
+            },
+          },
+        },
+      }
+    }
+
+    const selected = candidates[0]!
+    const targetTime = toClockText(selected.startTime)
+    if (action === 'delete') {
+      return {
+        params: {
+          targetTime,
+          programName,
+        },
+      }
+    }
+
+    if (action === 'move') {
+      const offset = this.extractAtomicOffsetSlot(input.userInput)
+      if (!offset) {
+        return {
+          params: null,
+          result: {
+            command: null,
+            message: `已经定位到 ${targetTime} 的《${selected.programName || programName}》，还需要补充移动幅度，例如“后移30分钟”。`,
+            explanation: reasoning,
+            details: {
+              matchedItem: asRuntimeItem(selected),
+              programName,
+              targetTime,
+            },
+          },
+        }
+      }
+      return {
+        params: {
+          targetTime,
+          direction: offset.direction,
+          offsetSeconds: offset.offsetSeconds,
+        },
+      }
+    }
+
+    const replacementProgramName = this.extractAtomicReplacementProgramName(input.userInput)
+    if (!replacementProgramName) {
+      return {
+        params: null,
+        result: {
+          command: null,
+          message: `已经定位到 ${targetTime} 的《${selected.programName || programName}》，还需要补充要替换成的新节目。`,
+          explanation: reasoning,
+          details: {
+            matchedItem: asRuntimeItem(selected),
+            programName,
+            targetTime,
+          },
+        },
+      }
+    }
+
+    return {
+      params: {
+        targetTime,
+        programName: replacementProgramName,
+      },
+    }
+  }
+
+  private shouldResolveTargetByProgramAnchor(userInput: string): boolean {
+    const normalized = userInput.replace(/\s+/g, '')
+    return /(当前节目单|当前编排|当前播单|当前编单|左侧节目单|左侧表|表里|单子里|节目单里|编排单里|播单里|已排节目|已经排的|按节目名|按名称|名字叫|名称叫)/.test(normalized)
+  }
+
+  private extractRelativeInsertAnchor(userInput: string): {
+    programName: string
+    position: 'before' | 'after'
+    rawProgramText?: string
+    semanticLabel?: string
+    programTypeHint?: string
+    insertProgramName?: string
+  } | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const quotedMatches = Array.from(normalized.matchAll(/《([^》]+)》/g))
+    const insertVerbPattern = '(?:插入|插个|插一|加一条|加一档|加个|加一段|加一些|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段)'
+    const positionPattern = '(后面|之后|前面|之前|后|前)'
+
+    if (quotedMatches.length > 0) {
+      const anchorMatch = quotedMatches[0]!
+      const token = anchorMatch[0]
+      const anchorName = anchorMatch[1]?.trim()
+      const afterQuote = normalized.slice((anchorMatch.index ?? 0) + token.length)
+      const relativeMatch = new RegExp(`^(?:的)?${positionPattern}${insertVerbPattern}?(.*)$`, 'u').exec(afterQuote)
+      if (anchorName && relativeMatch) {
+        const position = this.normalizeRelativeInsertPosition(relativeMatch[1])
+        const rawProgramText = this.normalizeAtomicProgramHint(relativeMatch[2])
+        const insertProgramName = quotedMatches[1]?.[1]?.trim()
+        return {
+          programName: anchorName,
+          position,
+          rawProgramText: insertProgramName ?? rawProgramText,
+          semanticLabel: rawProgramText,
+          programTypeHint: this.inferInsertProgramTypeHint(insertProgramName ?? rawProgramText),
+          insertProgramName,
+        }
+      }
+    }
+
+    if (!this.shouldResolveTargetByProgramAnchor(userInput)) return null
+
+    const unquotedMatch = new RegExp(`^(.+?)${positionPattern}${insertVerbPattern}(.+)$`, 'u').exec(normalized)
+    if (!unquotedMatch) return null
+
+    const anchorText = this.normalizeRelativeInsertAnchorText(unquotedMatch[1])
+    const rawProgramText = this.normalizeAtomicProgramHint(unquotedMatch[3])
+    if (!anchorText || !rawProgramText) return null
+
+    return {
+      programName: anchorText,
+      position: this.normalizeRelativeInsertPosition(unquotedMatch[2]),
+      rawProgramText,
+      semanticLabel: rawProgramText,
+      programTypeHint: this.inferInsertProgramTypeHint(rawProgramText),
+    }
+  }
+
+  private normalizeRelativeInsertPosition(token?: string): 'before' | 'after' {
+    return token && /前/.test(token) ? 'before' : 'after'
+  }
+
+  private normalizeRelativeInsertAnchorText(value?: string): string | undefined {
+    if (!value) return undefined
+    const normalized = value
+      .replace(/^(?:在|把|给|将|从|对)?/u, '')
+      .replace(/^(?:当前节目单|当前编排|当前播单|当前编单|左侧节目单|左侧表|表里|单子里|节目单里|编排单里|播单里|已排节目|已经排的)(?:中|里|里的|内|上)?(?:的)?/u, '')
+      .replace(/^(?:节目|栏目|名称叫|名字叫|按节目名|按名称)(?:的)?/u, '')
+      .replace(/[，。！？!?]/g, '')
+      .replace(/(?:节目|栏目)$/u, '')
+      .trim()
+    return normalized || undefined
+  }
+
+  private inferInsertProgramTypeHint(value?: string): string | undefined {
+    const normalized = value?.replace(/\s+/g, '') ?? ''
+    if (!normalized) return undefined
+    if (/(天气|服务|便民|生活|交通|出行|提醒|提示)/.test(normalized)) return 'news_magazine'
+    if (/(新闻|资讯|时政|民生|直播|现场|快讯|报道)/.test(normalized)) return 'news'
+    if (/(纪录|纪实|人文|历史|自然)/.test(normalized)) return 'documentary'
+    if (/(电视剧|剧场|连续剧|大剧)/.test(normalized)) return 'drama'
+    if (/(综艺|娱乐|访谈|脱口秀|真人秀)/.test(normalized)) return 'variety'
+    if (/(体育|赛事|球赛|运动)/.test(normalized)) return 'sports'
+    if (/(动画|少儿|儿童|卡通)/.test(normalized)) return 'kids'
+    return undefined
+  }
+
+  private findScheduleItemsByProgramName(items: RuntimeScheduleItem[], programName: string): RuntimeScheduleItem[] {
+    const normalizedHint = this.normalizeAtomicNameForMatch(programName)
+    if (!normalizedHint) return []
+    return items.filter((item) => {
+      const normalizedName = this.normalizeAtomicNameForMatch(item.programName || item.programCode || item.id)
+      return normalizedName.includes(normalizedHint) || normalizedHint.includes(normalizedName)
+    })
+  }
+
+  private normalizeAtomicNameForMatch(value: string): string {
+    return value
+      .trim()
+      .toLowerCase()
+      .replace(/[《》"'“”‘’、，。！？!?:：()（）[\]【】\-_.\s]/g, '')
+      .replace(/(?:节目|栏目|版)$/g, '')
   }
 
   private async buildReplaceDecisionForSelectedItem(selectedItem: RuntimeScheduleItem, replaceProgramName: string, channelId: string, date: string, pendingTargetSelection: RuntimePendingTargetSelection): Promise<RuntimeDecision> {
@@ -1837,4 +3070,3 @@ export const formatRuntimeOffset = (offsetSeconds: number) => offsetSeconds % 36
 
 let globalDemoRuntimeFacade: DemoRuntimeFacade | null = null
 export function getDemoRuntimeFacade(): DemoRuntimeFacade { if (!globalDemoRuntimeFacade) globalDemoRuntimeFacade = new DemoRuntimeFacade(); return globalDemoRuntimeFacade }
-

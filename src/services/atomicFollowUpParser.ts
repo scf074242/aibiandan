@@ -2,6 +2,8 @@ import type {
   RuntimeAtomicSlotBag,
   RuntimePendingAtomicContext,
 } from '@/services/runtime/pendingAtomicContext'
+import { parseAtomicOffset } from '@/services/atomicOffsetParser'
+import { parseAtomicClockExpression } from '@/services/atomicTimeParser'
 
 export interface AtomicFollowUpPatch {
   slots: Partial<RuntimeAtomicSlotBag>
@@ -62,60 +64,18 @@ export class AtomicFollowUpParser {
   }
 
   private extractTimePatch(userInput: string): { targetTime: string; targetTimeHint: string } | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    const patterns = [
-      /(\d{1,2})[:：](\d{2})/,
-      /(\d{1,2})点半/,
-      /(\d{1,2})点(?:(\d{1,2})分?)?/,
-    ]
-
-    for (const pattern of patterns) {
-      const match = pattern.exec(normalized)
-      if (!match?.[0]) continue
-      if (pattern.source.includes('点半')) {
-        const targetTime = this.normalizeTime(`${match[1]}:30`)
-        if (!targetTime) continue
-        return {
-          targetTime,
-          targetTimeHint: match[0],
+    const contextInput = `${userInput} 节目编排`
+    const parsed = parseAtomicClockExpression(contextInput)
+    return parsed
+      ? {
+          targetTime: parsed.targetTime,
+          targetTimeHint: parsed.matchedText,
         }
-      }
-
-      const targetTime = this.normalizeTime(`${match[1]}:${match[2] ?? '00'}`)
-      if (!targetTime) continue
-      return {
-        targetTime,
-        targetTimeHint: match[0],
-      }
-    }
-
-    return null
+      : null
   }
 
   private extractOffsetPatch(normalized: string): { direction: 'forward' | 'backward'; offsetSeconds: number } | null {
-    const hourOffsetMatch =
-      normalized.match(/([前后])移(\d{1,2})小时/) ||
-      normalized.match(/(提前|延后|顺延)(\d{1,2})小时/)
-    if (hourOffsetMatch) {
-      const directionToken = hourOffsetMatch[1] ?? ''
-      return {
-        direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
-        offsetSeconds: Number(hourOffsetMatch[2] ?? '1') * 3600,
-      }
-    }
-
-    const minuteOffsetMatch =
-      normalized.match(/([前后])移(\d{1,2})分钟/) ||
-      normalized.match(/(提前|延后|顺延)(\d{1,2})分钟/)
-    if (minuteOffsetMatch) {
-      const directionToken = minuteOffsetMatch[1] ?? ''
-      return {
-        direction: directionToken === '前' || directionToken === '提前' ? 'backward' : 'forward',
-        offsetSeconds: Number(minuteOffsetMatch[2] ?? '1') * 60,
-      }
-    }
-
-    return null
+    return parseAtomicOffset(normalized)
   }
 
   private extractReplacementProgramName(trimmed: string, normalized: string): string | undefined {
@@ -152,15 +112,6 @@ export class AtomicFollowUpParser {
     return normalized
   }
 
-  private normalizeTime(timeText: string): string | null {
-    const match = timeText.match(/(\d{1,2})[:：]?(\d{2})?(?:[:：]?(\d{2}))?/)
-    if (!match) return null
-
-    const hours = (match[1] ?? '09').padStart(2, '0')
-    const minutes = (match[2] ?? '00').padStart(2, '0')
-    const seconds = (match[3] ?? '00').padStart(2, '0')
-    return `${hours}:${minutes}:${seconds}`
-  }
 }
 
 let globalAtomicFollowUpParser: AtomicFollowUpParser | null = null

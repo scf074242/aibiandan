@@ -3,6 +3,29 @@ import { describe, expect, it } from 'vitest'
 import { OpenClawBridge } from '../openclaw/openClawBridge'
 
 describe('OpenClawBridge', () => {
+  it('clears the pending layout draft context after layout confirmation starts orchestration', async () => {
+    const bridge = new OpenClawBridge()
+
+    const result = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-clear-layout-draft',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '上午新闻',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+
+    expect(result.payload?.pendingLayoutDraft).toBeTruthy()
+    expect(result.payload?.layoutDraftMode).toBeTruthy()
+
+    const cleared = bridge.clearLayoutDraft(result.sessionId)
+    expect(cleared.pendingLayoutDraft).toBeUndefined()
+    expect(cleared.layoutDraftMode).toBeUndefined()
+    expect(bridge.getSessionState(result.sessionId)?.pendingLayoutDraft).toBeUndefined()
+  })
+
   it('会为桥接提交创建会话并返回结果', async () => {
     const bridge = new OpenClawBridge()
 
@@ -162,6 +185,216 @@ describe('OpenClawBridge', () => {
 
     expect(commit.payload?.lastDecisionKind).toBe('layout_commit')
     expect(commit.status).toBe('accepted')
+  })
+
+  it('确认草案后再校验会清空旧草案上下文并读取实际节目单状态', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-validate-after-commit',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '不参考版面，下午排入电视剧',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+
+    const commit = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-validate-after-commit',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '确认版面',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+    expect(commit.payload?.lastDecisionKind).toBe('layout_commit')
+
+    const validate = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-validate-after-commit',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '检查当前编排问题',
+      currentSchedule: [
+        {
+          id: 'item-1300',
+          programName: '下午剧场',
+          startTime: '13:00:00',
+          endTime: '14:00:00',
+          duration: 3600,
+          programType: 'drama',
+        },
+      ],
+      gapCount: 1,
+      history: [],
+    })
+
+    expect(validate.payload?.lastDecisionKind).toBe('message')
+    expect(validate.status).toBe('completed')
+    expect(validate.payload?.pendingLayoutDraft).toBeUndefined()
+    expect(validate.payload?.layoutDraftMode).toBeUndefined()
+    expect(validate.payload?.pendingAtomicContext).toBeNull()
+    expect(validate.summary).toContain('校验')
+  })
+
+  it('确认草案后继续补排会清空旧草案并基于实际节目单生成局部草案', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-partial-after-commit',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '上午新闻',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+
+    const commit = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-partial-after-commit',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '确认版面',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+    expect(commit.payload?.lastDecisionKind).toBe('layout_commit')
+    expect(commit.payload?.pendingLayoutDraft).toBeUndefined()
+
+    const partial = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-partial-after-commit',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '保留现有上午节目，下午补齐电视剧',
+      currentSchedule: [
+        {
+          id: 'item-0600',
+          programName: '东方快报',
+          startTime: '06:00:00',
+          endTime: '07:00:00',
+          duration: 3600,
+          programType: 'news',
+        },
+        {
+          id: 'item-0900',
+          programName: '看东方',
+          startTime: '09:00:00',
+          endTime: '10:00:00',
+          duration: 3600,
+          programType: 'news_magazine',
+        },
+      ],
+      gapCount: 1,
+      history: ['用户：上午新闻', '助手：已完成上午新闻编排。'],
+    })
+
+    expect(partial.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(partial.payload?.layoutDraftMode).toBe('partial_generate')
+    expect(partial.payload?.pendingLayoutDraft?.coverage).toEqual({
+      start: '13:00:00',
+      end: '18:00:00',
+    })
+    expect(partial.payload?.pendingLayoutDraft?.columns[0]?.defaultProgramType).toBe('drama')
+  })
+
+  it('确认草案后再分析会基于实际节目单返回分析消息，不重新生成草案', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-analysis-after-commit',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '不参考版面，下午排入电视剧',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+
+    const commit = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-analysis-after-commit',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '确认版面',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+    expect(commit.payload?.lastDecisionKind).toBe('layout_commit')
+
+    const analysis = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-analysis-after-commit',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '请分析当前版面编排，给我一份业务分析报告',
+      currentSchedule: [
+        {
+          id: 'item-1300',
+          programName: '下午剧场',
+          startTime: '13:00:00',
+          endTime: '14:00:00',
+          duration: 3600,
+          programType: 'drama',
+        },
+      ],
+      gapCount: 1,
+      history: [],
+    })
+
+    expect(analysis.payload?.lastDecisionKind).toBe('message')
+    expect(analysis.status).toBe('completed')
+    expect(analysis.payload?.pendingLayoutDraft).toBeUndefined()
+    expect(analysis.payload?.layoutDraftMode).toBeUndefined()
+    expect(analysis.summary).toContain('广电节目编辑视角')
+    expect(analysis.summary).toContain('节目单')
+  })
+
+  it('会在用户放弃当前草案时清空桥接会话里的待确认版面', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-clear-draft-by-text',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '帮我全天编排',
+      currentSchedule: [],
+      gapCount: 2,
+      history: [],
+    })
+
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(prepare.payload?.pendingLayoutDraft).toBeTruthy()
+
+    const cleared = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-clear-draft-by-text',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '不要这个草案',
+      currentSchedule: [],
+      gapCount: 2,
+      history: [],
+    })
+
+    expect(cleared.payload?.lastDecisionKind).toBe('layout_draft_clear')
+    expect(cleared.status).toBe('cancelled')
+    expect(cleared.payload?.pendingLayoutDraft).toBeUndefined()
+    expect(cleared.payload?.layoutDraftMode).toBeUndefined()
+    expect(cleared.payload?.pendingAtomicContext).toBeNull()
   })
 
   it('已有节目后发起全天编排也会直接进入版面草案阶段', async () => {

@@ -26,6 +26,17 @@ type ProgramTypeGuess = Pick<LayoutDraftSpecSegment, 'label' | 'programType' | '
 
 const normalizeInput = (value: string) => value.trim().toLowerCase().replace(/\s+/g, '')
 
+const DEFAULT_LABEL_BY_PROGRAM_TYPE: Record<string, string> = {
+  drama: '电视剧',
+  news: '新闻',
+  news_magazine: '资讯',
+  commentary: '评论',
+  health: '健康',
+  entertainment: '综艺',
+  kids: '少儿',
+  documentary: '纪录片',
+}
+
 const normalizeClock = (clock: string) => {
   const parts = clock.split(':')
   const hour = Math.max(0, Math.min(23, Number(parts[0] ?? '0')))
@@ -128,17 +139,10 @@ const buildGuessFromStructuredIntent = (
     return null
   }
 
-  const label = semanticLabel?.trim() || '自定义版面'
+  const label = semanticLabel?.trim() || (programTypeHint ? DEFAULT_LABEL_BY_PROGRAM_TYPE[programTypeHint] : undefined) || '自定义版面'
   const queryHints = Array.from(new Set([
     label,
-    programTypeHint === 'drama' ? '电视剧' : undefined,
-    programTypeHint === 'news' ? '新闻' : undefined,
-    programTypeHint === 'news_magazine' ? '资讯' : undefined,
-    programTypeHint === 'commentary' ? '评论' : undefined,
-    programTypeHint === 'health' ? '健康' : undefined,
-    programTypeHint === 'entertainment' ? '娱乐' : undefined,
-    programTypeHint === 'kids' ? '少儿' : undefined,
-    programTypeHint === 'documentary' ? '纪录片' : undefined,
+    programTypeHint ? DEFAULT_LABEL_BY_PROGRAM_TYPE[programTypeHint] : undefined,
   ].filter(Boolean) as string[]))
 
   return {
@@ -474,6 +478,18 @@ const segmentContainsTimePoint = (segment: LayoutDraftSpecSegment, timePoint?: s
   return segmentStart <= point && point < segmentEnd
 }
 
+const specStaysWithinCoverage = (spec: LayoutDraftSpec, coverage: { start: string; end: string }): boolean => {
+  const coverageStart = toSeconds(coverage.start)
+  const coverageEnd = toSeconds(coverage.end)
+  return spec.coverage.start === coverage.start
+    && spec.coverage.end === coverage.end
+    && spec.segments.every((segment) => {
+      const segmentStart = toSeconds(segment.startTime)
+      const segmentEnd = toSeconds(segment.endTime)
+      return segmentStart >= coverageStart && segmentEnd <= coverageEnd && segmentStart < segmentEnd
+    })
+}
+
 const matchSegmentsForRefine = (
   existingSegments: LayoutDraftSpecSegment[],
   cues: {
@@ -574,6 +590,7 @@ export class LayoutDraftService {
     if (isDeterministicRemoveRefine(input)) {
       return fallback
     }
+    const normalized = normalizeInput(input.userInput)
 
     try {
       const response = await this.llmClient.chat(this.buildRefinePrompt(input), {
@@ -581,7 +598,11 @@ export class LayoutDraftService {
         maxTokens: 1400,
       })
 
-      return this.parseSpecResponse(response.content, fallback)
+      const parsed = this.parseSpecResponse(response.content, fallback)
+      if (input.coverage && !extractTimeRange(normalized) && !specStaysWithinCoverage(parsed, input.coverage)) {
+        return fallback
+      }
+      return parsed
     } catch {
       return fallback
     }

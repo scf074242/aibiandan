@@ -2,12 +2,13 @@
  * LLM 配置管理
  */
 import type { LLMConfig } from '@/types/llm'
+import { isPlaceholderApiKey } from './localDemoLlm'
 
 // 默认配置
 const DEFAULT_CONFIG: LLMConfig = {
   baseURL: 'https://api.siliconflow.cn/v1',
   apiKey: '',
-  model: 'deepseek-ai/DeepSeek-V3.2-Exp',
+  model: 'deepseek-ai/DeepSeek-V3.2',
   temperature: 0.3,
   maxTokens: 8192,
   timeout: 60000,
@@ -44,7 +45,15 @@ export function loadLLMConfig(): LLMConfig {
     ...DEFAULT_CONFIG,
     ...localConfig,
     ...Object.fromEntries(
-      Object.entries(envConfig).filter(([, v]) => v !== undefined && v !== ''),
+      Object.entries(envConfig).filter(([key, v]) => {
+        if (v === undefined || v === '') {
+          return false
+        }
+        if (key === 'apiKey' && isPlaceholderApiKey(String(v))) {
+          return false
+        }
+        return true
+      }),
     ),
   } as LLMConfig
 }
@@ -68,7 +77,7 @@ export function saveLLMConfig(config: Partial<LLMConfig>): void {
 export function validateLLMConfig(config: LLMConfig): { valid: boolean; errors: string[] } {
   const errors: string[] = []
 
-  if (!config.apiKey || config.apiKey.trim() === '') {
+  if (isPlaceholderApiKey(config.apiKey)) {
     errors.push('API Key 不能为空')
   }
 

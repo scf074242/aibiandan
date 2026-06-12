@@ -1,4 +1,7 @@
 import type { RuntimePendingAtomicContext } from '@/services/runtime/pendingAtomicContext'
+import { parseAtomicOffset } from '@/services/atomicOffsetParser'
+import { parseAtomicClockExpression } from '@/services/atomicTimeParser'
+import { looksLikeProgramSchedulingRequest } from '@/services/schedulingIntentHeuristics'
 
 export type AtomicSelectionReply =
   | { mode: 'ordinal'; index: number }
@@ -73,9 +76,9 @@ export class AtomicContinuationClassifier {
     const detectedAction = this.detectAtomicAction(normalizedInput)
     if (!detectedAction) return false
 
-    const hasExactTime = /(\d{1,2})(点半|点(\d{1,2})分?|点|[:：]\d{2})/.test(normalizedInput)
+    const hasExactTime = Boolean(parseAtomicClockExpression(normalizedInput))
     const hasQuotedTitle = /《[^》]+》/.test(normalizedInput)
-    const hasOffset = /\d+(分钟|小时|分|秒)/.test(normalizedInput)
+    const hasOffset = Boolean(parseAtomicOffset(normalizedInput))
     const hasProgramLikeText = this.hasProgramLikeText(rawUserInput, detectedAction)
 
     if (detectedAction !== pendingContext.action) {
@@ -98,25 +101,27 @@ export class AtomicContinuationClassifier {
       case 'replace':
         return hasExactTime && /(替换成|替换为|换成|改成|改为).+/.test(normalizedInput)
       case 'insert':
-        return hasExactTime && /(插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个).+/.test(normalizedInput)
+        return hasExactTime && /(插入|插个|插一|加一条|加一档|加个|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个).+/.test(normalizedInput)
       default:
         return false
     }
   }
 
   private hasProgramLikeText(rawUserInput: string, detectedAction: RuntimePendingAtomicContext['action']): boolean {
+    if (!detectedAction) return false
+
     const normalized = rawUserInput
       .trim()
       .replace(/《([^》]+)》/g, '$1')
-      .replace(/(\d{1,2})(点半|点(\d{1,2})分?|点|[:：]\d{2})/g, '')
-      .replace(/\d+(分钟|小时|分|秒)/g, '')
+      .replace(/(?:\d{1,2}[:：]\d{1,2}(?::\d{1,2})?|(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})(?:点|點)(?:半|(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})分?)?)/g, '')
+      .replace(/(?:提前|延后|顺延|前移|后移|往前挪|往后挪)?(?:\d{1,3}|[零〇一二两三四五六七八九十]{1,4}|半)(?:个)?(?:分钟|小时|分|秒)/g, '')
       .replace(/[，,。！？!?：:\s]/g, '')
       .replace(/^(?:把|将|在|于)/, '')
 
     const actionPatternByType: Record<NonNullable<RuntimePendingAtomicContext['action']>, RegExp> = {
-      insert: /^(?:插入节目|插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/,
-      delete: /^(?:删除|删掉|移除)/,
-      move: /^(?:后移|前移|移动|顺一下|挪一下|顺延|延后|提前)/,
+      insert: /^(?:插入节目|插入|插个|插一|加一条|加一档|加个|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/,
+      delete: /^(?:删除|删掉|移除|去掉|撤掉|拿掉)/,
+      move: /^(?:后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前)/,
       replace: /^(?:替换成|替换为|替换|换成|换掉|改成|改为|改掉)/,
     }
 
@@ -130,7 +135,8 @@ export class AtomicContinuationClassifier {
   }
 
   private shouldInterruptAsNewTask(normalizedInput: string): boolean {
-    if (/(按这个版面开始编排|按该版面开始编排|确认版面|采用这个版面|用这个版面编排)/.test(normalizedInput)) return true
+    if (looksLikeProgramSchedulingRequest(normalizedInput)) return true
+    if (/(按这个版面开始编排|按该版面开始编排|确认版面|采用这个版面|用这个版面编排|就按这个版面|就按这个草案|按这个版面|按这个草案|照这个版面|照这个草案|这个版面可以|这个草案可以|可以开始编排|没问题开始编排)/.test(normalizedInput)) return true
     if (/(帮我全天编排|全天编排|整天编排|帮我填充全天节目|填充全天节目|补齐当前所有空窗|补齐当前空窗|补齐空窗|补齐当前所有空缺|补齐当前空缺)/.test(normalizedInput)) return true
     if (/(执行校验|请校验当前节目单|校验当前节目单|校验一下|看看有没有问题)/.test(normalizedInput)) return true
     if (/(版面|栏目|剧场|时段|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全天|整天|全日)/.test(normalizedInput)) return true
@@ -139,10 +145,10 @@ export class AtomicContinuationClassifier {
   }
 
   private detectAtomicAction(normalizedInput: string): RuntimePendingAtomicContext['action'] {
-    if (/(后移|前移|移动|顺一下|挪一下|顺延|延后|提前)/.test(normalizedInput)) return 'move'
-    if (/(删除|删掉|移除)/.test(normalizedInput)) return 'delete'
+    if (/(后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前)/.test(normalizedInput)) return 'move'
+    if (/(删除|删掉|移除|去掉|撤掉|拿掉)/.test(normalizedInput)) return 'delete'
     if (/(替换|换成|替换成|替换为|换掉|改掉|改成|改为)/.test(normalizedInput)) return 'replace'
-    if (/(插入|插个|插一|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/.test(normalizedInput)) return 'insert'
+    if (/(插入|插个|插一|加一条|加一档|加个|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/.test(normalizedInput)) return 'insert'
     return null
   }
 

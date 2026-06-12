@@ -260,6 +260,10 @@ export class OpenClawBridge {
     return this.sessionStore.getSession(sessionId)
   }
 
+  clearLayoutDraft(sessionId: string): RuntimeBridgeSessionState {
+    return this.sessionStore.clearLayoutDraft(sessionId)
+  }
+
   findSessionByConversationId(conversationId: string): RuntimeBridgeSessionState | null {
     return this.sessionStore.findSessionByConversationId(conversationId)
   }
@@ -410,6 +414,19 @@ export class OpenClawBridge {
           layoutDraftStatus: 'ready',
           layoutDraftMode: decision.orchestrationMode,
           layoutDraftFeasibility: decision.feasibilityReport,
+        })
+      case 'layout_draft_clear':
+        return this.sessionStore.updateSession(sessionId, {
+          status: 'cancelled',
+          summary: decision.feedback.content || fallbackSummary,
+          lastDecision: decision,
+          lastExecution: undefined,
+          pendingCommand: undefined,
+          pendingAtomicContext: undefined,
+          pendingLayoutDraft: undefined,
+          layoutDraftStatus: undefined,
+          layoutDraftMode: undefined,
+          layoutDraftFeasibility: undefined,
         })
       case 'layout_commit':
         return this.sessionStore.updateSession(sessionId, {

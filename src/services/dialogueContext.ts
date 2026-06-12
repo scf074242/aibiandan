@@ -1,4 +1,5 @@
 import type { ScheduleState } from '@/types/orchestration'
+import { parseAtomicClockExpressions } from '@/services/atomicTimeParser'
 
 export interface DialogueScheduleItem {
   id: string
@@ -51,27 +52,9 @@ export function buildDialogueContext(input: DialogueContextInput): DialogueConte
 }
 
 function extractTargetTimeHints(userInput: string): string[] {
-  const normalized = userInput.replace(/\s+/g, '')
-  const hints = new Set<string>()
-  const patterns = [
-    /(\d{1,2})点半/g,
-    /(\d{1,2})点(?:(\d{1,2})分)?/g,
-    /(\d{1,2})[:：](\d{2})/g,
-  ]
-
-  for (const pattern of patterns) {
-    let match: RegExpExecArray | null = null
-    while ((match = pattern.exec(normalized)) !== null) {
-      if (pattern.source.includes('点半')) {
-        hints.add(normalizeClock(`${match[1]}:30`))
-        continue
-      }
-
-      const hours = match[1] ?? '00'
-      const minutes = match[2] ?? '00'
-      hints.add(normalizeClock(`${hours}:${minutes}`))
-    }
-  }
+  const hints = new Set<string>(
+    parseAtomicClockExpressions(userInput).map((item) => item.targetTime),
+  )
 
   return Array.from(hints).slice(0, 3)
 }
