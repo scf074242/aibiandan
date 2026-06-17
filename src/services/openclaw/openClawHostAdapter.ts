@@ -1,6 +1,7 @@
 import type { RuntimeDecision, RuntimeOrchestrationRequest, RuntimeScheduleItem } from '@/services/runtime/demoRuntimeFacade'
 import type { RuntimeBridgeSessionState } from '@/services/runtime/runtimeSessionStore'
 import { getOpenClawBridge, type OpenClawBridge, type OpenClawBridgeResult } from './openClawBridge'
+import type { PlaylistType, RotationPlaylistStrategy } from '@/types/orchestration'
 
 type OpenClawHostInboundType =
   | 'bigbiandan.ping'
@@ -32,6 +33,8 @@ export interface OpenClawHostContext {
   date: string
   currentSchedule: RuntimeScheduleItem[]
   gapCount: number
+  playlistType?: PlaylistType
+  rotationStrategy?: RotationPlaylistStrategy
 }
 
 export interface OpenClawHostOrchestrationSnapshot {
@@ -187,6 +190,8 @@ export class OpenClawHostAdapter {
       currentSchedule: context.currentSchedule,
       gapCount: context.gapCount,
       history: payload.history,
+      playlistType: context.playlistType,
+      rotationStrategy: context.rotationStrategy,
     })
     return this.finalizeResult(result, peer, requestId)
   }

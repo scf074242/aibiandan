@@ -322,7 +322,7 @@ describe('Atomic conversation scenarios', () => {
     expect(result.pendingAtomicContext.slots.targetTime).toBe('09:00:00')
   })
 
-  it('case 13: 插入看东方后补9点时不会再次追问节目名', async () => {
+  it('case 13: 插入看东方后补9点时会因目标时间被占用而阻止推荐', async () => {
     mockIntentRecognize
       .mockResolvedValueOnce({ type: 'insert', confidence: 0.9, reasoning: 'insert clarify' })
       .mockResolvedValueOnce({ type: 'insert', confidence: 0.9, reasoning: 'insert ready' })
@@ -352,12 +352,11 @@ describe('Atomic conversation scenarios', () => {
       history: [],
     })
 
-    expect(second.kind).toBe('pending_atomic_context')
-    if (second.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(second.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(second.pendingAtomicContext.missingFields).toEqual(['selection'])
-    expect(second.pendingAtomicContext.slots.programName).toBe('看东方')
-    expect(second.pendingAtomicContext.slots.targetTime).toBe('09:00:00')
+    expect(second.kind).toBe('message')
+    if (second.kind !== 'message') throw new Error('expected blocked insert message')
+    expect(second.feedback.content).toContain('空闲时段不足')
+    expect(second.feedback.details?.targetTime).toBe('09:00:00')
+    expect(second.feedback.details?.rejectedReason).toBe('insert_time_not_available')
   })
 
   it('case 14: 把看东方后移30分钟后补9点时可以直接续跑移动', async () => {
@@ -524,7 +523,7 @@ describe('Atomic conversation scenarios', () => {
     expect(second.pendingAtomicContext.slots.offsetSeconds).toBe(1800)
   })
 
-  it('case 18: 9点插入后再说看东方时会续跑到插入推荐态', async () => {
+  it('case 18: 9点插入后再说看东方时会因目标时间被占用而阻止推荐', async () => {
     mockIntentRecognize
       .mockResolvedValueOnce({ type: 'insert', confidence: 0.9, reasoning: 'insert clarify' })
       .mockResolvedValueOnce({ type: 'insert', confidence: 0.9, reasoning: 'insert ready' })
@@ -554,10 +553,11 @@ describe('Atomic conversation scenarios', () => {
       history: [],
     })
 
-    expect(second.kind).toBe('pending_atomic_context')
-    if (second.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(second.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(second.pendingAtomicContext.missingFields).toEqual(['selection'])
+    expect(second.kind).toBe('message')
+    if (second.kind !== 'message') throw new Error('expected blocked insert message')
+    expect(second.feedback.content).toContain('空闲时段不足')
+    expect(second.feedback.details?.targetTime).toBe('09:00:00')
+    expect(second.feedback.details?.rejectedReason).toBe('insert_time_not_available')
   })
 
   it('case 19: 同动作的完整新插入命令会打断旧插入上下文', () => {
@@ -593,7 +593,7 @@ describe('Atomic conversation scenarios', () => {
     mockExtractInsertParams
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({
-        targetTime: '09:00:00',
+        targetTime: '10:00:00',
         rawProgramText: '看东方',
         semanticLabel: 'news_magazine',
         confidence: 0.82,
@@ -616,7 +616,7 @@ describe('Atomic conversation scenarios', () => {
 
     const second = await facade.submitInstruction({
       scheduleState,
-      userInput: '9点',
+      userInput: '10点',
       currentSchedule,
       history: ['插入看东方'],
       pendingAtomicContext: first.pendingAtomicContext,
@@ -629,7 +629,7 @@ describe('Atomic conversation scenarios', () => {
       scheduleState,
       userInput: '删除看东方',
       currentSchedule,
-      history: ['插入看东方', '9点'],
+      history: ['插入看东方', '10点'],
       pendingAtomicContext: second.pendingAtomicContext,
     })
     expect(third.kind).toBe('pending_atomic_context')

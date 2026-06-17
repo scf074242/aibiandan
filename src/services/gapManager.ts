@@ -384,7 +384,7 @@ export class GapManager {
             metadata: {
               ...originalGap.metadata,
               source: 'generated',
-              priority: originalGap.metadata.priority + 1,
+              priority: this.resolveSplitGapPriority(originalGap),
             },
           })
           this.gaps.set(generatedGap.id, generatedGap)
@@ -406,12 +406,20 @@ export class GapManager {
           metadata: {
             ...originalGap.metadata,
             source: 'generated',
-            priority: originalGap.metadata.priority + 1,
+            priority: this.resolveSplitGapPriority(originalGap),
           },
         })
         this.gaps.set(trailingGap.id, trailingGap)
       }
     }
+  }
+
+  private resolveSplitGapPriority(originalGap: GapInfo): number {
+    const isSequentialDramaBand = originalGap.constraints.allowedTypes?.includes('drama')
+      && originalGap.constraints.fixedEnd
+    return isSequentialDramaBand
+      ? originalGap.metadata.priority
+      : originalGap.metadata.priority + 1
   }
 
   /**

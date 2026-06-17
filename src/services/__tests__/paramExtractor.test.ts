@@ -130,7 +130,7 @@ describe('ParamExtractor', () => {
       semanticLabel: undefined,
       programTypeHint: undefined,
     })
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it.each([
@@ -191,7 +191,7 @@ describe('ParamExtractor', () => {
     )
 
     expect(result).toEqual(expected)
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('能从撤掉这类删除表达中提取目标时间', async () => {
@@ -307,6 +307,28 @@ describe('ParamExtractor', () => {
     )
 
     expect(result).toBeNull()
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
+  })
+
+  it('accepts LLM extracted target time for contextual follow-up commands', async () => {
+    const chat = vi.fn(async () => ({
+      content: '{"targetTime":"09:00:00","direction":"forward","offsetSeconds":600}',
+    }))
+    const extractor = new ParamExtractor({ chat } as never)
+
+    const result = await extractor.extractMoveParams(
+      buildDialogueContext({
+        scheduleState: createScheduleState(),
+        userInput: '\u628a\u5b83\u5f80\u540e\u79fb\u52a810\u5206\u949f',
+        currentSchedule,
+      }),
+    )
+
+    expect(result).toEqual({
+      targetTime: '09:00:00',
+      direction: 'forward',
+      offsetSeconds: 600,
+    })
+    expect(chat).toHaveBeenCalled()
   })
 })

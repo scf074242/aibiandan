@@ -45,7 +45,7 @@ export const parseAtomicOffset = (userInput: string): AtomicOffsetSlot | null =>
   const normalized = userInput.replace(/\s+/g, '')
   const halfHourOffsetMatch =
     normalized.match(/(提前|前移|往前挪)半(?:个)?小时/)
-    || normalized.match(/(延后|顺延|后移|往后挪|顺一下|顺一个|挪一下)?半(?:个)?小时/)
+    || normalized.match(/(延后|顺延|后移|往后挪|推迟|推后|延迟|顺一下|顺一个|挪一下)?半(?:个)?小时/)
   if (halfHourOffsetMatch) {
     return {
       direction: directionFromToken(halfHourOffsetMatch[1] ?? ''),
@@ -56,8 +56,9 @@ export const parseAtomicOffset = (userInput: string): AtomicOffsetSlot | null =>
   const numberPattern = '(\\d{1,3}|[零〇一二两三四五六七八九十]{1,4}个?)'
   const hourOffsetMatch =
     new RegExp(`([前后])移${numberPattern}(?:个)?小时`).exec(normalized)
+    || new RegExp(`向([前后])移动?${numberPattern}(?:个)?小时`).exec(normalized)
     || new RegExp(`往([前后])挪${numberPattern}(?:个)?小时`).exec(normalized)
-    || new RegExp(`(提前|延后|顺延)${numberPattern}(?:个)?小时`).exec(normalized)
+    || new RegExp(`(提前|延后|顺延|推迟|推后|延迟)${numberPattern}(?:个)?小时`).exec(normalized)
   if (hourOffsetMatch) {
     const value = parseChineseInteger(hourOffsetMatch[2] ?? '')
     if (!value) return null
@@ -69,8 +70,9 @@ export const parseAtomicOffset = (userInput: string): AtomicOffsetSlot | null =>
 
   const minuteOffsetMatch =
     new RegExp(`([前后])移${numberPattern}分钟`).exec(normalized)
+    || new RegExp(`向([前后])移动?${numberPattern}分钟`).exec(normalized)
     || new RegExp(`往([前后])挪${numberPattern}分钟`).exec(normalized)
-    || new RegExp(`(提前|延后|顺延)${numberPattern}分钟`).exec(normalized)
+    || new RegExp(`(提前|延后|顺延|推迟|推后|延迟)${numberPattern}分钟`).exec(normalized)
   if (minuteOffsetMatch) {
     const value = parseChineseInteger(minuteOffsetMatch[2] ?? '')
     if (!value) return null

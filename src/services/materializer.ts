@@ -297,8 +297,13 @@ export class Materializer {
 
     return {
       id: this.generateItemId(),
+      programId: candidate.programId,
       programCode: candidate.programCode,
       programName: candidate.programName,
+      instanceName: candidate.instanceName,
+      columnId: candidate.columnId,
+      columnName: candidate.columnName,
+      contentTags: candidate.contentTags,
       startTime,
       endTime,
       duration: durationSeconds,

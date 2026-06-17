@@ -35,7 +35,7 @@ describe('TaskClassifier', () => {
 
     expect(result.mode).toBe('layout_prepare')
     expect(result.suggestedParams?.userIntent).toBe(userInput)
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对真实中文版面生成指令识别为 layout_prepare，并忽略当前版面参考', async () => {
@@ -53,7 +53,7 @@ describe('TaskClassifier', () => {
       start: '13:00:00',
       end: '18:00:00',
     })
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对真实中文版面微调指令识别为 layout_refine', async () => {
@@ -70,7 +70,7 @@ describe('TaskClassifier', () => {
       start: '18:00:00',
       end: '23:00:00',
     })
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对自由业务短语也按版面生成需求处理', async () => {
@@ -87,7 +87,7 @@ describe('TaskClassifier', () => {
       start: '13:00:00',
       end: '18:00:00',
     })
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对明显版面需求识别为 layout_prepare', async () => {
@@ -104,7 +104,7 @@ describe('TaskClassifier', () => {
       start: '13:00:00',
       end: '18:00:00',
     })
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对版面微调识别为 layout_refine', async () => {
@@ -121,7 +121,7 @@ describe('TaskClassifier', () => {
       start: '13:00:00',
       end: '18:00:00',
     })
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对模糊版面请求直接要求澄清', async () => {
@@ -135,7 +135,7 @@ describe('TaskClassifier', () => {
 
     expect(result.mode).toBe('clarify')
     expect(result.confidence).toBeGreaterThanOrEqual(0.9)
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对修复类表达先收敛到问题分析', async () => {
@@ -149,7 +149,7 @@ describe('TaskClassifier', () => {
 
     expect(result.mode).toBe('validate_only')
     expect(result.reasoning).toContain('先输出问题分析结果')
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it.each([
@@ -167,7 +167,7 @@ describe('TaskClassifier', () => {
 
     expect(result.mode).toBe('validate_only')
     expect(result.reasoning).toContain('先输出问题分析结果')
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it.each([
@@ -184,7 +184,7 @@ describe('TaskClassifier', () => {
     })
 
     expect(result.mode).toBe('validate_only')
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对当前版面编排分析诉求识别为 layout_analysis', async () => {
@@ -197,7 +197,7 @@ describe('TaskClassifier', () => {
     })
 
     expect(result.mode).toBe('layout_analysis')
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对优化当前版面的诉求识别为 layout_prepare', async () => {
@@ -211,7 +211,7 @@ describe('TaskClassifier', () => {
 
     expect(result.mode).toBe('layout_prepare')
     expect(result.suggestedParams?.ignoreExistingLayout).toBe(true)
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对像原子操作但信息不完整的表达要求澄清', async () => {
@@ -225,7 +225,7 @@ describe('TaskClassifier', () => {
 
     expect(result.mode).toBe('clarify')
     expect(result.reasoning).toContain('原子命令')
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对版面确认指令识别为 layout_commit', async () => {
@@ -238,7 +238,7 @@ describe('TaskClassifier', () => {
     })
 
     expect(result.mode).toBe('layout_commit')
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
   })
 
   it('对模糊补空窗表达继续交给 LLM 判定', async () => {
@@ -260,7 +260,7 @@ describe('TaskClassifier', () => {
     expect(result.mode).toBe('clarify')
   })
 
-  it('对户外直播轮播单这类开放业务命令交给 LLM 判定为版面草案', async () => {
+  it('对户外直播轮播单这类开放业务命令交给 LLM 判定后按总时长处理', async () => {
     const chat = vi.fn(async () => ({
       content: JSON.stringify({
         mode: 'layout_prepare',
@@ -283,12 +283,11 @@ describe('TaskClassifier', () => {
 
     expect(chat).toHaveBeenCalledTimes(1)
     const promptText = chat.mock.calls[0]?.[0]?.map((message: { content: string }) => message.content).join('\n')
-    expect(promptText).toContain('户外直播单')
+    expect(promptText).toContain('户外直播轮播单')
+    expect(promptText).toContain('轮播单只表示总时长')
     expect(result.mode).toBe('layout_prepare')
-    expect(result.suggestedParams?.targetTimeRange).toEqual({
-      start: '14:00:00',
-      end: '15:00:00',
-    })
+    expect(result.suggestedParams?.targetTimeRange).toBeUndefined()
+    expect(result.suggestedParams?.rotationDurationSeconds).toBe(60 * 60)
   })
 
   it('对主题活动节目单这类开放编排话术交给 LLM 映射到已有模式', async () => {
@@ -340,8 +339,9 @@ describe('TaskClassifier', () => {
     },
     {
       input: '麻烦来个14-15点静安寺外场直播播单',
-      range: { start: '14:00:00', end: '15:00:00' },
+      range: undefined,
       intent: '静安寺外场直播播单',
+      rotationDurationSeconds: 60 * 60,
     },
     {
       input: '两点到三点做社区服务提醒',
@@ -353,7 +353,7 @@ describe('TaskClassifier', () => {
       range: { start: '13:00:00', end: '18:00:00' },
       intent: '城市服务',
     },
-  ])('开放主题/服务提醒命令不会被过早当成原子编辑: $input', async ({ input, range, intent }) => {
+  ])('开放主题/服务提醒命令不会被过早当成原子编辑: $input', async ({ input, range, intent, rotationDurationSeconds }) => {
     const chat = vi.fn(async () => ({
       content: JSON.stringify({
         mode: 'layout_prepare',
@@ -377,6 +377,10 @@ describe('TaskClassifier', () => {
     if (range) {
       expect(result.suggestedParams?.targetTimeRange).toEqual(range)
     }
+    if (rotationDurationSeconds) {
+      expect(result.suggestedParams?.targetTimeRange).toBeUndefined()
+      expect(result.suggestedParams?.rotationDurationSeconds).toBe(rotationDurationSeconds)
+    }
   })
 
   it.each([
@@ -397,12 +401,12 @@ describe('TaskClassifier', () => {
       userInput: input,
     })
 
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
     expect(result.mode).toBe('layout_prepare')
     expect(result.suggestedParams?.targetTimeRange).toEqual(range)
   })
 
-  it('LLM 分类缺少 targetTimeRange 时保留本地解析出的 14-15 点范围', async () => {
+  it('LLM 分类缺少 targetTimeRange 时也能把轮播单 14-15 点解析为 1 小时总时长', async () => {
     const chat = vi.fn(async () => ({
       content: JSON.stringify({
         mode: 'layout_prepare',
@@ -421,10 +425,8 @@ describe('TaskClassifier', () => {
     })
 
     expect(result.mode).toBe('layout_prepare')
-    expect(result.suggestedParams?.targetTimeRange).toEqual({
-      start: '14:00:00',
-      end: '15:00:00',
-    })
+    expect(result.suggestedParams?.targetTimeRange).toBeUndefined()
+    expect(result.suggestedParams?.rotationDurationSeconds).toBe(60 * 60)
   })
 
   it('非常模糊且明显不可执行的排单短语仍然快速澄清', async () => {
@@ -438,6 +440,31 @@ describe('TaskClassifier', () => {
 
     expect(result.mode).toBe('clarify')
     expect(result.confidence).toBeGreaterThanOrEqual(0.9)
-    expect(chat).not.toHaveBeenCalled()
+    expect(chat).toHaveBeenCalled()
+  })
+
+  it('lets LLM override confident local routing rules', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        mode: 'layout_prepare',
+        confidence: 0.88,
+        reasoning: '\u004c\u004c\u004d \u7ed3\u5408\u4e0a\u4e0b\u6587\u5224\u65ad\u8fd9\u662f\u5f00\u653e\u7f16\u6392\u9700\u6c42\u3002',
+        suggestedParams: {
+          userIntent: '\u51c6\u5907\u4e00\u4e2a14:00\u523015:00\u7684\u9759\u5b89\u5bfa\u6237\u5916\u76f4\u64ad\u8f6e\u64ad\u5355',
+          targetTimeRange: { start: '14:00:00', end: '15:00:00' },
+        },
+      }),
+    }))
+    const classifier = new TaskClassifier({ chat } as never)
+
+    const result = await classifier.classify({
+      scheduleState: createScheduleState(),
+      userInput: '\u6211\u51c6\u5907\u5728\u9759\u5b89\u5bfa\u8fdb\u884c\u6237\u5916\u76f4\u64ad\uff0c\u51c6\u5907\u4e00\u4e2a14:00\u523015:00\u7684\u8f6e\u64ad\u5355',
+    })
+
+    expect(result.mode).toBe('layout_prepare')
+    expect(result.suggestedParams?.targetTimeRange).toBeUndefined()
+    expect(result.suggestedParams?.rotationDurationSeconds).toBe(60 * 60)
+    expect(chat).toHaveBeenCalled()
   })
 })

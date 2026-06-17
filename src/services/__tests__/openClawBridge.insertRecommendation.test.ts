@@ -73,6 +73,8 @@ describe('OpenClawBridge insert recommendation', () => {
       currentSchedule: [],
       gapCount: 0,
       history: [],
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
     })
 
     expect(result.status).toBe('needs_selection')
@@ -167,6 +169,8 @@ describe('OpenClawBridge insert recommendation', () => {
       currentSchedule: [],
       gapCount: 0,
       history: [],
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
     })
 
     const second = await bridge.selectInsertRecommendation(first.sessionId, 'candidate-1')
@@ -221,6 +225,8 @@ describe('OpenClawBridge insert recommendation', () => {
       currentSchedule: [],
       gapCount: 0,
       history: [],
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
     })
 
     const session = bridge.getSessionState(first.sessionId)
@@ -235,6 +241,10 @@ describe('OpenClawBridge insert recommendation', () => {
     expect(mockResolvePendingTargetSelection).toHaveBeenCalledWith(expect.objectContaining({
       channelId: 'dragon',
       date: '2026-03-25',
+      scheduleState: expect.objectContaining({
+        playlistType: 'rotation',
+        rotationStrategy: 'content_match',
+      }),
       pendingTargetSelection: expect.objectContaining({
         action: 'delete',
         selectedItemId: 'item-1',

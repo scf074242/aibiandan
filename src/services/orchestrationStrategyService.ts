@@ -1,5 +1,5 @@
 import { getEffectiveColumnDefinition } from './orchestration/runtimeLayoutRegistry'
-import type { GapInfo, GenerationContext, PlanningStrategy } from '@/types/orchestration'
+import type { DraftSegmentSelectionPolicy, GapInfo, GenerationContext, PlanningStrategy } from '@/types/orchestration'
 import type { LLMClient } from './llm/llmClient'
 
 export interface GapPlanningThought {
@@ -14,6 +14,7 @@ export interface GapPlanningThought {
   searchKeywords: string[]
   allowFiller: boolean
   sequentialPreference: boolean
+  selectionPolicy?: DraftSegmentSelectionPolicy
 }
 
 export class OrchestrationStrategyService {
@@ -44,11 +45,13 @@ export class OrchestrationStrategyService {
           : context.channel.channelId === 'dragon'
             ? ['news', 'news_magazine', 'drama']
             : ['news']
+    const rangeText = this.formatRange(gap.startTime, gap.endTime)
+    const summary = column
+      ? `\u7a7a\u7a97 ${rangeText} \u5df2\u547d\u4e2d\u680f\u76ee ${column.columnName}\uff0c\u5c06\u6309\u680f\u76ee\u8282\u76ee\u5b9e\u4f8b\u8fdb\u884c\u67e5\u8be2\u3002`
+      : `\u7a7a\u7a97 ${rangeText} \u672a\u547d\u4e2d\u680f\u76ee\uff0c\u5c06\u6309\u7c7b\u578b\u8fdb\u884c\u4fdd\u5b88\u67e5\u8be2\u3002`
 
     return {
-      summary: column
-        ? `空窗 ${this.formatRange(gap.startTime, gap.endTime)} 已命中栏目 ${column.columnName}，将按栏目节目实例进行查询。`
-        : `空窗 ${this.formatRange(gap.startTime, gap.endTime)} 未命中栏目，将按类型进行保守查询。`,
+      summary,
       targetProgramTypes: inferredTypes,
       targetSlotLabel: column?.columnName,
       preferredProgramGroup: undefined,
@@ -59,6 +62,7 @@ export class OrchestrationStrategyService {
       searchKeywords: this.buildSearchKeywords(column?.queryHints, column?.semanticLabel ?? column?.columnName, inferredTypes),
       allowFiller: strategy.allowFiller,
       sequentialPreference: strategy.sequentialPreference,
+      selectionPolicy: column?.selectionPolicy,
     }
   }
 
@@ -68,14 +72,14 @@ export class OrchestrationStrategyService {
     inferredTypes: string[],
   ): string[] {
     const typeFallbackMap: Record<string, string[]> = {
-      drama: ['电视剧', '剧场'],
-      news: ['新闻'],
-      news_magazine: ['资讯', '栏目'],
-      commentary: ['评论', '观察'],
-      health: ['健康', '养生'],
-      entertainment: ['娱乐', '综艺'],
-      kids: ['少儿', '动画'],
-      documentary: ['纪录片', '纪实'],
+      drama: ['\u7535\u89c6\u5267', '\u5267\u573a'],
+      news: ['\u65b0\u95fb'],
+      news_magazine: ['\u8d44\u8baf', '\u680f\u76ee'],
+      commentary: ['\u8bc4\u8bba', '\u89c2\u5bdf'],
+      health: ['\u5065\u5eb7', '\u517b\u751f'],
+      entertainment: ['\u5a31\u4e50', '\u7efc\u827a'],
+      kids: ['\u5c11\u513f', '\u52a8\u753b'],
+      documentary: ['\u7eaa\u5f55\u7247', '\u7eaa\u5b9e'],
     }
 
     const keywords = new Set<string>()
@@ -87,7 +91,11 @@ export class OrchestrationStrategyService {
     })
 
     const normalizedLabel = slotLabel?.trim()
-    if (normalizedLabel) {
+    const hasExplicitHints = (queryHints ?? []).some((keyword) => keyword.trim())
+    const hasStructuredEditorialHints = (queryHints ?? []).some((keyword) =>
+      /(?:所属|属于)?栏目(?:名称|名)?|(?:节目)?标题|(?:节目)?内容/u.test(keyword),
+    )
+    if (normalizedLabel && !hasStructuredEditorialHints && (hasExplicitHints || /[\u4e00-\u9fa5]/u.test(normalizedLabel))) {
       keywords.add(normalizedLabel)
     }
 

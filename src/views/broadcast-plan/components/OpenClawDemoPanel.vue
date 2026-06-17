@@ -56,6 +56,7 @@
         <el-button size="small" @click="handleGetState">GetState</el-button>
         <el-button size="small" @click="handleConfirm">Confirm</el-button>
         <el-button size="small" @click="handleSelectTarget">Select</el-button>
+        <el-button v-if="props.seedTvSequenceContext" size="small" @click="handleSeedTvSequenceContext">载入顺播上下文</el-button>
         <el-button size="small" type="danger" plain @click="handleCancel">Cancel</el-button>
       </div>
 
@@ -85,6 +86,10 @@ const props = defineProps({
   adapter: {
     type: Object as PropType<OpenClawHostAdapter>,
     required: true,
+  },
+  seedTvSequenceContext: {
+    type: Function as PropType<() => void>,
+    default: undefined,
   },
 })
 
@@ -216,6 +221,17 @@ const handleCancel = async () => {
       conversationId: conversationId.value.trim() || undefined,
     },
   })
+}
+
+const handleSeedTvSequenceContext = () => {
+  props.seedTvSequenceContext?.()
+  conversationId.value = `agent:tv-sequence:${Date.now()}`
+  sessionId.value = ''
+  targetId.value = ''
+  messageText.value = '按纯电视频道，09:45到10:30继续播品质剧场：纵有疾风起，顺着当前版面补中间集'
+  lastResponse.value = null
+  currentSession.value = null
+  syncSessionState()
 }
 </script>
 

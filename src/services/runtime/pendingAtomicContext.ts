@@ -1,4 +1,8 @@
 import type {
+  AgentPendingTask,
+  AtomicCommandIntent,
+} from '@/services/agent/types'
+import type {
   RuntimeInsertRecommendationCandidate,
   RuntimePendingAtomicClarification,
   RuntimePendingInsertRecommendation,
@@ -18,11 +22,14 @@ export type RuntimeAtomicMissingField =
 
 export interface RuntimeAtomicSlotBag {
   targetTime?: string
+  newStartTime?: string
   targetTimeHint?: string
   programName?: string
   rawProgramText?: string
   semanticLabel?: string
   programTypeHint?: string
+  targetItemId?: string
+  targetItemName?: string
   direction?: 'forward' | 'backward'
   offsetSeconds?: number
   replacementProgramName?: string
@@ -33,6 +40,7 @@ export interface RuntimePendingAtomicContext {
   phase: RuntimePendingAtomicPhase
   summary: string
   reasoning: string
+  confirmationNote?: string
   originalUserInput: string
   collectedUserInput: string
   slots: RuntimeAtomicSlotBag
@@ -42,6 +50,8 @@ export interface RuntimePendingAtomicContext {
   insertRecommendations?: RuntimeInsertRecommendationCandidate[]
   selectedItemId?: string | null
   selectedCandidateId?: string | null
+  agentPendingTask?: AgentPendingTask
+  agentIntent?: AtomicCommandIntent
   attemptCount: number
   createdAt: string
   updatedAt: string
@@ -188,6 +198,8 @@ export const buildPendingAtomicContextFromInsertRecommendation = (
     rawProgramText: pending.rawProgramText,
     semanticLabel: pending.semanticLabel,
     programTypeHint: pending.programTypeHint,
+    targetItemId: pending.targetItemId,
+    targetItemName: pending.targetItemName,
   },
   missingFields: ['selection'],
   followUpQuestion: pending.summary,
@@ -273,7 +285,7 @@ export const rehydratePendingInsertRecommendationFromAtomicContext = (
   }
 
   return {
-    action: 'insert',
+    action: pending.action === 'replace' ? 'replace' : 'insert',
     summary: pending.summary,
     reasoning: pending.reasoning,
     originalUserInput: pending.originalUserInput,
@@ -282,6 +294,8 @@ export const rehydratePendingInsertRecommendationFromAtomicContext = (
     rawProgramText: pending.slots.rawProgramText,
     semanticLabel: pending.slots.semanticLabel,
     programTypeHint: pending.slots.programTypeHint,
+    targetItemId: pending.slots.targetItemId,
+    targetItemName: pending.slots.targetItemName,
     recommendedCandidates: pending.insertRecommendations,
     selectedCandidateId: pending.selectedCandidateId ?? null,
   }

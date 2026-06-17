@@ -102,6 +102,18 @@ describe('localDemoLlm', () => {
     })
   })
 
+  it('普通电视剧草案不会混入直播活动等开放场景关键词', () => {
+    const response = createLocalDemoLlmResponse(layoutDraftPrompt('不参考版面，下午排入电视剧'))
+
+    expect(response).not.toBeNull()
+    const parsed = JSON.parse(response!.content)
+    expect(parsed.segments[0]).toMatchObject({
+      label: '电视剧',
+      programType: 'drama',
+      queryHints: ['电视剧', 'drama'],
+    })
+  })
+
   it('当前已有草案时将替换类开放话术识别为草案微调', () => {
     const response = createLocalDemoLlmResponse([
       {

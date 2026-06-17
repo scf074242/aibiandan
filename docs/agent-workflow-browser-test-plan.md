@@ -1,6 +1,6 @@
 ﻿# Agent Workflow Browser Test Plan
 
-更新时间：2026-06-11
+更新时间：2026-06-14
 
 ## 目标
 
@@ -17,6 +17,8 @@
 7. 编排器按运行时版面查找候选、生成节目、补齐空窗。
 8. 左侧实际编排单发生可验证变化。
 9. 运行校验，确认无重叠、无非法时间、无负时长；如候选不足导致剩余空窗，必须明确列出待人工确认项。
+
+当前开发阶段先收敛到播单创建、原子命令识别、电视/轮播策略分流、候选推荐确认/取消这条短链路；`补空窗` 与 `全天编排` 本质上都属于长流程，本轮不纳入 `agent:check` 的强制门禁。
 
 ## 审查结果页
 
@@ -61,9 +63,9 @@ B0 用例通过必须同时满足：
 - 浏览器上传版面样例：`test-fixtures/browser/smg-weekday-layout.xlsx`
 - 参数化测试：`src/services/__tests__/layoutIntentCommandCases.test.ts`
 - 自然语言用例数量：57
-- 浏览器工作流用例数量：24
+- 浏览器工作流用例数量：61
 - 当前节目库候选数量：1667
-- 非浏览器验证结果：57/57 通过
+- 非浏览器验证结果：61/61 通过
 
 节目库覆盖：
 
@@ -145,6 +147,27 @@ B0 用例通过必须同时满足：
 | analysis-after-generated | 需造实际节目 | 先完成多段或全天编排，记录节目数量 | 分析对象必须是左侧实际编排单 |
 | clarify-vague-layout | 已就绪 | 无待确认草案、无上传版面 | 与 layout-draft-clarify-vague 重复覆盖，可保留作回归哨兵 |
 | atomic-fallback-shift | 已就绪 | 无草案；若目标不明确则允许追问 | 可独立跑，重点验证不误进草案 |
+| playlist-state-chat-create-tv | 已就绪 | 页面处于未创建播单空态，AI 助手快捷命令可见 | 验证聊天入口创建播单后父页面切换为电视播单状态 |
+| playlist-state-reject-atomic-before-create | 已就绪 | 页面处于未创建播单空态，AI 助手快捷命令可见，且不要先创建播单 | 直接点击插入节目时必须拒绝，提示先新建播单，左侧空态保持不变 |
+| playlist-state-chat-create-rotation | 已就绪 | 页面处于未创建播单空态，AI 助手快捷命令可见 | 验证聊天入口创建轮播单后父页面切换为轮播单状态并默认内容匹配优先 |
+| playlist-policy-rotation-switch-rating | 已就绪 | 先通过 AI 助手创建轮播单，输入框可用 | 轮播单允许切换为收视率优先，不改左侧节目单，不进入候选推荐 |
+| playlist-policy-rotation-switch-trending | 已就绪 | 先通过 AI 助手创建轮播单，输入框可用 | 轮播单允许切换为热播优先，不改左侧节目单，不进入候选推荐 |
+| playlist-policy-tv-reject-rotation-strategy | 已就绪 | 先通过 AI 助手创建电视播单，输入框可用 | 电视播单拒绝切换热播/收视率/内容匹配等轮播策略，左侧不变 |
+| playlist-policy-tv-insert-direct | 已就绪 | 先通过 AI 助手创建电视播单，看东方候选可检索 | 电视播单插入节目直接落表，不展示候选确认 |
+| playlist-policy-rotation-insert-recommendation | 已就绪 | 先通过 AI 助手创建轮播单，看东方相似候选可检索 | 轮播单插入节目返回候选推荐，确认前不落表 |
+| playlist-policy-rotation-insert-cancel | 已就绪 | 先通过 AI 助手创建轮播单并触发看东方插入推荐 | 点击取消后不写入左侧节目单，推荐上下文清空 |
+| playlist-policy-tv-replace-direct | 已就绪 | 先通过 AI 助手创建电视播单并插入 09:00 看东方，东方新闻候选可检索 | 电视播单替换节目直接落表，不展示候选确认 |
+| playlist-policy-rotation-replace-recommendation | 已就绪 | 先通过 AI 助手创建轮播单并确认插入 09:00 看东方，东方新闻相似候选可检索 | 轮播单替换节目返回候选推荐，确认前不落表 |
+| playlist-policy-rotation-replace-confirm-execute | 已就绪 | 先通过 AI 助手创建轮播单并确认插入 09:00 看东方，再触发东方新闻替换推荐 | 点击确认替换后真正替换左侧节目，推荐上下文清空 |
+| playlist-policy-rotation-replace-cancel | 已就绪 | 先通过 AI 助手创建轮播单并确认插入 09:00 看东方，再触发东方新闻替换推荐 | 点击取消后不替换左侧节目单，推荐上下文清空 |
+| playlist-policy-tv-delete-confirmation | 已就绪 | 先通过 AI 助手创建电视播单并插入 09:00 看东方 | 电视播单删除节目保持敏感确认，确认前不删除 |
+| playlist-policy-rotation-delete-confirmation | 已就绪 | 先通过 AI 助手创建轮播单并确认插入 09:00 看东方 | 轮播单删除节目保持敏感确认，确认前不删除 |
+| playlist-policy-tv-delete-confirm-execute | 已就绪 | 先通过 AI 助手创建电视播单并插入 09:00 看东方，再触发删除确认 | 点击确认执行后才真正删除节目，删除后待确认上下文清空 |
+| playlist-policy-rotation-delete-cancel | 已就绪 | 先通过 AI 助手创建轮播单并确认插入 09:00 看东方，再触发删除确认 | 点击取消后不删除节目，取消后待确认上下文清空 |
+| playlist-policy-tv-move-forward-direct | 已就绪 | 先通过 AI 助手创建电视播单并插入 09:00 看东方 | 电视播单移动节目直接落表，09:00 后移到 10:00，不得变为 08:00 |
+| playlist-policy-rotation-move-forward-direct | 已就绪 | 先通过 AI 助手创建轮播单并确认插入 09:00 看东方 | 轮播单移动节目直接落表，09:00 后移到 10:00，不进入候选推荐 |
+| playlist-policy-tv-move-backward-direct | 已就绪 | 先通过 AI 助手创建电视播单并插入 09:00 看东方，再后移到 10:00 | 电视播单前移节目直接落表，10:00 前移回 09:00，不得变为 11:00 |
+| playlist-policy-rotation-move-backward-direct | 已就绪 | 先通过 AI 助手创建轮播单并确认插入 09:00 看东方，再后移到 10:00 | 轮播单前移节目直接落表，10:00 前移回 09:00，不进入候选推荐 |
 | context-draft-persists-for-refine | 需造草案 | 先生成晚间综艺待确认草案 | 确认前草案上下文必须保留给下一轮微调 |
 | context-commit-clears-layout-draft | 需造实际节目 | 先生成上午新闻实际节目，确认旧草案卡片消失 | 确认编排后 draft context 清空，schedule context 保留 |
 | context-generated-schedule-used-after-commit | 需造实际节目 | 先完成一次编排并确认无待确认草案 | 后续校验/分析读取实际节目单上下文 |
@@ -273,6 +296,27 @@ B0 用例通过必须同时满足：
 | 特殊组合 | analysis-after-generated | 先完成一次实际编排；再输入：请分析当前版面编排，给我一份业务分析报告 | 基于实际节目单输出分析；不只分析草案 |
 | 版面草案 | clarify-vague-layout | 帮我做一个版面 | 出现澄清问题，不静默生成错误草案，不改左侧节目单 |
 | 原子命令 | atomic-fallback-shift | 把9点后那段顺一个 | 出现原子参数澄清，不进入版面草案，不改左侧节目单 |
+| 原子命令 | playlist-state-chat-create-tv | 点击 AI 助手里的“新建电视播单”快捷命令 | AI 返回电视播单创建结果；左侧空态消失并展示时间轴 |
+| 原子命令 | playlist-state-reject-atomic-before-create | 未创建播单时点击 AI 助手里的“插入节目”快捷命令 | AI 提示先新建电视播单或轮播单；左侧仍显示“先创建播单”；不出现候选卡或实际节目 |
+| 原子命令 | playlist-state-chat-create-rotation | 点击 AI 助手里的“新建轮播单”快捷命令 | AI 返回轮播单创建结果；左侧空态消失并展示时间轴，默认内容匹配优先 |
+| 原子命令 | playlist-policy-rotation-switch-rating | 新建轮播单后输入“按收视率优先” | AI 返回收视率优先策略切换结果；左侧节目数不变；不出现候选卡 |
+| 原子命令 | playlist-policy-rotation-switch-trending | 新建轮播单后输入“后面按热播优先” | AI 返回热播优先策略切换结果；左侧节目数不变；不出现候选卡 |
+| 原子命令 | playlist-policy-tv-reject-rotation-strategy | 新建电视播单后输入“按热播优先” | AI 拒绝切换轮播策略；左侧节目数不变；不进入草案或候选 |
+| 原子命令 | playlist-policy-tv-insert-direct | 新建电视播单后点击“插入节目”快捷命令 | 直接在左侧 09:00 写入看东方相关节目，不出现候选确认 |
+| 原子命令 | playlist-policy-rotation-insert-recommendation | 新建轮播单后点击“插入节目”快捷命令 | 右侧展示插入推荐和确认按钮，左侧节目数保持 0 |
+| 原子命令 | playlist-policy-rotation-insert-cancel | 新建轮播单并触发看东方插入推荐后点击“取消” | 左侧节目数保持 0，插入推荐卡片消失 |
+| 原子命令 | playlist-policy-tv-replace-direct | 新建电视播单并插入 09:00 看东方后点击“替换节目”快捷命令 | 直接将左侧 09:00 节目替换为东方新闻，不出现候选确认 |
+| 原子命令 | playlist-policy-rotation-replace-recommendation | 新建轮播单并确认插入 09:00 看东方后点击“替换节目”快捷命令 | 右侧展示替换推荐和确认按钮，确认前左侧 09:00 原节目不变 |
+| 原子命令 | playlist-policy-rotation-replace-confirm-execute | 新建轮播单并触发替换推荐后选择东方新闻候选，再点击“确认替换” | 左侧 09:00 节目变为东方新闻，替换推荐卡片消失 |
+| 原子命令 | playlist-policy-rotation-replace-cancel | 新建轮播单并触发替换推荐后点击“取消” | 左侧 09:00 原节目保留，替换推荐卡片消失 |
+| 原子命令 | playlist-policy-tv-delete-confirmation | 新建电视播单并插入 09:00 看东方后点击“删除节目”快捷命令 | 右侧展示删除确认，确认前左侧 09:00 原节目不变 |
+| 原子命令 | playlist-policy-rotation-delete-confirmation | 新建轮播单并确认插入 09:00 看东方后点击“删除节目”快捷命令 | 右侧展示删除确认，确认前左侧 09:00 原节目不变 |
+| 原子命令 | playlist-policy-tv-delete-confirm-execute | 新建电视播单并触发 09:00 删除确认后点击“确认执行” | 左侧节目数从 1 变为 0，确认卡片消失 |
+| 原子命令 | playlist-policy-rotation-delete-cancel | 新建轮播单并触发 09:00 删除确认后点击“取消” | 左侧 09:00 原节目保留，确认卡片消失 |
+| 原子命令 | playlist-policy-tv-move-forward-direct | 新建电视播单并插入 09:00 看东方后点击“后移节目”快捷命令 | 左侧节目起始时间变为 10:00，不出现候选或确认卡片 |
+| 原子命令 | playlist-policy-rotation-move-forward-direct | 新建轮播单并确认插入 09:00 看东方后点击“后移节目”快捷命令 | 左侧节目起始时间变为 10:00，不进入节目候选推荐 |
+| 原子命令 | playlist-policy-tv-move-backward-direct | 新建电视播单并把 09:00 看东方后移到 10:00，再点击“前移节目”快捷命令 | 左侧节目起始时间变回 09:00，不出现候选或确认卡片 |
+| 原子命令 | playlist-policy-rotation-move-backward-direct | 新建轮播单并把 09:00 看东方后移到 10:00，再点击“前移节目”快捷命令 | 左侧节目起始时间变回 09:00，不进入节目候选推荐 |
 | 上下文管理 | context-draft-persists-for-refine | 晚间排入综艺节目；再输入：晚上全部替换成新闻栏目 | 确认前草案上下文保留，第二轮能微调同一草案 |
 | 上下文管理 | context-commit-clears-layout-draft | 上午新闻并确认编排；再输入：保留现有上午节目，下午补齐电视剧 | 旧草案上下文清空，上午实际节目作为保护基线，下午生成电视剧草案或补排 |
 | 上下文管理 | context-generated-schedule-used-after-commit | 完成一次实际编排；再输入：检查当前编排问题 | 后续校验读取实际节目单，不回读已确认草案 |
@@ -366,6 +410,27 @@ B0 用例通过必须同时满足：
 | layout-draft-clarify-vague | 通过 | 信息不足时提出澄清，不生成草案 |
 | commit-without-draft | 通过 | 无草案时拒绝提交，左侧节目单不变 |
 | atomic-fallback-shift | 通过 | 进入原子参数追问，不进入版面草案 |
+| playlist-state-chat-create-tv | 通过 | 点击 AI 助手快捷命令“新建电视播单”后，右侧显示电视频道策略反馈，左侧空态消失并出现“时间轴与素材清单”“添加节目” |
+| playlist-state-reject-atomic-before-create | 通过 | 真实浏览器已验证：未创建播单空态直接点击“插入节目”后，右侧提示“当前还没有创建播单”，要求先新建电视播单或轮播单；左侧仍显示“先创建播单”，未出现插入推荐或实际节目写入 |
+| playlist-state-chat-create-rotation | 通过 | 点击 AI 助手快捷命令“新建轮播单”后，右侧显示内容匹配默认策略，左侧空态消失并出现“时间轴与素材清单”“添加节目” |
+| playlist-policy-rotation-switch-rating | 通过 | 真实浏览器已验证：创建轮播单后输入“按收视率优先”，右侧显示已切换为收视率优先；左侧仍为 0 个节目，未出现插入/替换候选卡或草案 |
+| playlist-policy-rotation-switch-trending | 通过 | 真实浏览器已验证：创建轮播单后输入“后面按热播优先”，右侧显示已切换为热播优先；左侧仍为 0 个节目，未出现插入/替换候选卡或草案 |
+| playlist-policy-tv-reject-rotation-strategy | 通过 | 真实浏览器已验证：创建电视播单后输入“按热播优先”，右侧提示电视播单只允许电视频道编排策略，不能切换为轮播策略；左侧仍为 0 个节目，未出现候选卡或草案 |
+| playlist-policy-tv-insert-direct | 通过 | 电视播单下点击“插入节目”后，左侧从 0 条变为 1 条，09:00-09:30 写入《看东方 特别策划：申城更新》，右侧无候选确认 |
+| playlist-policy-rotation-insert-recommendation | 通过 | 轮播单下点击“插入节目”后，右侧显示 3 个看东方候选和“确认插入”，左侧保持 0 条未直接落表 |
+| playlist-policy-rotation-insert-cancel | 通过 | 轮播单下触发 09:00 看东方插入推荐后点击“取消”，右侧显示已取消选择，左侧节目数保持 0，插入推荐卡片消失 |
+| playlist-policy-tv-replace-direct | 通过 | 电视播单下先插入 09:00《看东方 特别策划：申城更新》，再点击“替换节目”，左侧 09:00 直接变为《东方新闻》，右侧无候选确认 |
+| playlist-policy-rotation-replace-recommendation | 通过 | 轮播单下先确认插入 09:00 看东方，再点击“替换节目”，右侧显示 3 个东方新闻候选和“确认替换”，左侧 09:00 原节目保持不变 |
+| playlist-policy-rotation-replace-confirm-execute | 通过 | 轮播单下先插入并确认 09:00《看东方 特别策划：申城更新》，再触发替换推荐并确认《东方新闻》，左侧 09:00 实际节目变为《东方新闻》，推荐卡片消失 |
+| playlist-policy-rotation-replace-cancel | 通过 | 真实浏览器已验证：轮播单确认插入 09:00《看东方 特别策划：申城更新》后，触发东方新闻替换推荐并点击取消，左侧 09:00 仍保持原节目，未替换为东方新闻，推荐卡片消失 |
+| playlist-policy-tv-delete-confirmation | 通过 | 电视播单下先插入 09:00《看东方 特别策划：申城更新》，再点击“删除节目”，右侧进入高风险确认，左侧仍保留 1 条节目 |
+| playlist-policy-rotation-delete-confirmation | 通过 | 轮播单下先确认插入 09:00《看东方 特别策划：申城更新》，再点击“删除节目”，右侧进入高风险确认且不展示候选推荐，左侧仍保留 1 条节目 |
+| playlist-policy-tv-delete-confirm-execute | 通过 | 电视播单下先触发 09:00《看东方 特别策划：申城更新》删除确认，再点击“确认执行”，左侧节目数变为 0，确认卡片消失 |
+| playlist-policy-rotation-delete-cancel | 通过 | 轮播单下先触发 09:00《看东方 特别策划：申城更新》删除确认，再点击“取消”，左侧仍保留 1 条节目，确认卡片消失且无空对象错误 |
+| playlist-policy-tv-move-forward-direct | 通过 | 电视播单下先插入 09:00《看东方 特别策划：申城更新》，再点击“后移节目”，左侧起始时间变为 10:00，未出现候选或确认卡 |
+| playlist-policy-rotation-move-forward-direct | 通过 | 轮播单下先确认插入 09:00《看东方 特别策划：申城更新》，再点击“后移节目”，左侧起始时间变为 10:00，未进入候选推荐 |
+| playlist-policy-tv-move-backward-direct | 通过 | 电视播单下先把 09:00《看东方 特别策划：申城更新》后移到 10:00，再点击“前移节目”，左侧起始时间变回 09:00，未出现候选或确认卡 |
+| playlist-policy-rotation-move-backward-direct | 通过 | 轮播单下先把 09:00《看东方 特别策划：申城更新》后移到 10:00，再点击“前移节目”，左侧起始时间变回 09:00，未进入候选推荐 |
 | draft-to-schedule-afternoon-drama | 通过 | 确认草案后左侧 13:00-18:00 生成 21 条实际节目/广告 |
 | full-fill-all-day-to-schedule | 通过，带人工确认出口 | 空表生成全天草案；确认后左侧 0 条变 57 条；流程退出思考中/中止状态；剩余 1 个空窗明确提示待人工确认 |
 | validate-after-generated | 通过 | 基于 57 条实际节目单输出校验结果，节目数量不变 |

@@ -60,8 +60,13 @@ const buildDraft = (): LayoutDraft => ({
 class FakeBridge {
   session = buildSessionState()
   subscribeListener?: (state: RuntimeBridgeSessionState) => void
+  lastSubmitInput?: {
+    playlistType?: string
+    rotationStrategy?: string
+  }
 
-  async submitInstruction() {
+  async submitInstruction(input?: { playlistType?: string; rotationStrategy?: string }) {
+    this.lastSubmitInput = input
     return {
       sessionId: this.session.sessionId,
       status: this.session.status,
@@ -290,6 +295,38 @@ describe('OpenClawHostAdapter', () => {
     expect(response?.payload).toMatchObject({
       sessionId: 'bridge-session-1',
       conversationId: 'agent:main:main',
+    })
+  })
+
+  it('passes the current playlist policy context into the bridge for external submits', async () => {
+    const bridge = new FakeBridge()
+    const adapter = new OpenClawHostAdapter({
+      bridge: bridge as never,
+      getContext: () => ({
+        channelId: 'dragon',
+        channelName: '涓滄柟鍗',
+        date: '2026-04-07',
+        currentSchedule: [],
+        gapCount: 0,
+        playlistType: 'rotation',
+        rotationStrategy: 'rating',
+      }),
+      hostWindow: null,
+    })
+
+    const response = await adapter.handleEnvelope({
+      type: 'bigbiandan.submit',
+      requestId: 'req-rotation-submit',
+      payload: {
+        conversationId: 'agent:main:main',
+        text: '\u572810\u70b9\u63d2\u5165\u770b\u4e1c\u65b9',
+      },
+    })
+
+    expect(response?.type).toBe('bigbiandan.result')
+    expect(bridge.lastSubmitInput).toMatchObject({
+      playlistType: 'rotation',
+      rotationStrategy: 'rating',
     })
   })
 })

@@ -3,6 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LayoutDraft, ScheduleState } from '@/types/orchestration'
 import type { RuntimePendingAtomicContext } from '@/services/runtime/pendingAtomicContext'
 
+const previewFeasibilityMock = vi.hoisted(() => vi.fn(() => ({
+  ok: true,
+  summary: {
+    readyCount: 1,
+    warningCount: 0,
+    blockedCount: 0,
+  },
+  segments: [],
+})))
+
 vi.mock('@/services/llm/llmClient', () => ({
   getLLMClient: () => ({
     chat: vi.fn(async () => {
@@ -42,15 +52,7 @@ vi.mock('@/services/paramExtractor', () => ({
 
 vi.mock('@/services/layoutDraftFeasibilityService', () => ({
   getLayoutDraftFeasibilityService: () => ({
-    previewFeasibility: vi.fn(() => ({
-      ok: true,
-      summary: {
-        readyCount: 1,
-        warningCount: 0,
-        blockedCount: 0,
-      },
-      segments: [],
-    })),
+    previewFeasibility: previewFeasibilityMock,
   }),
 }))
 
@@ -125,6 +127,15 @@ const createPendingAtomicContext = (): RuntimePendingAtomicContext => ({
 describe('DemoRuntimeFacade context management', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    previewFeasibilityMock.mockReturnValue({
+      ok: true,
+      summary: {
+        readyCount: 1,
+        warningCount: 0,
+        blockedCount: 0,
+      },
+      segments: [],
+    })
   })
 
   it('确认前的短句会承接当前版面草案做微调，不直接改实际节目单', async () => {
@@ -174,6 +185,119 @@ describe('DemoRuntimeFacade context management', () => {
     expect(result.draft).toBe(draft)
     expect(result.orchestrationRequest.mode).toBe('full_generate')
     expect(result.orchestrationRequest.layoutDraft).toBe(draft)
+  })
+
+  it('确认 blocked 版面草案时会保留草案并阻止正式编排', async () => {
+    const facade = new DemoRuntimeFacade()
+    const draft = createLiveDraft()
+    previewFeasibilityMock.mockReturnValue({
+      ok: false,
+      summary: {
+        readyCount: 0,
+        warningCount: 0,
+        blockedCount: 1,
+      },
+      segments: [
+        {
+          segmentId: 'slot-live',
+          label: '生命树电视剧',
+          startTime: '14:00:00',
+          endTime: '15:00:00',
+          status: 'blocked',
+          matchedCandidateCount: 0,
+          reasons: ['当前频道下未找到可用于该栏目语义的候选节目。'],
+        },
+      ],
+    })
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '按这个版面开始编排',
+      currentSchedule: [],
+      currentLayoutDraft: draft,
+      currentLayoutDraftMode: 'full_generate',
+      history: ['用户：14点到15点排生命树电视剧', '助手：已生成版面草案。'],
+    })
+
+    expect(result.kind).toBe('layout_draft')
+    if (result.kind !== 'layout_draft') {
+      throw new Error('expected blocked layout draft decision')
+    }
+
+    expect(result.draft).toBe(draft)
+    expect(result.feasibilityReport.ok).toBe(false)
+    expect(result.feedback.content).toContain('不会进入正式编排')
+  })
+
+  it('确认时长不可容纳的泛类型草案时也会阻止正式编排', async () => {
+    const facade = new DemoRuntimeFacade()
+    const draft: LayoutDraft = {
+      ...createLiveDraft(),
+      userIntent: '12:45到13:00安排电视剧',
+      coverage: { start: '12:45:00', end: '13:00:00' },
+      layoutReference: {
+        id: 'short-drama-layout',
+        name: '短时段电视剧草案',
+        slots: [
+          {
+            id: 'slot-short-drama',
+            channelId: 'dragon',
+            startTime: '2026-03-25T12:45:00+08:00',
+            endTime: '2026-03-25T13:00:00+08:00',
+            columnId: 'runtime-column:short-drama',
+          },
+        ],
+      },
+      columns: [
+        {
+          columnId: 'runtime-column:short-drama',
+          columnName: '电视剧',
+          channelId: 'dragon',
+          defaultProgramType: 'drama',
+          semanticLabel: '电视剧',
+          queryHints: ['电视剧'],
+          source: 'generated',
+        },
+      ],
+    }
+    previewFeasibilityMock.mockReturnValue({
+      ok: false,
+      summary: {
+        readyCount: 0,
+        warningCount: 0,
+        blockedCount: 1,
+      },
+      segments: [
+        {
+          segmentId: 'slot-short-drama',
+          label: '电视剧',
+          startTime: '12:45:00',
+          endTime: '13:00:00',
+          status: 'blocked',
+          blockerKind: 'duration',
+          matchedCandidateCount: 0,
+          reasons: ['当前时段时长无法容纳该栏目类型的候选节目。'],
+        },
+      ],
+    })
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '按这个版面开始编排',
+      currentSchedule: [],
+      currentLayoutDraft: draft,
+      currentLayoutDraftMode: 'full_generate',
+      history: ['用户：12:45到13:00安排电视剧', '助手：已生成版面草案。'],
+    })
+
+    expect(result.kind).toBe('layout_draft')
+    if (result.kind !== 'layout_draft') {
+      throw new Error('expected duration-blocked layout draft decision')
+    }
+
+    expect(result.draft).toBe(draft)
+    expect(result.feasibilityReport.segments[0]?.blockerKind).toBe('duration')
+    expect(result.feedback.content).toContain('不会进入正式编排')
   })
 
   it.each([

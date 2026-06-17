@@ -11,8 +11,7 @@
 
       <el-form-item label="模型" prop="model">
         <el-select v-model="config.model" style="width: 100%">
-          <el-option label="DeepSeek V3.2" value="deepseek-ai/DeepSeek-V3.2" />
-          <el-option label="DeepSeek V3.2 Exp" value="deepseek-ai/DeepSeek-V3.2-Exp" />
+          <el-option label="DeepSeek V4 Flash" value="deepseek-ai/DeepSeek-V4-Flash" />
           <el-option label="DeepSeek V3" value="deepseek-ai/DeepSeek-V3" />
           <el-option label="DeepSeek R1" value="deepseek-ai/DeepSeek-R1" />
         </el-select>
@@ -61,10 +60,10 @@ const testResult = ref<{ success: boolean; message: string } | null>(null)
 const config = reactive<LLMConfig>({
   baseURL: 'https://api.siliconflow.cn/v1',
   apiKey: '',
-  model: 'deepseek-ai/DeepSeek-V3.2',
+  model: 'deepseek-ai/DeepSeek-V4-Flash',
   temperature: 0.3,
   maxTokens: 8192,
-  timeout: 60000,
+  timeout: 15000,
 })
 
 const rules: FormRules = {

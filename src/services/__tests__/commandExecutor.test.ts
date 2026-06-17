@@ -92,6 +92,113 @@ describe('CommandExecutor', () => {
 
     expect(preview.affectedItems).toEqual(['item-1'])
     expect(preview.risks).toContain('目标时间段与其他条目重叠')
+    expect(preview.canExecute).toBe(false)
+  })
+
+  it('execute(move) blocks occupied target ranges before changing the schedule', async () => {
+    const atomicCapabilities = new AtomicCapabilities({ enableAutoValidation: false })
+    atomicCapabilities.loadItems([
+      createItem(),
+      createItem({
+        id: 'item-2',
+        programCode: 'CODE-002',
+        startTime: iso('06:30:00'),
+        endTime: iso('07:00:00'),
+        sequence: 2,
+      }),
+    ])
+    const executor = new CommandExecutor(atomicCapabilities, { enableAutoValidation: false })
+
+    const result = await executor.execute({
+      action: 'move',
+      data: {
+        itemId: 'item-1',
+        newStartTime: iso('06:15:00'),
+      },
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toBe('time_range_overlap')
+    expect(atomicCapabilities.getItem('item-1')?.startTime).toBe(iso('06:00:00'))
+  })
+
+  it('preview(move) reports sequence risk when moving a later episode before an earlier one', async () => {
+    const atomicCapabilities = new AtomicCapabilities({ enableAutoValidation: false })
+    atomicCapabilities.loadItems([
+      createItem({
+        id: 'episode-1',
+        programCode: '881120030001',
+        programName: '品质剧场：纵有疾风起 第1集',
+        startTime: iso('09:00:00'),
+        endTime: iso('09:45:00'),
+        duration: 2700,
+        programType: 'drama',
+        sequence: 1,
+      }),
+      createItem({
+        id: 'episode-2',
+        programCode: '881120030002',
+        programName: '品质剧场：纵有疾风起 第2集',
+        startTime: iso('10:00:00'),
+        endTime: iso('10:45:00'),
+        duration: 2700,
+        programType: 'drama',
+        sequence: 2,
+      }),
+    ])
+    const executor = new CommandExecutor(atomicCapabilities, { enableAutoValidation: false })
+
+    const command: MoveCommand = {
+      action: 'move',
+      data: {
+        itemId: 'episode-2',
+        newStartTime: iso('08:00:00'),
+      },
+    }
+
+    const preview = await executor.preview(command)
+
+    expect(preview.risks.some((risk) => risk.includes('顺播倒序'))).toBe(true)
+    expect(preview.canExecute).toBe(false)
+  })
+
+  it('execute(move) blocks moving a later episode before an earlier one', async () => {
+    const atomicCapabilities = new AtomicCapabilities({ enableAutoValidation: false })
+    atomicCapabilities.loadItems([
+      createItem({
+        id: 'episode-1',
+        programCode: '881120030001',
+        programName: '品质剧场：纵有疾风起 第1集',
+        startTime: iso('09:00:00'),
+        endTime: iso('09:45:00'),
+        duration: 2700,
+        programType: 'drama',
+        sequence: 1,
+      }),
+      createItem({
+        id: 'episode-2',
+        programCode: '881120030002',
+        programName: '品质剧场：纵有疾风起 第2集',
+        startTime: iso('10:00:00'),
+        endTime: iso('10:45:00'),
+        duration: 2700,
+        programType: 'drama',
+        sequence: 2,
+      }),
+    ])
+    const executor = new CommandExecutor(atomicCapabilities, { enableAutoValidation: false })
+
+    const result = await executor.execute({
+      action: 'move',
+      data: {
+        itemId: 'episode-2',
+        newStartTime: iso('08:00:00'),
+      },
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.message).toContain('顺播倒序')
+    expect(atomicCapabilities.getItem('episode-2')?.startTime).toBe(iso('10:00:00'))
   })
 
   it('preview(fill_item) warns when gap is missing', async () => {
@@ -157,6 +264,101 @@ describe('CommandExecutor', () => {
     expect(atomicCapabilities.getItem('item-1')?.endTime).toBe(iso('07:00:00'))
   })
 
+  it('preview(update_field) reports overlap when duration extends into the next item', async () => {
+    const atomicCapabilities = new AtomicCapabilities({ enableAutoValidation: false })
+    atomicCapabilities.loadItems([
+      createItem(),
+      createItem({
+        id: 'item-2',
+        programCode: 'CODE-002',
+        startTime: iso('06:30:00'),
+        endTime: iso('07:00:00'),
+        sequence: 2,
+      }),
+    ])
+    const executor = new CommandExecutor(atomicCapabilities, { enableAutoValidation: false })
+
+    const preview = await executor.preview({
+      action: 'update_field',
+      data: {
+        itemId: 'item-1',
+        field: 'duration',
+        value: 3600,
+      },
+    })
+
+    expect(preview.risks).toContain('目标时间段与其他条目重叠')
+    expect(preview.canExecute).toBe(false)
+  })
+
+  it('execute(update_field) blocks duration updates that would overlap the next item', async () => {
+    const atomicCapabilities = new AtomicCapabilities({ enableAutoValidation: false })
+    atomicCapabilities.loadItems([
+      createItem(),
+      createItem({
+        id: 'item-2',
+        programCode: 'CODE-002',
+        startTime: iso('06:30:00'),
+        endTime: iso('07:00:00'),
+        sequence: 2,
+      }),
+    ])
+    const executor = new CommandExecutor(atomicCapabilities, { enableAutoValidation: false })
+
+    const result = await executor.execute({
+      action: 'update_field',
+      data: {
+        itemId: 'item-1',
+        field: 'duration',
+        value: 3600,
+      },
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toBe('time_range_overlap')
+    expect(atomicCapabilities.getItem('item-1')?.duration).toBe(1800)
+  })
+
+  it('execute(update_field) blocks startTime updates that would break episode order', async () => {
+    const atomicCapabilities = new AtomicCapabilities({ enableAutoValidation: false })
+    atomicCapabilities.loadItems([
+      createItem({
+        id: 'episode-1',
+        programCode: '881120030001',
+        programName: '品质剧场：纵有疾风起 第1集',
+        startTime: iso('09:00:00'),
+        endTime: iso('09:45:00'),
+        duration: 2700,
+        programType: 'drama',
+        sequence: 1,
+      }),
+      createItem({
+        id: 'episode-2',
+        programCode: '881120030002',
+        programName: '品质剧场：纵有疾风起 第2集',
+        startTime: iso('10:00:00'),
+        endTime: iso('10:45:00'),
+        duration: 2700,
+        programType: 'drama',
+        sequence: 2,
+      }),
+    ])
+    const executor = new CommandExecutor(atomicCapabilities, { enableAutoValidation: false })
+
+    const result = await executor.execute({
+      action: 'update_field',
+      data: {
+        itemId: 'episode-2',
+        field: 'startTime',
+        value: iso('08:00:00'),
+      },
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.message).toContain('顺播倒序')
+    expect(atomicCapabilities.getItem('episode-2')?.startTime).toBe(iso('10:00:00'))
+  })
+
   it('execute(plan) returns selected strategy information', async () => {
     const executor = new CommandExecutor(new AtomicCapabilities({ enableAutoValidation: false }))
     const command: PlanCommand = {
@@ -203,5 +405,6 @@ describe('CommandExecutor', () => {
     })
 
     expect(preview.risks).toContain('目标时间段已被占用')
+    expect(preview.canExecute).toBe(false)
   })
 })

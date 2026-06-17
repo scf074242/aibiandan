@@ -121,6 +121,78 @@ const createLiveDraft = (): LayoutDraft => ({
 })
 
 describe('LayoutDraftService', () => {
+  it('enriches LLM-generated outdoor live hints after parsing spec JSON', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        coverage: { start: '14:00:00', end: '15:00:00' },
+        segments: [
+          {
+            id: 'live',
+            label: '静安寺户外直播',
+            startTime: '14:00:00',
+            endTime: '15:00:00',
+            programType: 'news',
+            queryHints: ['静安寺户外直播'],
+          },
+        ],
+      }),
+    }))
+    const service = new LayoutDraftService({ chat } as never)
+
+    const spec = await service.generateSpec({
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      userInput: '我准备在静安寺进行户外直播，准备一个14:00到15:00的轮播单',
+      coverage: { start: '14:00:00', end: '15:00:00' },
+      semanticLabel: '静安寺户外直播',
+      programTypeHint: 'news_magazine',
+    })
+
+    expect(spec.segments[0]?.label).toBe('静安寺户外直播')
+    expect(spec.segments[0]?.programType).toBe('news_magazine')
+    expect(spec.segments[0]?.queryHints).toEqual(expect.arrayContaining([
+      '静安寺户外直播',
+      '静安寺',
+      '直播',
+      '外场直播',
+    ]))
+  })
+
+  it('明确节目标题和集数时会纠正为电视剧顺播草案', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        coverage: { start: '09:30:00', end: '10:15:00' },
+        segments: [
+          {
+            id: 'explicit-title',
+            label: '节目标题纵有疾风起第5集',
+            startTime: '09:30:00',
+            endTime: '10:15:00',
+            programType: 'news_magazine',
+            queryHints: ['节目标题纵有疾风起第5集'],
+          },
+        ],
+      }),
+    }))
+    const service = new LayoutDraftService({ chat } as never)
+
+    const spec = await service.generateSpec({
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      userInput: '09:30到10:15安排节目标题纵有疾风起第5集',
+      coverage: { start: '09:30:00', end: '10:15:00' },
+    })
+
+    expect(spec.segments[0]?.programType).toBe('drama')
+    expect(spec.segments[0]?.queryHints).toEqual(expect.arrayContaining([
+      '节目标题纵有疾风起第5集',
+      '电视剧',
+      '剧场',
+    ]))
+  })
+
   it('在回退生成时保留自由业务短语标签', async () => {
     const service = new LayoutDraftService({
       chat: vi.fn(async () => {

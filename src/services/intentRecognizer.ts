@@ -20,9 +20,6 @@ export class IntentRecognizer {
 
   async recognize(context: DialogueContext): Promise<MicroEditIntent> {
     const ruleBased = this.ruleBasedRecognize(context.userInput)
-    if (!this.shouldUseContextualReview(context, ruleBased)) {
-      return ruleBased
-    }
 
     try {
       const response = await this.llmClient.chat(
@@ -45,18 +42,11 @@ export class IntentRecognizer {
               '输出格式: {"type":"delete","confidence":0.95,"reasoning":"..."}',
           },
         ],
-        { temperature: 0.1, maxTokens: 200 },
+        { temperature: 0.1, maxTokens: 200, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_intent' },
       )
 
       const parsed = this.parseIntentResponse(response.content)
       if (!parsed) {
-        return ruleBased
-      }
-
-      const ruleBasedActionable = ['insert', 'move', 'delete', 'replace'].includes(ruleBased.type)
-      const parsedActionable = ['insert', 'move', 'delete', 'replace'].includes(parsed.type)
-
-      if (ruleBasedActionable && !parsedActionable) {
         return ruleBased
       }
 
@@ -77,17 +67,47 @@ export class IntentRecognizer {
       context.nearbyScheduleSummary !== '当前节目单为空，没有可参考的附近节目。'
       && context.nearbyScheduleSummary !== '未从用户输入中识别到明确时间点。'
     const isHighRiskIntent = ruleBased.type === 'delete' || ruleBased.type === 'replace'
+    const isActionableIntent = ['insert', 'move', 'delete', 'replace'].includes(ruleBased.type)
+
+    if (
+      isActionableIntent
+      && ruleBased.confidence >= 0.95
+      && this.hasConcreteAtomicAnchor(context, ruleBased.type)
+    ) {
+      return false
+    }
 
     return hasSchedule && (isHighRiskIntent || hasTimeHints || hasNearbyItems)
   }
 
+  private hasConcreteAtomicAnchor(context: DialogueContext, intentType: MicroEditIntentType): boolean {
+    if (context.targetTimeHints.length > 0) return true
+
+    const normalizedInput = this.normalizeAtomicText(context.userInput)
+    if (/《[^》]+》/.test(context.userInput)) return true
+    if (/(这条|那条|这个|那个|当前|第一条|最后一条|前一条|后一条)/.test(normalizedInput)) return true
+
+    if (intentType === 'replace' && /(换成|换播|替换成|替换为|改成|改为|改播).+/.test(normalizedInput)) {
+      return true
+    }
+
+    return context.currentSchedule.some((item) => (
+      Boolean(item.programName)
+      && normalizedInput.includes(this.normalizeAtomicText(item.programName))
+    ))
+  }
+
+  private normalizeAtomicText(value = ''): string {
+    return value.replace(/\s+/g, '').replace(/[《》"'“”‘’、，。！？!?:：()（）[\]【】\-_.]/g, '').toLowerCase()
+  }
+
   private ruleBasedRecognize(userInput: string): MicroEditIntent {
     const normalized = userInput.replace(/\s+/g, '')
-    const hasInsertVerb = /(插入|插个|插一|加一条|加一档|加个|加一段|加一些|添加节目|安排节目|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选))/.test(normalized)
-    const hasMoveVerb = /(移动|后移|前移|顺延|延后|提前|往后挪|往前挪|挪一下|顺一下|顺一个)/.test(normalized)
-    const hasDeleteVerb = /(删除|删掉|去掉|移除|撤掉|拿掉)/.test(normalized)
-    const hasReplaceVerb = /(换成|换掉|替换|替换成|改成|替换为|改为)/.test(normalized)
-    const hasProgramCue = /(节目|那条|这条|那档|这档|看东方|东方新闻|电视剧|新闻|预告|导视|垫片|纪录片|纪实|综艺|栏目|短剧|少儿|动画|养生|健康|午间30|中国考古|《[^》]+》)/.test(normalized)
+    const hasInsertVerb = /(插入|插个|插一|插播|加播|加一条|加一档|加个|加点|加一点|加一段|加一些|添加节目|安排节目|排入|排个|排一条|排一档|来个|来点|来一点|来一条|来一档|来一段|放个|放点|放一点|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选))/.test(normalized)
+    const hasMoveVerb = /(移动到|移到|调到|调整到|改到|挪到|放到|排到|移动|后移|前移|顺延|延后|提前|推迟|推后|延迟|往后挪|往前挪|挪一下|顺一下|顺一个)/.test(normalized)
+    const hasDeleteVerb = /(删除|删掉|去掉|移除|撤掉|撤下|拿掉|拿下|下掉)/.test(normalized)
+    const hasReplaceVerb = /(换成|换播|换掉|替换|替换成|改成|替换为|改为|改播)/.test(normalized)
+    const hasProgramCue = /(节目|内容|那条|这条|那档|这档|看东方|东方新闻|电视剧|新闻|预告|导视|垫片|纪录片|纪实|综艺|娱乐|栏目|短剧|少儿|动画|养生|健康|午间30|中国考古|《[^》]+》)/.test(normalized)
 
     if (hasDeleteVerb && hasProgramCue) {
       return {

@@ -1,0 +1,38 @@
+{
+  "id": "atomic-move-forward-hour",
+  "category": "atomic_intent",
+  "userInput": "把9点的节目向后移动1小时",
+  "initialSchedule": [
+    {
+      "id": "item-0900",
+      "programCode": "002601100004",
+      "programName": "看东方",
+      "startTime": "09:00:00",
+      "endTime": "10:00:00",
+      "duration": 3600,
+      "programType": "news"
+    }
+  ],
+  "layoutContext": null,
+  "programLibraryExpectation": "not_required",
+  "expectedDecision": {
+    "kind": "execute_command",
+    "action": "move",
+    "newStartTime": "2026-03-25T10:00:00+08:00"
+  },
+  "expectedSchedule": [
+    {
+      "id": "item-0900",
+      "startTime": "10:00:00",
+      "endTime": "11:00:00"
+    }
+  ],
+  "mustNotHappen": [
+    "newStartTime=2026-03-25T08:00:00+08:00",
+    "pending_atomic_context"
+  ],
+  "verification": [
+    "npm test -- src/services/__tests__/atomicOffsetParser.test.ts src/services/__tests__/paramExtractor.test.ts src/services/__tests__/demoRuntimeFacade.atomicFallback.test.ts",
+    "npm run agent:check"
+  ]
+}

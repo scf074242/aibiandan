@@ -673,6 +673,54 @@ describe('LayoutIntentRecognizer', () => {
     })
   })
 
+  it('规则层拆出的明确多时段不会被 LLM 单段粗结果覆盖', async () => {
+    const recognizer = new LayoutIntentRecognizer({
+      chat: vi.fn(async () => ({
+        content: JSON.stringify({
+          mode: 'layout_prepare',
+          confidence: 0.9,
+          reasoning: 'LLM 粗略识别成单段。',
+          ignoreExistingLayout: false,
+          targetTimeRange: { start: '09:00:00', end: '12:00:00' },
+          semanticLabel: '品质剧场：纵有疾风起；午间新闻',
+          programTypeHint: 'drama',
+          segments: [
+            {
+              start: '09:00:00',
+              end: '12:00:00',
+              semanticLabel: '品质剧场：纵有疾风起；午间新闻',
+              programTypeHint: 'drama',
+            },
+          ],
+        }),
+      })),
+    } as never)
+
+    const result = await recognizer.recognize({
+      scheduleState: createScheduleState(),
+      userInput: '按纯电视频道，09:00到12:00继续播品质剧场：纵有疾风起，接昨天进度顺播；12:00到12:30安排午间新闻',
+    })
+
+    expect(result.mode).toBe('layout_prepare')
+    expect(result.targetTimeRange).toEqual({
+      start: '09:00:00',
+      end: '12:30:00',
+    })
+    expect(result.segments).toHaveLength(2)
+    expect(result.segments?.[0]).toMatchObject({
+      start: '09:00:00',
+      end: '12:00:00',
+      programTypeHint: 'drama',
+    })
+    expect(result.segments?.[0]?.semanticLabel).toContain('纵有疾风起')
+    expect(result.segments?.[1]).toMatchObject({
+      start: '12:00:00',
+      end: '12:30:00',
+      semanticLabel: '午间新闻',
+      programTypeHint: 'news',
+    })
+  })
+
   it('能把起播时间加连续时长的话术识别成结构化 segments', async () => {
     const recognizer = new LayoutIntentRecognizer({
       chat: vi.fn(async () => {

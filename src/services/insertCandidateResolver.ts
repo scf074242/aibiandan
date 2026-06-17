@@ -1,6 +1,14 @@
 import type { ProgramCandidate } from '@/types/orchestration'
 import { getEffectiveColumnDefinition, getEffectiveProgramsByColumn } from './orchestration/runtimeLayoutRegistry'
 import type { InsertParams } from './paramExtractor'
+import {
+  extractFunctionalSearchKeywords,
+  extractSoftSearchKeywords,
+  extractSpecificSearchKeywords,
+  hasEditorialKeywordRequirements,
+  matchesEditorialKeywordRequirementsByFields,
+  normalizeCandidateKeyword,
+} from './candidateKeywordMatcher'
 
 export type InsertRecommendationTrigger =
   | 'missing_program_name'
@@ -143,9 +151,15 @@ export class InsertCandidateResolver {
     input: ResolveInsertCandidateInput,
   ): CandidateScoreBreakdown {
     const normalizedCandidateName = this.normalizeText(candidate.programName)
+    const normalizedSearchText = normalizeCandidateKeyword(this.buildCandidateSearchText(candidate))
     const normalizedTargetName = this.normalizeText(input.params.programName)
     const normalizedRawText = this.normalizeText(input.params.rawProgramText)
     const normalizedSemanticLabel = this.normalizeText(input.params.semanticLabel)
+    const searchKeywords = [
+      input.params.programName,
+      input.params.rawProgramText,
+      input.params.semanticLabel,
+    ].filter((value): value is string => Boolean(value?.trim()))
     const keywords = this.extractKeywords(
       input.params.programName,
       input.params.rawProgramText,
@@ -199,6 +213,38 @@ export class InsertCandidateResolver {
     if (normalizedSemanticLabel && normalizedCandidateName.includes(normalizedSemanticLabel)) {
       score += 14
       reasonTags.push('语义匹配')
+    } else if (normalizedSemanticLabel && normalizedSearchText.includes(normalizedSemanticLabel)) {
+      score += 10
+      reasonTags.push('标签语义匹配')
+    }
+
+    if (
+      hasEditorialKeywordRequirements(searchKeywords)
+      && this.matchesEditorialKeywordRequirements(candidate, searchKeywords)
+    ) {
+      score += 24
+      reasonTags.push('栏目/内容要求命中')
+    }
+
+    const softKeywordMatchCount = extractSoftSearchKeywords(searchKeywords)
+      .filter((keyword) => normalizedSearchText.includes(keyword)).length
+    if (softKeywordMatchCount > 0) {
+      score += Math.min(18, softKeywordMatchCount * 6)
+      reasonTags.push('候选证据匹配')
+    }
+
+    const specificKeywordMatchCount = extractSpecificSearchKeywords(searchKeywords)
+      .filter((keyword) => normalizedSearchText.includes(keyword)).length
+    if (specificKeywordMatchCount > 0) {
+      score += Math.min(24, specificKeywordMatchCount * 24)
+      reasonTags.push('具体内容命中')
+    }
+
+    const functionalMatchCount = extractFunctionalSearchKeywords(searchKeywords)
+      .filter((keyword) => normalizedSearchText.includes(keyword)).length
+    if (functionalMatchCount > 0) {
+      score += Math.min(12, functionalMatchCount * 6)
+      reasonTags.push('功能要求匹配')
     }
 
     const keywordMatchCount = keywords.filter((keyword) => normalizedCandidateName.includes(keyword)).length
@@ -234,6 +280,31 @@ export class InsertCandidateResolver {
       .replace(/\s+/g, '')
       .trim()
       .toLowerCase()
+  }
+
+  private buildCandidateSearchText(candidate: ProgramCandidate): string {
+    return [
+      candidate.programName,
+      candidate.instanceName,
+      candidate.programCode,
+      candidate.issueNo,
+      candidate.columnName,
+      candidate.columnId,
+      ...(candidate.contentTags ?? []),
+    ].filter(Boolean).join(' ')
+  }
+
+  private matchesEditorialKeywordRequirements(candidate: ProgramCandidate, searchKeywords: string[]): boolean {
+    return matchesEditorialKeywordRequirementsByFields({
+      column: [candidate.columnName, candidate.columnId].filter(Boolean).join(' '),
+      title: [candidate.programName, candidate.instanceName].filter(Boolean).join(' '),
+      content: [
+        candidate.programName,
+        candidate.instanceName,
+        ...(candidate.contentTags ?? []),
+      ].filter(Boolean).join(' '),
+      all: this.buildCandidateSearchText(candidate),
+    }, searchKeywords)
   }
 
   private normalizeSeriesName(value: string): string {

@@ -1,8 +1,9 @@
-﻿import type { InsertCommand, MaterializeInput, ValidationReport } from '@/types/orchestration'
+import type { InsertCommand, MaterializeInput, ProgramCandidate, ScheduleItemSnapshot, ValidationReport } from '@/types/orchestration'
 import { getAtomicCapabilities } from './atomicCapabilities'
 import { getCandidateService } from './candidateService'
 import { getMaterializer } from './materializer'
 import { getScheduleValidationService } from './scheduleValidationService'
+import { detectMovingItemSequenceViolation } from './scheduleSequenceGuard'
 
 export interface InsertExecutionResult {
   success: boolean
@@ -41,6 +42,19 @@ export class InsertCommandExecutor {
       return {
         success: false,
         message: `目标时间 ${insertTime} 已有节目占用，当前仅支持插入到空闲时间段`,
+      }
+    }
+
+    const sequenceViolation = this.detectSequenceOrderViolation(
+      candidate,
+      startTime,
+      endTime,
+      atomicCapabilities.getAllItems(),
+    )
+    if (sequenceViolation) {
+      return {
+        success: false,
+        message: sequenceViolation,
       }
     }
 
@@ -137,13 +151,159 @@ export class InsertCommandExecutor {
     const materializer = getMaterializer()
     const startTime = this.normalizeDateTime(scheduleDate, insertTime)
     const endTime = materializer.calculateEndTime(startTime, candidate.duration)
-    const canExecute = getAtomicCapabilities().isTimeRangeAvailable(startTime, endTime)
+    const atomicCapabilities = getAtomicCapabilities()
+    const canExecute = atomicCapabilities.isTimeRangeAvailable(startTime, endTime)
+    const sequenceViolation = canExecute
+      ? this.detectSequenceOrderViolation(candidate, startTime, endTime, atomicCapabilities.getAllItems())
+      : null
 
     return {
-      canExecute,
-      warnings: canExecute ? [] : ['目标时间段已被现有节目占用'],
+      canExecute: canExecute && !sequenceViolation,
+      warnings: [
+        ...(canExecute ? [] : ['目标时间段已被现有节目占用']),
+        ...(sequenceViolation ? [sequenceViolation] : []),
+      ],
       timeRange: { start: startTime, end: endTime },
     }
+  }
+
+  private detectSequenceOrderViolation(
+    candidate: ProgramCandidate,
+    startTime: string,
+    endTime: string,
+    existingItems: ScheduleItemSnapshot[],
+  ): string | null {
+    const sharedViolation = detectMovingItemSequenceViolation({
+      id: `insert-preview:${candidate.id}`,
+      programCode: candidate.programCode,
+      programName: candidate.programName,
+      startTime,
+      endTime,
+      duration: candidate.duration,
+      programType: candidate.programType,
+      sequence: 0,
+      issueNo: candidate.issueNo,
+    } as ScheduleItemSnapshot & { issueNo?: string }, existingItems, '插入')
+    if (sharedViolation) {
+      return sharedViolation.message
+    }
+
+    const candidateSeriesKey = this.buildSeriesKey(candidate.programName, candidate.programCode)
+    const candidateSequence = this.extractSequenceNo(candidate)
+    if (!candidateSeriesKey || typeof candidateSequence !== 'number') {
+      return null
+    }
+
+    const insertStartMs = new Date(startTime).getTime()
+    const insertEndMs = new Date(endTime).getTime()
+    if (!Number.isFinite(insertStartMs) || !Number.isFinite(insertEndMs)) {
+      return null
+    }
+
+    for (const item of existingItems) {
+      const itemSeriesKey = this.buildSeriesKey(item.programName, item.programCode)
+      if (!itemSeriesKey || itemSeriesKey !== candidateSeriesKey) continue
+
+      const itemSequence = this.extractSequenceNo(item)
+      if (typeof itemSequence !== 'number') continue
+
+      const itemStartMs = new Date(item.startTime).getTime()
+      const itemEndMs = new Date(item.endTime).getTime()
+      if (!Number.isFinite(itemStartMs) || !Number.isFinite(itemEndMs)) continue
+
+      if (insertStartMs < itemStartMs && candidateSequence > itemSequence) {
+        return `插入会造成顺播倒序：不能在 ${this.toClock(startTime)} 插入第${candidateSequence}集，后面 ${this.toClock(item.startTime)} 已有第${itemSequence}集。`
+      }
+      if (insertStartMs >= itemEndMs && candidateSequence < itemSequence) {
+        return `插入会造成顺播倒序：前面 ${this.toClock(item.startTime)} 已有第${itemSequence}集，不能在 ${this.toClock(startTime)} 插入第${candidateSequence}集。`
+      }
+      if (insertStartMs >= itemEndMs && candidateSequence > itemSequence + 1) {
+        return `插入会造成顺播跳集：前面 ${this.toClock(item.startTime)} 已有第${itemSequence}集，不能直接在 ${this.toClock(startTime)} 插入第${candidateSequence}集。`
+      }
+      if (insertStartMs < itemStartMs && candidateSequence + 1 < itemSequence) {
+        return `插入会造成顺播跳集：后面 ${this.toClock(item.startTime)} 已有第${itemSequence}集，不能在 ${this.toClock(startTime)} 只补到第${candidateSequence}集。`
+      }
+    }
+
+    return null
+  }
+
+  private buildSeriesKey(programName?: string, programCode?: string): string {
+    const normalizedName = this.normalizeSeriesName(programName)
+    if (normalizedName) {
+      return `name:${normalizedName}`
+    }
+    return programCode ? `code:${programCode.replace(/\d{1,4}$/, '')}` : ''
+  }
+
+  private normalizeSeriesName(programName?: string): string {
+    if (!programName) return ''
+    return programName
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '')
+      .replace(/^[^：:]+[：:]/u, '')
+      .replace(/第\s*[0-9零〇一二两三四五六七八九十百]+\s*[集期]/gu, '')
+      .replace(/[上中下][集期]/gu, '')
+      .replace(/[《》“”"'（）()【】\[\]·•.。；;，,、_\-—]/g, '')
+  }
+
+  private extractSequenceNo(candidate: ProgramCandidate | ScheduleItemSnapshot): number | null {
+    const issueNo = 'issueNo' in candidate ? this.parsePositiveNumber(candidate.issueNo) : null
+    if (issueNo !== null) {
+      return issueNo
+    }
+
+    const codeMatch = candidate.programCode?.match(/(\d{1,4})$/)
+    if (codeMatch) {
+      const parsed = Number(codeMatch[1])
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed
+      }
+    }
+
+    const nameText = 'instanceName' in candidate
+      ? `${candidate.programName} ${candidate.instanceName}`
+      : candidate.programName
+    const nameMatch = nameText.match(/第\s*([0-9零〇一二两三四五六七八九十百]+)\s*[集期]/u)
+    return nameMatch ? this.parseChineseNumber(nameMatch[1]!) : null
+  }
+
+  private parsePositiveNumber(value?: string): number | null {
+    if (!value) return null
+    const parsed = Number(value)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+  }
+
+  private parseChineseNumber(value: string): number | null {
+    const direct = Number(value)
+    if (Number.isFinite(direct) && direct > 0) return direct
+    const digits: Record<string, number> = {
+      零: 0,
+      〇: 0,
+      一: 1,
+      二: 2,
+      两: 2,
+      三: 3,
+      四: 4,
+      五: 5,
+      六: 6,
+      七: 7,
+      八: 8,
+      九: 9,
+    }
+    if (value === '十') return 10
+    const tenIndex = value.indexOf('十')
+    if (tenIndex >= 0) {
+      const high = tenIndex === 0 ? 1 : digits[value[tenIndex - 1]!] ?? 0
+      const low = digits[value[tenIndex + 1]!] ?? 0
+      return high * 10 + low
+    }
+    return value.split('').reduce((sum, char) => sum * 10 + (digits[char] ?? 0), 0) || null
+  }
+
+  private toClock(value: string): string {
+    return value.includes('T') ? (value.split('T')[1]?.slice(0, 8) ?? value) : value
   }
 
   private normalizeDateTime(scheduleDate: string, timeText: string): string {

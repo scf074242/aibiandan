@@ -149,4 +149,28 @@ describe('AtomicContinuationClassifier', () => {
       kind: 'interrupt_as_new_task',
     })
   })
+
+  it.each([
+    '9点改播东方新闻',
+    '9点换播东方新闻',
+  ])('插入推荐阶段遇到带明确时间的改播/换播命令会打断旧候选上下文: %s', (userInput) => {
+    const classifier = new AtomicContinuationClassifier()
+
+    const result = classifier.classify({
+      pendingContext: createPendingContext({
+        action: 'insert',
+        phase: 'recommending_insert',
+        slots: {
+          targetTime: '10:00:00',
+          programName: '纪录片',
+        },
+        missingFields: ['selection'],
+      }),
+      userInput,
+    })
+
+    expect(result).toEqual({
+      kind: 'interrupt_as_new_task',
+    })
+  })
 })

@@ -45,6 +45,9 @@ const normalizeClock = (clock: string) => {
   return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`
 }
 
+const hasDramaEpisodeCue = (value: string): boolean =>
+  /第\s*[0-9零〇一二两三四五六七八九十百]+\s*集/u.test(value)
+
 const extractFreeformLayoutLabel = (input: string): string | null => {
   const normalized = input
     .replace(/^(?:不参考当前版面参考|不要参考当前版面参考|不参考当前版面|不要参考当前版面|忽略当前版面参考)[,，、]*/u, '')
@@ -66,7 +69,7 @@ const buildGuessFromFreeformLabel = (label: string): ProgramTypeGuess => {
   const lowered = normalized.toLowerCase()
   const withHints = (...hints: string[]) => Array.from(new Set([normalized, ...hints].filter(Boolean)))
 
-  if (/(剧场|电视剧|影视|微短剧|连续剧)/u.test(normalized)) {
+  if (/(剧场|电视剧|影视|微短剧|连续剧)/u.test(normalized) || hasDramaEpisodeCue(normalized)) {
     return {
       label: normalized,
       programType: 'drama',
@@ -140,17 +143,130 @@ const buildGuessFromStructuredIntent = (
   }
 
   const label = semanticLabel?.trim() || (programTypeHint ? DEFAULT_LABEL_BY_PROGRAM_TYPE[programTypeHint] : undefined) || '自定义版面'
-  const queryHints = Array.from(new Set([
-    label,
-    programTypeHint ? DEFAULT_LABEL_BY_PROGRAM_TYPE[programTypeHint] : undefined,
-  ].filter(Boolean) as string[]))
+  const queryHints = buildStructuredQueryHints(label, programTypeHint)
 
   return {
     label,
-    programType: programTypeHint ?? buildGuessFromFreeformLabel(label).programType,
+    programType: normalizeStructuredProgramType(label, programTypeHint),
     queryHints,
-    sequential: programTypeHint === 'drama' || /剧场|电视剧|连续剧/u.test(label),
+    sequential: programTypeHint === 'drama' || /剧场|电视剧|连续剧/u.test(label) || hasDramaEpisodeCue(label),
   }
+}
+
+const cleanEditorialHintValue = (value: string): string => {
+  let cleaned = value
+    .replace(/^[:：，,、\s]+/u, '')
+    .replace(/[。；;，,、\s]+$/u, '')
+    .replace(/^(?:为|是|叫|名为|名称为)+/u, '')
+    .trim()
+
+  for (let index = 0; index < 3; index += 1) {
+    cleaned = cleaned
+      .replace(/(?:内容匹配优先|匹配优先|收视率优先|收视优先|高收视率|优先选择.*)$/u, '')
+      .replace(/(?:的)?(?:轮播单|直播单|播单|节目单|编排单|串联单|版面|草案|节目|内容)$/u, '')
+      .replace(/[。；;，,、\s]+$/u, '')
+      .trim()
+  }
+
+  return cleaned
+}
+
+const extractEditorialHintPhrases = (label: string): string[] => {
+  const normalized = label.replace(/\s+/g, '')
+  const cuePattern = /(?:所属|属于)?栏目(?:名称|名)?|(?:节目)?标题|(?:节目)?内容/gu
+  const cueMatches = [...normalized.matchAll(cuePattern)]
+  if (cueMatches.length === 0) return []
+
+  const hints = new Set<string>()
+  cueMatches.forEach((match, index) => {
+    const cue = match[0]
+    const start = (match.index ?? 0) + cue.length
+    const end = cueMatches[index + 1]?.index ?? normalized.length
+    const value = cleanEditorialHintValue(normalized.slice(start, end))
+    if (value.length < 2) return
+    const prefix = cue.includes('栏目')
+      ? '所属栏目'
+      : cue.includes('标题')
+        ? '节目标题'
+        : '节目内容'
+    hints.add(`${prefix}${value}`)
+  })
+
+  return [...hints]
+}
+
+const buildStructuredQueryHints = (label: string, programTypeHint?: string): string[] => {
+  const editorialHints = extractEditorialHintPhrases(label)
+  const hints = [
+    ...(editorialHints.length > 0 ? [] : [label]),
+    ...editorialHints,
+    programTypeHint ? DEFAULT_LABEL_BY_PROGRAM_TYPE[programTypeHint] : undefined,
+  ].filter(Boolean) as string[]
+  const text = `${label}${programTypeHint ?? ''}`
+
+  ;[
+    '静安寺',
+    '外滩',
+    '商圈',
+    '发布会',
+    '会场',
+    '展会',
+    '论坛',
+    '活动',
+    '直播',
+    '现场',
+    '户外直播',
+    '外场直播',
+    '现场导视',
+    '预热',
+    '导视',
+    '集锦',
+    '回看',
+    '服务提醒',
+  ].forEach((keyword) => {
+    if (text.includes(keyword)) {
+      hints.push(keyword)
+    }
+  })
+
+  if (/户外|外场|现场|直播/.test(text)) {
+    hints.push('直播', '外场直播')
+  }
+  if (hasDramaEpisodeCue(text)) {
+    hints.push('电视剧', '剧场')
+  }
+
+  return Array.from(new Set(hints))
+}
+
+const mergeStructuredQueryHints = (
+  rawHints: string[] | undefined,
+  label: string,
+  programType?: string,
+): string[] => {
+  const normalizedLabel = label.replace(/\s+/g, '')
+  const hasEditorialHints = extractEditorialHintPhrases(label).length > 0
+  const safeRawHints = (rawHints ?? []).filter((hint) =>
+    !(hasEditorialHints && hint.replace(/\s+/g, '') === normalizedLabel),
+  )
+  return Array.from(new Set([
+    ...safeRawHints,
+    ...buildStructuredQueryHints(label, programType),
+  ]))
+}
+
+const normalizeStructuredProgramType = (label: string, programType?: string): string => {
+  const text = `${label}${programType ?? ''}`
+  if (programType === 'news' && /(快讯|新闻|快报|播报|报道)/.test(label)) {
+    return 'news'
+  }
+  if (hasDramaEpisodeCue(text) || /剧场|电视剧|连续剧/u.test(text)) {
+    return 'drama'
+  }
+  if (/(户外|外场|现场|直播|活动|会场|展会|论坛|峰会|发布会|预热|导视|集锦|回看|服务提醒)/.test(text)) {
+    return 'news_magazine'
+  }
+  return programType || buildGuessFromFreeformLabel(label).programType
 }
 
 const resolveProgramGuess = (
@@ -572,11 +688,17 @@ export class LayoutDraftService {
 
   async generateSpec(input: LayoutDraftGenerationInput): Promise<LayoutDraftSpec> {
     const fallback = this.buildFallbackSpec(input)
+    if (input.segments?.length) {
+      return fallback
+    }
 
     try {
       const response = await this.llmClient.chat(this.buildGeneratePrompt(input), {
         temperature: 0.2,
         maxTokens: 1200,
+        timeout: 8000,
+        maxRetries: 1,
+        traceLabel: 'layout_draft_generate',
       })
 
       return this.parseSpecResponse(response.content, fallback)
@@ -587,6 +709,9 @@ export class LayoutDraftService {
 
   async refineSpec(input: LayoutDraftRefineInput): Promise<LayoutDraftSpec> {
     const fallback = this.buildRefinedFallbackSpec(input)
+    if (input.segments?.length) {
+      return fallback
+    }
     if (isDeterministicRemoveRefine(input)) {
       return fallback
     }
@@ -596,6 +721,9 @@ export class LayoutDraftService {
       const response = await this.llmClient.chat(this.buildRefinePrompt(input), {
         temperature: 0.2,
         maxTokens: 1400,
+        timeout: 8000,
+        maxRetries: 1,
+        traceLabel: 'layout_draft_refine',
       })
 
       const parsed = this.parseSpecResponse(response.content, fallback)
@@ -620,7 +748,7 @@ export class LayoutDraftService {
           label: segment.semanticLabel?.trim() || guess.label,
           startTime: normalizeClock(segment.start),
           endTime: normalizeClock(segment.end),
-          programType: segment.programTypeHint ?? guess.programType,
+          programType: normalizeStructuredProgramType(segment.semanticLabel ?? guess.label, segment.programTypeHint ?? guess.programType),
           queryHints: guess.queryHints,
           sequential: segment.sequential ?? guess.sequential,
         }
@@ -629,7 +757,6 @@ export class LayoutDraftService {
   }
 
   private resolveStructuredCoverage(input: LayoutDraftGenerationInput, segments: LayoutIntentSegment[]): { start: string; end: string } {
-    if (input.coverage) return input.coverage
     const ordered = [...segments].sort((left, right) => left.start.localeCompare(right.start))
     return {
       start: normalizeClock(ordered[0]!.start),
@@ -836,8 +963,8 @@ ${input.programTypeHint ? `LLM 识别出的类型提示：${input.programTypeHin
           label: segment.label,
           startTime: normalizeClock(segment.startTime),
           endTime: normalizeClock(segment.endTime),
-          programType: segment.programType,
-          queryHints: segment.queryHints,
+          programType: normalizeStructuredProgramType(segment.label, segment.programType),
+          queryHints: mergeStructuredQueryHints(segment.queryHints, segment.label, segment.programType),
           sequential: segment.sequential,
         })),
       }

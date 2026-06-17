@@ -1,5 +1,18 @@
 import { getEffectiveColumnDefinition } from '@/services/orchestration/runtimeLayoutRegistry'
+import {
+  extractEditorialKeywordRequirements,
+  extractSpecificSearchKeywords,
+  hasEditorialKeywordRequirements,
+  hasFunctionalSearchKeywords,
+  hasExplicitSequenceRequirements,
+  matchesEditorialKeywordRequirementsByFields,
+  matchesFunctionalSearchKeywords,
+  matchesExplicitSequenceRequirements,
+  matchesSpecificSearchKeywords,
+} from '@/services/candidateKeywordMatcher'
+import { detectMovingItemSequenceViolation } from '@/services/scheduleSequenceGuard'
 import type {
+  ColumnDefinition,
   FixedItem,
   GapInfo,
   LayoutSlot,
@@ -99,6 +112,14 @@ export class ValidationEngine {
         enabled: true,
         check: this.checkContinuity.bind(this),
       },
+      {
+        id: 'sequence-order-check',
+        name: '顺播顺序检查',
+        type: 'constraint_violation',
+        severity: 'critical',
+        enabled: true,
+        check: this.checkSequenceOrder.bind(this),
+      },
       ...this.config.customRules,
     ]
   }
@@ -147,6 +168,30 @@ export class ValidationEngine {
       items: [item],
     })
     issues.push(...layoutIssues)
+
+    const sequenceViolation = detectMovingItemSequenceViolation(
+      item,
+      context.items.filter((existingItem) => existingItem.id !== item.id),
+      '当前编排',
+    )
+    if (sequenceViolation) {
+      issues.push(this.createIssue(
+        'constraint_violation',
+        'critical',
+        sequenceViolation.message,
+        {
+          itemId: item.id,
+          relatedItemIds: [
+            item.id,
+            ...context.items
+              .filter((existingItem) => existingItem.id !== item.id)
+              .map((existingItem) => existingItem.id),
+          ],
+          timeRange: { start: item.startTime, end: item.endTime },
+        },
+        '请调整同一剧集的播出顺序，或移除倒序/跳集节目后重新补排。',
+      ))
+    }
 
     return this.buildReport('item', item.id, issues)
   }
@@ -297,6 +342,31 @@ export class ValidationEngine {
 
       for (const item of itemsInSlot) {
         if (!item.programType || item.programType === 'ad') continue
+        const rawIntentKeywords = this.extractColumnRawIntentKeywords(column)
+        const intentKeywords = extractSpecificSearchKeywords(rawIntentKeywords)
+        const hasIntentRequirement = intentKeywords.length > 0
+          || hasExplicitSequenceRequirements(rawIntentKeywords)
+          || hasEditorialKeywordRequirements(rawIntentKeywords)
+          || hasFunctionalSearchKeywords(rawIntentKeywords)
+        if (hasIntentRequirement && !this.itemMatchesColumnIntent(item, rawIntentKeywords)) {
+          const editorialRequirements = extractEditorialKeywordRequirements(rawIntentKeywords)
+          const intentLabel = [
+            ...intentKeywords,
+            ...(hasExplicitSequenceRequirements(rawIntentKeywords) ? ['指定集数/期数'] : []),
+            ...editorialRequirements.map((requirement) => `${requirement.kind}:${requirement.raw}`),
+            ...(hasFunctionalSearchKeywords(rawIntentKeywords) ? ['功能型内容要求'] : []),
+          ].join('、')
+          issues.push(this.createIssue(
+            'constraint_violation',
+            'critical',
+            `节目《${item.programName}》未命中版面栏目“${column.columnName}”的明确关键词：${intentLabel}`,
+            {
+              itemId: item.id,
+              timeRange: { start: slot.startTime, end: slot.endTime },
+            },
+            '请保留该时段为空缺并中止自动填充，或改选标题、栏目、内容关键词明确命中的节目。',
+          ))
+        }
         if (item.programType !== column.defaultProgramType) {
           issues.push(this.createIssue(
             'constraint_violation',
@@ -313,6 +383,38 @@ export class ValidationEngine {
     }
 
     return issues
+  }
+
+  private extractColumnRawIntentKeywords(column: ColumnDefinition): string[] {
+    return [
+      ...(column.queryHints ?? []),
+      column.semanticLabel,
+      column.columnName,
+    ].filter((value): value is string => Boolean(value?.trim()))
+  }
+
+  private itemMatchesColumnIntent(item: ScheduleItemSnapshot, intentKeywords: string[]): boolean {
+    const haystack = [
+      item.programName,
+      item.instanceName,
+      item.programCode,
+      item.columnName,
+      item.columnId,
+      ...(item.contentTags ?? []),
+    ].filter(Boolean).join(' ')
+    return matchesSpecificSearchKeywords(haystack, intentKeywords)
+      && matchesExplicitSequenceRequirements(haystack, intentKeywords)
+      && matchesEditorialKeywordRequirementsByFields({
+        column: [item.columnName, item.columnId].filter(Boolean).join(' '),
+        title: [item.programName, item.instanceName].filter(Boolean).join(' '),
+        content: [
+          item.programName,
+          item.instanceName,
+          ...(item.contentTags ?? []),
+        ].filter(Boolean).join(' '),
+        all: haystack,
+      }, intentKeywords)
+      && matchesFunctionalSearchKeywords(haystack, intentKeywords)
   }
 
   private checkContinuity(context: ValidationContext): ValidationIssue[] {
@@ -337,6 +439,57 @@ export class ValidationEngine {
           '请确认这是否为正常过渡时间。',
         ))
       }
+    }
+
+    return issues
+  }
+
+  private checkSequenceOrder(context: ValidationContext): ValidationIssue[] {
+    const issues: ValidationIssue[] = []
+    const items = [...context.items].sort(
+      (left, right) => new Date(left.startTime).getTime() - new Date(right.startTime).getTime(),
+    )
+    const previousBySeries = new Map<string, ScheduleItemSnapshot>()
+
+    for (const item of items) {
+      const seriesKey = this.buildSeriesKey(item.programName, item.programCode)
+      const sequenceNo = this.extractSequenceNo(item)
+      if (!seriesKey || typeof sequenceNo !== 'number') {
+        continue
+      }
+
+      const previous = previousBySeries.get(seriesKey)
+      if (previous) {
+        const previousSequence = this.extractSequenceNo(previous)
+        if (typeof previousSequence === 'number' && sequenceNo < previousSequence) {
+          issues.push(this.createIssue(
+            'constraint_violation',
+            'critical',
+            `节目《${item.programName}》顺播倒序：前面已有第${previousSequence}集，后面出现第${sequenceNo}集。`,
+            {
+              itemId: item.id,
+              relatedItemIds: [previous.id, item.id],
+              timeRange: { start: previous.startTime, end: item.endTime },
+            },
+            '请调整同一剧集的播出顺序，或移除倒序节目后重新补排。',
+          ))
+        }
+        if (typeof previousSequence === 'number' && sequenceNo > previousSequence + 1) {
+          issues.push(this.createIssue(
+            'constraint_violation',
+            'critical',
+            `节目《${item.programName}》顺播跳集：前面已有第${previousSequence}集，后面直接出现第${sequenceNo}集。`,
+            {
+              itemId: item.id,
+              relatedItemIds: [previous.id, item.id],
+              timeRange: { start: previous.startTime, end: item.endTime },
+            },
+            `请先补排第${previousSequence + 1}集，或人工确认跳集播出的业务原因。`,
+          ))
+        }
+      }
+
+      previousBySeries.set(seriesKey, item)
     }
 
     return issues
@@ -402,6 +555,68 @@ export class ValidationEngine {
 
   private formatTime(isoTime: string): string {
     return new Date(isoTime).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  }
+
+  private buildSeriesKey(programName?: string, programCode?: string): string {
+    const normalizedName = this.normalizeSeriesName(programName)
+    if (normalizedName) {
+      return `name:${normalizedName}`
+    }
+    return programCode ? `code:${programCode.replace(/\d{1,4}$/, '')}` : ''
+  }
+
+  private normalizeSeriesName(programName?: string): string {
+    if (!programName) return ''
+    return programName
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '')
+      .replace(/^[^：:]+[：:]/u, '')
+      .replace(/第\s*[0-9零〇一二两三四五六七八九十百]+\s*[集期]/gu, '')
+      .replace(/[上中下][集期]/gu, '')
+      .replace(/[《》“”"'（）()【】\[\]·•.。；;，,、_\-—]/g, '')
+  }
+
+  private extractSequenceNo(item: ScheduleItemSnapshot): number | null {
+    const codeMatch = item.programCode?.match(/(\d{1,4})$/)
+    const nameMatch = item.programName.match(/第\s*([0-9零〇一二两三四五六七八九十百]+)\s*[集期]/u)
+    if (nameMatch) {
+      return this.parseChineseNumber(nameMatch[1]!)
+    }
+    if (codeMatch) {
+      const parsed = Number(codeMatch[1])
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed
+      }
+    }
+    return null
+  }
+
+  private parseChineseNumber(value: string): number | null {
+    const direct = Number(value)
+    if (Number.isFinite(direct) && direct > 0) return direct
+    const digits: Record<string, number> = {
+      零: 0,
+      〇: 0,
+      一: 1,
+      二: 2,
+      两: 2,
+      三: 3,
+      四: 4,
+      五: 5,
+      六: 6,
+      七: 7,
+      八: 8,
+      九: 9,
+    }
+    if (value === '十') return 10
+    const tenIndex = value.indexOf('十')
+    if (tenIndex >= 0) {
+      const high = tenIndex === 0 ? 1 : digits[value[tenIndex - 1]!] ?? 0
+      const low = digits[value[tenIndex + 1]!] ?? 0
+      return high * 10 + low
+    }
+    return value.split('').reduce((sum, char) => sum * 10 + (digits[char] ?? 0), 0) || null
   }
 
   enableRule(ruleId: string): void {

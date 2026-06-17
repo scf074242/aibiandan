@@ -5,6 +5,7 @@ import {
 } from './orchestration/runtimeLayoutRegistry'
 import type {
   CandidateQueryCriteria,
+  DraftSegmentSelectionPolicy,
   GapInfo,
   GenerationContext,
   PlanningStrategy,
@@ -26,12 +27,14 @@ export class QueryIntentService {
   ): Promise<CandidateQueryCriteria> {
     const layoutMatch = this.findLayoutMatch(gap, context)
     const columnId = layoutMatch?.columnId
+    const column = columnId ? getEffectiveColumnDefinition(columnId) : undefined
     const columnInstances = columnId
       ? getEffectiveInstancesByColumn(context.channel.channelId, columnId)
       : []
     const columnPrograms = columnId
       ? getEffectiveProgramsByColumn(context.channel.channelId, columnId)
       : []
+    const selectionPolicy = thought.selectionPolicy ?? column?.selectionPolicy
 
     return {
       targetTimeRange: { start: gap.startTime, end: gap.endTime },
@@ -46,7 +49,14 @@ export class QueryIntentService {
             : gap.constraints.allowedTypes,
       searchKeywords: thought.searchKeywords,
       excludeUsed: true,
+      selectionPolicy,
+      historyReference: this.shouldAttachHistoryReference(selectionPolicy) ? context.historyReference : undefined,
     }
+  }
+
+  private shouldAttachHistoryReference(selectionPolicy?: DraftSegmentSelectionPolicy): boolean {
+    if (!selectionPolicy) return false
+    return selectionPolicy.primary === 'sequence' || Boolean(selectionPolicy.requiresPreviousSchedule)
   }
 
   private resolveExpectedDuration(

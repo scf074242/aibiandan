@@ -1,4 +1,4 @@
-import type { DraftFeasibilityReport, LayoutDraft, TaskMode } from '@/types/orchestration'
+import type { DraftFeasibilityReport, LayoutDraft, PlaylistType, RotationPlaylistStrategy, TaskMode } from '@/types/orchestration'
 import type {
   RuntimeDecision,
   RuntimeExecutedResult,
@@ -26,6 +26,8 @@ export interface RuntimeBridgeSessionContext {
   channelName: string
   date: string
   currentSchedule: RuntimeScheduleItem[]
+  playlistType?: PlaylistType
+  rotationStrategy?: RotationPlaylistStrategy
 }
 
 export interface RuntimeBridgeSessionState {
@@ -82,8 +84,15 @@ export class RuntimeSessionStore {
     if (!existing) {
       return this.createSession(context)
     }
+    const nextPlaylistType = context.playlistType ?? existing.context.playlistType
     return this.updateSession(existing.sessionId, {
-      context,
+      context: {
+        ...context,
+        playlistType: nextPlaylistType,
+        rotationStrategy: nextPlaylistType === 'rotation'
+          ? context.rotationStrategy ?? existing.context.rotationStrategy
+          : undefined,
+      },
     })
   }
 

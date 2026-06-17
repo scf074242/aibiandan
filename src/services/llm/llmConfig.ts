@@ -8,14 +8,29 @@ import { isPlaceholderApiKey } from './localDemoLlm'
 const DEFAULT_CONFIG: LLMConfig = {
   baseURL: 'https://api.siliconflow.cn/v1',
   apiKey: '',
-  model: 'deepseek-ai/DeepSeek-V3.2',
+  model: 'deepseek-ai/DeepSeek-V4-Flash',
   temperature: 0.3,
   maxTokens: 8192,
-  timeout: 60000,
+  timeout: 15000,
 }
 
 // 本地存储键名
 const STORAGE_KEY = 'llm_config'
+const DEFAULT_MODEL = DEFAULT_CONFIG.model
+const DEPRECATED_AUTO_UPGRADE_MODELS = new Set([
+  'deepseek-ai/DeepSeek-V3.2',
+  'deepseek-ai/DeepSeek-V3.2-Exp',
+])
+
+const migrateDeprecatedModel = (config: Partial<LLMConfig>): Partial<LLMConfig> => {
+  if (typeof config.model === 'string' && DEPRECATED_AUTO_UPGRADE_MODELS.has(config.model)) {
+    return {
+      ...config,
+      model: DEFAULT_MODEL,
+    }
+  }
+  return config
+}
 
 /**
  * 加载配置
@@ -34,14 +49,18 @@ export function loadLLMConfig(): LLMConfig {
   try {
     const stored = localStorage.getItem(STORAGE_KEY)
     if (stored) {
-      localConfig = JSON.parse(stored)
+      const parsed = JSON.parse(stored) as Partial<LLMConfig>
+      localConfig = migrateDeprecatedModel(parsed)
+      if (localConfig.model !== parsed.model) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(localConfig))
+      }
     }
   } catch (e) {
     console.warn('Failed to load LLM config from localStorage:', e)
   }
 
   // 合并配置（环境变量优先级最高）
-  return {
+  return migrateDeprecatedModel({
     ...DEFAULT_CONFIG,
     ...localConfig,
     ...Object.fromEntries(
@@ -55,7 +74,7 @@ export function loadLLMConfig(): LLMConfig {
         return true
       }),
     ),
-  } as LLMConfig
+  }) as LLMConfig
 }
 
 /**
@@ -64,7 +83,7 @@ export function loadLLMConfig(): LLMConfig {
 export function saveLLMConfig(config: Partial<LLMConfig>): void {
   try {
     const current = loadLLMConfig()
-    const newConfig = { ...current, ...config }
+    const newConfig = migrateDeprecatedModel({ ...current, ...config })
     localStorage.setItem(STORAGE_KEY, JSON.stringify(newConfig))
   } catch (e) {
     console.error('Failed to save LLM config:', e)

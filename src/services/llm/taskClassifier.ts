@@ -69,12 +69,11 @@ export class TaskClassifier {
 
   async classify(input: TaskClassifierInput): Promise<TaskClassification> {
     const ruleBasedResult = this.ruleBasedClassification(input)
-    if (ruleBasedResult.confidence >= this.config.confidenceThreshold) {
-      return ruleBasedResult
-    }
-
     const llmResult = await this.llmBasedClassification(input)
-    return this.mergeResults(ruleBasedResult, llmResult)
+    return this.normalizeRotationDurationScope(
+      this.mergeResults(ruleBasedResult, llmResult),
+      input.userInput,
+    )
   }
 
   assessRisk(input: TaskClassifierInput): RiskAssessment {
@@ -114,6 +113,22 @@ export class TaskClassifier {
     const { scheduleState, userInput } = input
     const normalized = this.normalizeInput(userInput)
     const targetTimeRange = this.extractTimeRange(normalized)
+
+    if (this.isClearlyOutsideSchedulingDomain(normalized, userInput)) {
+      return {
+        mode: 'clarify',
+        confidence: 0.94,
+        reasoning: '当前只支持电视、广播、新媒体轮播、演播室等节目编排相关任务；该请求与节目编排无关，已拒绝进入编排流程。',
+      }
+    }
+
+    if (this.isBareConfirmation(normalized)) {
+      return {
+        mode: 'clarify',
+        confidence: 0.9,
+        reasoning: '检测到空确认表达，但缺少明确的版面草案或编排对象引用，需要先确认用户要执行哪一个编排方案。',
+      }
+    }
 
     if (this.shouldCommitLayout(normalized)) {
       return {
@@ -325,6 +340,9 @@ export class TaskClassifier {
       const response = await this.llmClient.chat(messages, {
         temperature: 0.3,
         maxTokens: 500,
+        timeout: 8000,
+        maxRetries: 1,
+        traceLabel: 'task_classification',
       })
 
       return this.parseClassificationResponse(response.content)
@@ -353,9 +371,10 @@ export class TaskClassifier {
 - 原子节目单命令（插入、删除、移动、替换）已经在上游处理，这里不要再返回 micro_edit。
 - 用户提到“全天编排”“补齐空窗”“填充节目单”这类启动编排的话术时，也要先返回 layout_prepare，而不是直接执行编排。
 - 如果用户在描述“某个时段按某类内容铺排版面”，优先判断为 layout_prepare 或 layout_refine。
-- 如果用户说“准备一个/制作一份/生成一份”某个时间范围的轮播单、播单、直播单、户外直播单，也应返回 layout_prepare；例如“准备一个14:00到15:00的静安寺户外直播轮播单”。
-- 对地点、活动、户外直播等开放业务短语，不要要求用户改成固定节目类型；可把 suggestedParams.userIntent 保留为原始业务意图，并给出 targetTimeRange。
+- 如果用户说“准备一个/制作一份/生成一份”某个时长的轮播单、直播轮播单、户外直播轮播单，轮播单只表示总时长，不绑定具体日期和频道时间段；例如“14:00到15:00的静安寺户外直播轮播单”应理解为总时长 1 小时，从 0 点起算。
+- 对地点、活动、户外直播等开放业务短语，不要要求用户改成固定节目类型；可把 suggestedParams.userIntent 保留为原始业务意图。电视播单可给 targetTimeRange；轮播单不要给 targetTimeRange，应给 rotationDurationSeconds。
 - 对节目单、编排单、串联单、特别报道、主题活动、商圈/会场直播、节庆/赛事预热等开放业务话术，只要用户是在请求排播、生成、补排、调整、校验、分析或修复，都必须映射到上述已有模式；信息不足时返回 clarify，但不要当成非编排闲聊。
+- 只处理电视、广播、新媒体轮播、演播室、节目单/版面/素材排播相关任务。写文案、订票、股票、天气查询、写代码、做 PPT、做海报、闲聊等非编排域请求返回 clarify，并说明不进入编排流程。
 - 如果用户要求“分析当前版面编排/当前节目单结构/从编辑视角出报告”，返回 layout_analysis。
 - 如果用户要求“优化当前版面/优化当前编排”，优先返回 layout_prepare，让系统先生成新的版面草案。
 - 如果用户像是在调整具体节目条目，但缺少足够的时间点、节目名或动作参数，返回 clarify。
@@ -369,6 +388,7 @@ export class TaskClassifier {
   "suggestedParams": {
     "userIntent": "解析后的用户意图",
     "targetTimeRange": { "start": "13:00:00", "end": "18:00:00" },
+    "rotationDurationSeconds": 3600,
     "ignoreExistingLayout": false
   }
 }`
@@ -426,6 +446,21 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
     ruleResult: TaskClassification,
     llmResult: TaskClassification,
   ): TaskClassification {
+    if (llmResult.confidence >= 0.6) {
+      return {
+        ...llmResult,
+        suggestedParams: {
+          ...ruleResult.suggestedParams,
+          ...llmResult.suggestedParams,
+          targetTimeRange:
+            llmResult.suggestedParams?.targetTimeRange
+            ?? ruleResult.suggestedParams?.targetTimeRange,
+        },
+      }
+    }
+
+    return ruleResult
+
     if (ruleResult.confidence >= 0.85) {
       return ruleResult
     }
@@ -468,6 +503,48 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
 
   private hasAny(input: string, keywords: string[]): boolean {
     return keywords.some((keyword) => input.includes(keyword))
+  }
+
+  private isClearlyOutsideSchedulingDomain(normalized: string, rawInput: string): boolean {
+    const nonSchedulingPatterns = [
+      /写.*(文案|文章|新闻稿|稿子|脚本|代码)/,
+      /(生成|做|制作|设计|画).*(ppt|幻灯片|海报|图片|图|logo|表情包)/i,
+      /(订|买|预订).*(票|机票|火车票|酒店|咖啡|外卖|餐)/,
+      /(股票|基金|汇率|财报|理财|投资)/,
+      /(天气怎么样|查.*天气|今天.*天气|明天.*天气)/,
+      /(开.*会|会议纪要|会议材料|发布会材料|简历|邮件|合同|论文)/,
+      /(按钮|页面|背景|颜色|滤镜|动画|ui|界面)/i,
+      /^(你好|谢谢|辛苦了|在吗|hello|hi)$/i,
+    ]
+    const hasNonSchedulingRequest = nonSchedulingPatterns.some((pattern) => pattern.test(normalized))
+    const hasNonSchedulingArtifact = /(文案|文章|新闻稿|稿子|脚本|代码|ppt|幻灯片|海报|图片|logo|表情包|票|机票|火车票|酒店|咖啡|外卖|餐|股票|基金|汇率|财报|理财|投资|天气|会议纪要|会议材料|发布会材料|简历|邮件|合同|论文|按钮|页面|背景|颜色|滤镜|动画|ui|界面)/i.test(normalized)
+    if (hasNonSchedulingRequest && hasNonSchedulingArtifact) return true
+
+    const hasSchedulingWorkflow = /(?:编排|排播|播出|补排|排入|插播|顺播|校验|检查|核对|审查|修复|分析|优化).*(?:节目单|节目|编排单|串联单|播单|轮播单|直播单|版面|栏目|时段|空窗|空缺)|(?:节目单|节目|编排单|串联单|播单|轮播单|直播单|版面|栏目|时段|空窗|空缺).*(?:编排|排播|播出|补排|排入|插播|顺播|校验|检查|核对|审查|修复|分析|优化)/.test(normalized)
+    if (hasNonSchedulingRequest && !hasSchedulingWorkflow) return true
+    if (looksLikeProgramSchedulingRequest(rawInput)) return false
+
+    const hasSchedulingContext = this.hasAny(normalized, [
+      '节目',
+      '节目单',
+      '编排',
+      '编排单',
+      '串联单',
+      '播单',
+      '轮播单',
+      '直播单',
+      '版面',
+      '栏目',
+      '演播室',
+      '排播',
+      '播出',
+      '素材',
+      '空窗',
+      '空缺',
+    ])
+    if (hasSchedulingContext) return false
+
+    return hasNonSchedulingRequest
   }
 
   private hasGenerateIntent(input: string): boolean {
@@ -581,6 +658,10 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
     return hasCommitVerb && hasDraftReference
   }
 
+  private isBareConfirmation(input: string): boolean {
+    return /^(开始吧|开始|就这样|可以了|可以|确认|执行|生成吧|排吧|按这个来|就按这个|走这个|用这个)$/.test(input)
+  }
+
   private shouldIgnoreExistingLayout(input: string): boolean {
     return this.hasAny(input, ['不要参考已有版面', '不参考已有版面', '忽略现有版面', '不要沿用当前版面'])
   }
@@ -633,6 +714,82 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
 
   private extractTimeRange(input: string): { start: string; end: string } | undefined {
     return parseSchedulingTimeRange(input)
+  }
+
+  private normalizeRotationDurationScope(
+    classification: TaskClassification,
+    userInput: string,
+  ): TaskClassification {
+    if (!classification.suggestedParams || !this.isRotationPlaylistIntent(userInput, classification)) {
+      return classification
+    }
+
+    const suggestedParams = { ...classification.suggestedParams }
+    const durationSeconds = typeof suggestedParams.rotationDurationSeconds === 'number'
+      ? suggestedParams.rotationDurationSeconds
+      : this.resolveRotationDurationSeconds(userInput, suggestedParams.targetTimeRange)
+    if (!durationSeconds) {
+      return classification
+    }
+
+    delete suggestedParams.targetTimeRange
+    suggestedParams.rotationDurationSeconds = durationSeconds
+
+    return {
+      ...classification,
+      reasoning: classification.reasoning.includes('轮播单按时长制')
+        ? classification.reasoning
+        : `${classification.reasoning}；轮播单按时长制处理，已转为从 0 点起算的总时长。`,
+      suggestedParams,
+    }
+  }
+
+  private isRotationPlaylistIntent(userInput: string, classification: TaskClassification): boolean {
+    const text = [
+      userInput,
+      classification.reasoning,
+      classification.suggestedParams?.userIntent,
+      classification.suggestedParams?.semanticLabel,
+    ].filter(Boolean).join('')
+    return /(轮播单|轮播|直播轮播单|直播播单|直播单|户外直播|外场直播|新媒体播单|新媒体节目单)/.test(text)
+  }
+
+  private resolveRotationDurationSeconds(
+    userInput: string,
+    targetTimeRange?: { start: string; end: string },
+  ): number | null {
+    const explicitDuration = this.extractDurationSeconds(userInput)
+    if (explicitDuration) return explicitDuration
+
+    const range = targetTimeRange ?? this.extractTimeRange(this.normalizeInput(userInput))
+    if (!range) return null
+    return this.calculateRangeDurationSeconds(range.start, range.end)
+  }
+
+  private extractDurationSeconds(userInput: string): number | null {
+    const normalized = this.normalizeInput(userInput)
+    const numericHourMatch = normalized.match(/(\d+(?:\.\d+)?)(?:个)?小时/u)
+    if (numericHourMatch?.[1]) return Math.round(Number(numericHourMatch[1]) * 3600)
+    const numericMinuteMatch = normalized.match(/(\d+)(?:分钟|分)/u)
+    if (numericMinuteMatch?.[1]) return Number(numericMinuteMatch[1]) * 60
+    if (/半个?小时/u.test(normalized)) return 30 * 60
+    if (/一刻钟/u.test(normalized)) return 15 * 60
+    if (/三刻钟/u.test(normalized)) return 45 * 60
+    return null
+  }
+
+  private calculateRangeDurationSeconds(start: string, end: string): number | null {
+    const startSeconds = this.clockToSeconds(start)
+    const endSeconds = this.clockToSeconds(end)
+    if (startSeconds === null || endSeconds === null) return null
+    const rawDuration = endSeconds - startSeconds
+    return rawDuration > 0 ? rawDuration : rawDuration + 24 * 60 * 60
+  }
+
+  private clockToSeconds(value: string): number | null {
+    const [hours = 0, minutes = 0, seconds = 0] = value.split(':').map(Number)
+    if ([hours, minutes, seconds].some((part) => Number.isNaN(part))) return null
+    return hours * 3600 + minutes * 60 + seconds
   }
 
   private extractActualLayoutLabel(input: string): string | null {

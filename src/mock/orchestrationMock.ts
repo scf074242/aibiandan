@@ -108,6 +108,7 @@ export const orchestrationDemoColumns: ColumnDefinition[] = [
   { columnId: '123', columnName: '两说', channelId: 'dragon', defaultProgramType: 'commentary' },
   { columnId: '124', columnName: '梦想剧场', channelId: 'dragon', defaultProgramType: 'drama', isSequential: true },
   { columnId: '125', columnName: '东方纪实', channelId: 'dragon', defaultProgramType: 'documentary' },
+  { columnId: '900', columnName: '轮播短片', channelId: 'dragon', defaultProgramType: 'short_clip' },
 ]
 
 const seedProgramDefinitions: ProgramDefinition[] = [
@@ -193,7 +194,53 @@ const generatedProgramSeries: GeneratedProgramSeries[] = [
     duration: 1800,
     episodeCount: 12,
     programType: 'news_magazine',
-    titles: ['看东方·城市更新', '看东方·民生现场', '看东方·长三角时间', '看东方·创新上海', '看东方·海派生活'],
+    titles: [
+      '看东方·城市更新',
+      '看东方·民生现场',
+      '看东方·长三角时间',
+      '看东方·创新上海',
+      '看东方·海派生活',
+      '静安寺外场直播',
+      '外滩活动直播',
+      '发布会现场直播',
+      '发布会预热导视',
+      '展会直播直击',
+      '城市活动预热导视',
+      '上海现场集锦',
+      '大型活动回看精选',
+      '会前暖场短片',
+      '直播花絮集锦',
+    ],
+  },
+  {
+    columnId: '101',
+    codePrefix: '131',
+    duration: 600,
+    episodeCount: 8,
+    programType: 'news_magazine',
+    titles: [
+      '现场导视',
+      '静安寺外场导视',
+      '户外直播服务提醒',
+      '发布会预热导视',
+      '会场直播开场导视',
+      '城市活动暖场短片',
+      '直播路线服务提示',
+      '外场连线预告',
+    ],
+  },
+  {
+    columnId: '101',
+    codePrefix: '132',
+    duration: 3000,
+    episodeCount: 6,
+    programType: 'news_magazine',
+    titles: [
+      '静安寺户外直播',
+      '静安寺商圈慢直播',
+      '外场活动直播特别版',
+      '发布会现场直播特别版',
+    ],
   },
   {
     columnId: '107',
@@ -225,7 +272,16 @@ const generatedProgramSeries: GeneratedProgramSeries[] = [
     duration: 1800,
     episodeCount: 12,
     programType: 'news_magazine',
-    titles: ['ShanghaiEye', '环球交叉点', '国际城市观察', '海外看上海'],
+    titles: [
+      'ShanghaiEye',
+      '环球交叉点',
+      '国际城市观察',
+      '海外看上海',
+      '静安寺商圈现场',
+      '会场连线直播',
+      '论坛发布会精编',
+      '展会服务信息',
+    ],
   },
   {
     columnId: '105',
@@ -419,7 +475,24 @@ export const orchestrationDemoLayouts: Record<string, LayoutReference> = Object.
 )
 
 const baseHistorySchedules: ScheduleSummary[] = [
-  { date: '2026-03-24', itemCount: 26, programTypes: { news: 6, news_magazine: 4, drama: 6, health: 2, commentary: 3 }, avgRating: 8.6 },
+  {
+    date: '2026-03-24',
+    itemCount: 26,
+    programTypes: { news: 6, news_magazine: 4, drama: 6, health: 2, commentary: 3 },
+    avgRating: 8.6,
+    items: [
+      {
+        id: 'history-dragon-20260324-112-004',
+        programCode: '881120030004',
+        programName: '品质剧场：纵有疾风起 第4集',
+        startTime: '2026-03-24T09:30:00+08:00',
+        endTime: '2026-03-24T10:15:00+08:00',
+        duration: 2700,
+        programType: 'drama',
+        sequence: 1,
+      },
+    ],
+  },
   { date: '2026-03-23', itemCount: 27, programTypes: { news: 6, news_magazine: 4, drama: 6, health: 2, commentary: 3 }, avgRating: 8.5 },
 ]
 
@@ -430,7 +503,190 @@ export const orchestrationDemoHistorySchedules: Record<string, ScheduleSummary[]
 const programDefinitionMap = new Map(orchestrationDemoProgramDefinitions.map((item) => [item.programId, item]))
 const columnMap = new Map(orchestrationDemoColumns.map((item) => [item.columnId, item]))
 
-export const orchestrationDemoCandidates: ProgramCandidate[] = orchestrationDemoProgramInstances.map((instance) => {
+const buildCandidateContentTags = (input: {
+  programName: string
+  instanceName: string
+  columnName: string
+  programType: string
+}): string[] => {
+  const text = `${input.programName} ${input.instanceName} ${input.columnName}`
+  const tags = new Set<string>([
+    input.programName,
+    input.columnName,
+    input.programType,
+  ])
+  ;[
+    '静安寺',
+    '外滩',
+    '发布会',
+    '展会',
+    '论坛',
+    '会场',
+    '户外直播',
+    '外场直播',
+    '现场直播',
+    '直播',
+    '预热',
+    '预告',
+    '导视',
+    '暖场',
+    '集锦',
+    '花絮',
+    '回看',
+    '城市服务',
+    '民生',
+    '交通',
+    '天气',
+    '社区',
+    '公益',
+    '健康',
+    '养生',
+    '综艺',
+    '娱乐',
+    '纪实',
+    '纪录片',
+  ].forEach((keyword) => {
+    if (text.includes(keyword)) {
+      tags.add(keyword)
+    }
+  })
+
+  return Array.from(tags).filter(Boolean)
+}
+
+const hashText = (value: string): number =>
+  value.split('').reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 100000, 17)
+
+const buildCandidatePopularityMetrics = (input: {
+  programCode: string
+  programType: string
+  duration: number
+  contentTags: string[]
+}) => {
+  const typeBaseRating: Record<string, number> = {
+    news: 7.2,
+    news_magazine: 7.8,
+    drama: 8.1,
+    entertainment: 7.5,
+    health: 6.9,
+    commentary: 6.7,
+    kids: 6.4,
+    documentary: 6.8,
+  }
+  const typeBasePlayCount: Record<string, number> = {
+    news: 78000,
+    news_magazine: 86000,
+    drama: 118000,
+    entertainment: 94000,
+    health: 52000,
+    commentary: 56000,
+    kids: 48000,
+    documentary: 50000,
+  }
+  const hash = hashText(`${input.programCode}-${input.contentTags.join('|')}`)
+  const topicBonus = input.contentTags.some((tag) => ['静安寺', '发布会', '直播', '外场直播', '户外直播'].includes(tag)) ? 9000 : 0
+  const durationBonus = input.duration >= 1800 && input.duration <= 3600 ? 6000 : 0
+  const playCount = (typeBasePlayCount[input.programType] ?? 60000)
+    + (hash % 23000)
+    + topicBonus
+    + durationBonus
+  const estimatedRating = Math.round(((typeBaseRating[input.programType] ?? 6.5) + ((hash % 18) / 10) + (topicBonus ? 0.3 : 0)) * 10) / 10
+  const popularityScore = Math.round(Math.min(100, (playCount / 150000) * 70 + estimatedRating * 3) * 10) / 10
+
+  return { estimatedRating, playCount, popularityScore }
+}
+
+const shortClipDemoCandidates: ProgramCandidate[] = [
+  {
+    id: 'asset-short-city-flower',
+    programId: 'asset-short-city-flower',
+    programCode: '',
+    programName: '城市微短片：春日花路 30秒',
+    channelId: 'dragon',
+    columnId: '900',
+    columnName: '轮播短片',
+    duration: 30,
+    programType: 'short_clip',
+    instanceName: '城市微短片：春日花路 30秒',
+    contentTags: ['城市形象', '春日花路', '短片', '无节目编号', '轮播'],
+  },
+  {
+    id: 'asset-short-jingan-night',
+    programId: 'asset-short-jingan-night',
+    programCode: '',
+    programName: '静安夜色城市宣传片 45秒',
+    channelId: 'dragon',
+    columnId: '900',
+    columnName: '轮播短片',
+    duration: 45,
+    programType: 'short_clip',
+    instanceName: '静安夜色城市宣传片 45秒',
+    contentTags: ['静安寺', '城市形象', '夜景', '宣传片', '无节目编号', '轮播'],
+  },
+  {
+    id: 'asset-short-shanghai-landmark',
+    programId: 'asset-short-shanghai-landmark',
+    programCode: '',
+    programName: '上海景点宣传片：外滩与陆家嘴 60秒',
+    channelId: 'dragon',
+    columnId: '900',
+    columnName: '轮播短片',
+    duration: 60,
+    programType: 'short_clip',
+    instanceName: '上海景点宣传片：外滩与陆家嘴 60秒',
+    contentTags: ['上海', '旅游景点', '景点', '外滩', '陆家嘴', '宣传片', '视频', '无节目编号', '轮播'],
+  },
+  {
+    id: 'asset-short-weather-service',
+    programId: 'asset-short-weather-service',
+    programCode: '',
+    programName: '便民服务：暴雨出行提醒 20秒',
+    channelId: 'dragon',
+    columnId: '900',
+    columnName: '轮播短片',
+    duration: 20,
+    programType: 'short_clip',
+    instanceName: '便民服务：暴雨出行提醒 20秒',
+    contentTags: ['便民服务', '天气', '出行提醒', '短片', '无节目编号', '轮播'],
+  },
+  {
+    id: 'asset-short-culture-museum',
+    programId: 'asset-short-culture-museum',
+    programCode: '',
+    programName: '文化导视：博物馆奇妙夜 60秒',
+    channelId: 'dragon',
+    columnId: '900',
+    columnName: '轮播短片',
+    duration: 60,
+    programType: 'short_clip',
+    instanceName: '文化导视：博物馆奇妙夜 60秒',
+    contentTags: ['文化', '导视', '博物馆', '短片', '无节目编号', '轮播'],
+  },
+  {
+    id: 'asset-short-event-brief',
+    programId: 'asset-short-event-brief',
+    programCode: '',
+    programName: '活动预热：城市音乐节 15秒',
+    channelId: 'dragon',
+    columnId: '900',
+    columnName: '轮播短片',
+    duration: 15,
+    programType: 'short_clip',
+    instanceName: '活动预热：城市音乐节 15秒',
+    contentTags: ['活动预热', '音乐节', '导视', '短片', '无节目编号', '轮播'],
+  },
+].map((candidate) => ({
+  ...candidate,
+  ...buildCandidatePopularityMetrics({
+    programCode: candidate.id,
+    programType: candidate.programType,
+    duration: candidate.duration,
+    contentTags: candidate.contentTags ?? [],
+  }),
+}))
+
+export const orchestrationDemoCandidates: ProgramCandidate[] = [
+  ...orchestrationDemoProgramInstances.map((instance) => {
   const definition = programDefinitionMap.get(instance.programId)
   if (!definition) {
     throw new Error(`Unknown programId: ${instance.programId}`)
@@ -440,6 +696,18 @@ export const orchestrationDemoCandidates: ProgramCandidate[] = orchestrationDemo
   if (!column) {
     throw new Error(`Unknown columnId: ${definition.columnId}`)
   }
+  const contentTags = buildCandidateContentTags({
+    programName: definition.programName,
+    instanceName: instance.instanceName,
+    columnName: column.columnName,
+    programType: definition.programType,
+  })
+  const popularityMetrics = buildCandidatePopularityMetrics({
+    programCode: instance.programCode,
+    programType: definition.programType,
+    duration: instance.duration,
+    contentTags,
+  })
 
   return {
     id: instance.instanceId,
@@ -447,13 +715,19 @@ export const orchestrationDemoCandidates: ProgramCandidate[] = orchestrationDemo
     programCode: instance.programCode,
     programName: instance.instanceName,
     channelId: column.channelId,
+    columnId: column.columnId,
+    columnName: column.columnName,
     duration: instance.duration,
     programType: definition.programType,
     issueNo: instance.issueNo,
     instanceName: instance.instanceName,
+    contentTags,
+    ...popularityMetrics,
     adBreaks: instance.adBreaks,
   }
-})
+  }),
+  ...shortClipDemoCandidates,
+]
 
 const fixedProgramByColumn = new Map<string, string>([
   ['102', 'P102001'],

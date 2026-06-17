@@ -4,6 +4,7 @@ import {
   buildAtomicTimeRange,
   formatAtomicDateTime,
   mapAtomicItemToPageItem,
+  mapChatScheduleUpdateItemToAtomicSnapshot,
   mapPageItemToAtomicSnapshot,
   mapScheduleItemToChatSchedule,
   normalizeAtomicDateTime,
@@ -54,7 +55,7 @@ describe('broadcastPlanScheduleBridge', () => {
 
     expect(snapshot).toMatchObject({
       id: 'item-1',
-      programCode: 'item-1',
+      programCode: '',
       programName: '看东方',
       duration: 3600,
       programType: 'news_magazine',
@@ -112,12 +113,66 @@ describe('broadcastPlanScheduleBridge', () => {
 
     expect(chatItem).toEqual({
       id: 'item-3',
-      programCode: 'item-3',
+      programCode: '',
       programName: '民生访谈',
       startTime: '13:00:00',
       endTime: '13:20:00',
       duration: 1200,
       programType: 'livelihood',
+    })
+  })
+})
+
+describe('broadcastPlanScheduleBridge runtime updates', () => {
+  it('maps ChatPanel runtime schedule updates back to atomic snapshots', () => {
+    const snapshot = mapChatScheduleUpdateItemToAtomicSnapshot(
+      {
+        id: 'runtime-item-1',
+        programCode: 'P900',
+        programName: '城市形象短片',
+        startTime: '00:00:00',
+        endTime: '00:03:00',
+        duration: 180,
+        programType: 'short_clip',
+      },
+      0,
+      '2026-04-03',
+      timeUtils,
+    )
+
+    expect(snapshot).toMatchObject({
+      id: 'runtime-item-1',
+      programCode: 'P900',
+      programName: '城市形象短片',
+      startTime: '2026-04-03T00:00:00+08:00',
+      endTime: '2026-04-03T00:03:00+08:00',
+      duration: 180,
+      programType: 'short_clip',
+      sequence: 1,
+    })
+  })
+
+  it('keeps program-code-less rotation materials blank instead of filling the asset id', () => {
+    const snapshot = mapChatScheduleUpdateItemToAtomicSnapshot(
+      {
+        id: 'asset-short-city-flower',
+        programCode: '',
+        programName: '城市微短片：春日花路 30秒',
+        startTime: '00:00:00',
+        endTime: '00:00:30',
+        duration: 30,
+        programType: 'short_clip',
+      },
+      0,
+      '2026-04-03',
+      timeUtils,
+    )
+
+    expect(snapshot).toMatchObject({
+      id: 'asset-short-city-flower',
+      programCode: '',
+      programName: '城市微短片：春日花路 30秒',
+      programType: 'short_clip',
     })
   })
 })

@@ -34,6 +34,17 @@ import { LLMClient } from './llm/llmClient'
 import { TaskClassifier } from './llm/taskClassifier'
 import { getValidationEngine } from './validators/validationEngine'
 import { getEffectiveColumnDefinition } from './orchestration/runtimeLayoutRegistry'
+import {
+  extractEditorialKeywordRequirements,
+  extractSpecificSearchKeywords,
+  hasEditorialKeywordRequirements,
+  hasFunctionalSearchKeywords,
+  hasExplicitSequenceRequirements,
+  matchesEditorialKeywordRequirementsByFields,
+  matchesFunctionalSearchKeywords,
+  matchesExplicitSequenceRequirements,
+  matchesSpecificSearchKeywords,
+} from './candidateKeywordMatcher'
 
 type EventPayloadMap = {
   'status-change': { status: PlanningSessionStatus; previousStatus: PlanningSessionStatus }
@@ -119,6 +130,7 @@ export class Orchestrator extends EventEmitter {
   private isCancelled = false
   private currentGap: GapInfo | null = null
   private repairRound = 0
+  private lastValidationReport: ValidationReport | null = null
 
   constructor(llmClient: LLMClient, taskClassifier: TaskClassifier, config?: Partial<OrchestratorConfig>) {
     super()
@@ -148,6 +160,7 @@ export class Orchestrator extends EventEmitter {
         pending: [],
         completed: [],
         failed: [],
+        failedReasons: {},
       },
       execution: {
         totalCommands: 0,
@@ -162,6 +175,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     this.gapManager = createGapManager(channelId, date)
+    this.lastValidationReport = null
     return this.session
   }
 
@@ -184,6 +198,7 @@ export class Orchestrator extends EventEmitter {
     this.isRunning = true
     this.isCancelled = false
     this.repairRound = 0
+    this.lastValidationReport = null
 
     try {
       this.createSession(channelId, date, strategy)
@@ -253,7 +268,7 @@ export class Orchestrator extends EventEmitter {
       await this.phase3Repair()
 
       if (!this.isCancelled) {
-        this.updateStatus(this.gapManager?.hasRemainingGaps() ? 'manual_review' : 'completed')
+        this.updateStatus(this.resolveTerminalStatus())
         this.emit('complete', { session: this.session! })
       }
     } catch (error) {
@@ -269,6 +284,7 @@ export class Orchestrator extends EventEmitter {
     this.isRunning = true
     this.isCancelled = false
     this.repairRound = 0
+    this.lastValidationReport = null
 
     try {
       this.createSession(channelId, date, { target: 'partial_fill' })
@@ -314,7 +330,7 @@ export class Orchestrator extends EventEmitter {
       await this.phase3Repair()
 
       if (!this.isCancelled) {
-        this.updateStatus(this.gapManager?.hasRemainingGaps() ? 'manual_review' : 'completed')
+        this.updateStatus(this.resolveTerminalStatus())
         this.emit('complete', { session: this.session! })
       }
     } catch (error) {
@@ -398,6 +414,19 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
+  private resolveTerminalStatus(): PlanningSessionStatus {
+    if (this.gapManager?.hasRemainingGaps()) {
+      return 'manual_review'
+    }
+    if ((this.session?.execution.failedCommands ?? 0) > 0 || (this.session?.gaps.failed.length ?? 0) > 0) {
+      return 'manual_review'
+    }
+    if (this.lastValidationReport && !this.lastValidationReport.isValid) {
+      return 'manual_review'
+    }
+    return 'completed'
+  }
+
   private async phase2Filling(options?: { allowAdFill?: boolean; targetSlotIds?: string[] }): Promise<void> {
     this.updateStatus('filling')
     let processed = 0
@@ -409,7 +438,8 @@ export class Orchestrator extends EventEmitter {
       if (batch.length === 0) break
 
       this.log('info', 'planning', `已启动 ${batch.length} 个空窗的并行规划任务`, {
-        concurrency: this.config.planningConcurrency,
+        concurrency: this.getEffectivePlanningConcurrency(),
+        configuredConcurrency: this.config.planningConcurrency,
         batchGapIds: batch.map((gap) => gap.id),
         gapRanges: batch.map((gap) => ({
           gapId: gap.id,
@@ -439,6 +469,7 @@ export class Orchestrator extends EventEmitter {
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error'
           this.gapManager.markFailed(plan.gap.id, message)
+          this.session!.gaps.failedReasons[plan.gap.id] = message
           this.session!.execution.totalCommands += 1
           this.session!.execution.failedCommands += 1
           this.syncSessionGapStateFromManager()
@@ -490,10 +521,12 @@ export class Orchestrator extends EventEmitter {
     this.session!.execution.repairRounds = this.repairRound
 
     const report = await this.validateSchedule()
+    this.lastValidationReport = report
     this.log(report.isValid ? 'info' : 'warn', 'validation', '本轮编排校验已完成', {
       reportId: report.id,
       isValid: report.isValid,
       summary: report.summary,
+      issues: report.issues.slice(0, 8),
       issueCount: report.issues.length,
     })
     this.emit('validation-complete', { report })
@@ -579,34 +612,41 @@ export class Orchestrator extends EventEmitter {
     gap: GapInfo,
     candidates: ProgramCandidate[],
     thought?: GapPlanningThought,
-  ): Promise<FillItemCommand> {
-    const defaultCandidate = candidates[0]
-    if (!defaultCandidate) {
+  ): Promise<{ command: FillItemCommand; selectedCandidate: ProgramCandidate }> {
+    if (candidates.length === 0) {
       throw new Error('No candidates available for fill command')
-    }
-
-    const defaultCommand: FillItemCommand = {
-      action: 'fill_item',
-      data: {
-        gapId: gap.id,
-        selectedCandidateId: defaultCandidate.id,
-        selectionReason: '默认选择评分较高且时长最接近的候选节目。',
-        suggestedNextAction: 'continue',
-      },
     }
 
     const generationContext = await this.dataService.getGenerationContext(this.session!.channelId, this.session!.date)
 
-    try {
-      const selection = await this.candidateSelectionService.selectForGap(
-        gap,
-        generationContext?.channel.channelName ?? this.session!.channelId,
-        this.session!.date,
-        candidates,
-        thought,
-      )
+    const selection = await this.candidateSelectionService.selectForGap(
+      gap,
+      generationContext?.channel.channelName ?? this.session!.channelId,
+      this.session!.date,
+      candidates,
+      thought,
+      {
+        existingItems: this.atomicCapabilities.getAllItems(),
+      },
+    )
 
-      return {
+    if (selection.decision !== 'select' || !selection.selectedCandidate) {
+      this.log('warn', 'selection', `空窗 ${gap.id} 候选未达到自动编排门槛，已保留空缺`, {
+        gapId: gap.id,
+        startTime: gap.startTime,
+        endTime: gap.endTime,
+        decision: selection.decision,
+        reasoning: selection.reasoning,
+        matchedRequirements: selection.matchedRequirements,
+        missingRequirements: selection.missingRequirements,
+        riskFlags: selection.riskFlags,
+        editorialDecision: selection.editorialDecision,
+      })
+      throw new Error(selection.reasoning || 'No suitable candidate found')
+    }
+
+    return {
+      command: {
         action: 'fill_item',
         data: {
           gapId: gap.id,
@@ -614,14 +654,13 @@ export class Orchestrator extends EventEmitter {
           selectionReason: selection.reasoning,
           suggestedNextAction: 'continue',
         },
-      }
-    } catch {
-      return defaultCommand
+      },
+      selectedCandidate: selection.selectedCandidate,
     }
   }
 
   private collectPlanningBatch(): GapInfo[] {
-    const batchSize = Math.max(1, this.config.planningConcurrency)
+    const batchSize = this.getEffectivePlanningConcurrency()
     const batch: GapInfo[] = []
 
     while (batch.length < batchSize) {
@@ -635,6 +674,11 @@ export class Orchestrator extends EventEmitter {
     return batch
   }
 
+  private getEffectivePlanningConcurrency(): number {
+    const configuredConcurrency = Math.max(1, this.config.planningConcurrency)
+    return this.session?.strategy.sequentialPreference ? 1 : configuredConcurrency
+  }
+
   private async prepareBatchPlans(gaps: GapInfo[]): Promise<PreparedGapPlan[]> {
     const results = await Promise.all(
       gaps.map(async (gap) => {
@@ -645,6 +689,7 @@ export class Orchestrator extends EventEmitter {
           const message = error instanceof Error ? error.message : 'Unknown error'
           this.gapManager?.markFailed(gap.id, message)
           this.session!.gaps.failed.push(gap.id)
+          this.session!.gaps.failedReasons[gap.id] = message
           this.session!.execution.totalCommands += 1
           this.session!.execution.failedCommands += 1
           this.log('error', 'planning', `空窗 ${gap.id} 并行规划失败`, {
@@ -675,7 +720,16 @@ export class Orchestrator extends EventEmitter {
 
     const candidatesResult = await this.candidateService.queryCandidates(gap, queryCommand.data.criteria)
     if (candidatesResult.candidates.length === 0) {
-      throw new Error('No candidates found')
+      this.log('warn', 'query', `空窗 ${gap.id} 候选检索未命中可自动编排节目`, {
+        gapId: gap.id,
+        startTime: gap.startTime,
+        endTime: gap.endTime,
+        criteria: queryCommand.data.criteria,
+        targetSlotLabel: thought?.targetSlotLabel,
+        candidateCount: 0,
+        diagnostics: candidatesResult.diagnostics,
+      })
+      throw new Error(this.formatCandidateQueryFailure(candidatesResult.diagnostics?.rejectionReasons))
     }
 
     this.log('info', 'query', `空窗 ${gap.id} 已完成接口查询`, {
@@ -685,20 +739,32 @@ export class Orchestrator extends EventEmitter {
       criteria: queryCommand.data.criteria,
       targetSlotLabel: thought?.targetSlotLabel,
       candidateCount: candidatesResult.candidates.length,
+      diagnostics: candidatesResult.diagnostics,
       topCandidates: candidatesResult.candidates.slice(0, 3).map((item) => ({
         id: item.id,
+        programCode: item.programCode,
         programName: item.programName,
         duration: item.duration,
         programType: item.programType,
+        columnId: item.columnId,
+        columnName: item.columnName,
+        contentTags: item.contentTags,
+        estimatedRating: item.estimatedRating,
+        playCount: item.playCount,
+        popularityScore: item.popularityScore,
         issueNo: item.issueNo,
         sequenceNo: (item as ProgramCandidate & { sequenceNo?: number }).sequenceNo,
+        expectedSequenceNo: (item as ProgramCandidate & { expectedSequenceNo?: number }).expectedSequenceNo,
         selectionMode: (item as ProgramCandidate & { selectionMode?: string }).selectionMode,
         selectionNote: (item as ProgramCandidate & { selectionNote?: string }).selectionNote,
+        editorialDecision: item.editorialDecision,
       })),
     })
 
-    const fillCommand = await this.generateFillItemCommand(gap, candidatesResult.candidates, thought)
+    const fillSelection = await this.generateFillItemCommand(gap, candidatesResult.candidates, thought)
+    const fillCommand = fillSelection.command
     const selectedCandidate =
+      fillSelection.selectedCandidate ??
       candidatesResult.candidates.find((item) => item.id === fillCommand.data.selectedCandidateId) ??
       candidatesResult.candidates[0]
 
@@ -712,10 +778,12 @@ export class Orchestrator extends EventEmitter {
       endTime: gap.endTime,
       selectedCandidateId: selectedCandidate.id,
       selectedCandidateName: selectedCandidate.programName,
+      selectedCandidate: this.toCandidateDetail(selectedCandidate),
       selectionReason: fillCommand.data.selectionReason,
       sequenceNo: (selectedCandidate as ProgramCandidate & { sequenceNo?: number }).sequenceNo,
       selectionMode: (selectedCandidate as ProgramCandidate & { selectionMode?: string }).selectionMode,
       selectionNote: (selectedCandidate as ProgramCandidate & { selectionNote?: string }).selectionNote,
+      editorialDecision: selectedCandidate.editorialDecision,
     })
 
     return {
@@ -726,6 +794,53 @@ export class Orchestrator extends EventEmitter {
       fillCommand,
       selectedCandidate,
     }
+  }
+
+  private toCandidateDetail(candidate: ProgramCandidate): Record<string, unknown> {
+    return {
+      id: candidate.id,
+      programId: candidate.programId,
+      programCode: candidate.programCode,
+      programName: candidate.programName,
+      instanceName: candidate.instanceName,
+      duration: candidate.duration,
+      programType: candidate.programType,
+      columnId: candidate.columnId,
+      columnName: candidate.columnName,
+      issueNo: candidate.issueNo,
+      contentTags: candidate.contentTags,
+      estimatedRating: candidate.estimatedRating,
+      playCount: candidate.playCount,
+      popularityScore: candidate.popularityScore,
+      sequenceNo: (candidate as ProgramCandidate & { sequenceNo?: number }).sequenceNo,
+      expectedSequenceNo: (candidate as ProgramCandidate & { expectedSequenceNo?: number }).expectedSequenceNo,
+      selectionMode: (candidate as ProgramCandidate & { selectionMode?: string }).selectionMode,
+      selectionNote: (candidate as ProgramCandidate & { selectionNote?: string }).selectionNote,
+      editorialDecision: candidate.editorialDecision,
+    }
+  }
+
+  private formatCandidateQueryFailure(rejectionReasons?: string[]): string {
+    const reasons = rejectionReasons ?? []
+    if (reasons.includes('explicit_sequence_no_match')) {
+      return 'No candidates found: explicit_sequence_no_match'
+    }
+    if (reasons.includes('functional_keyword_no_match')) {
+      return 'No candidates found: functional_keyword_no_match'
+    }
+    if (reasons.includes('hard_keyword_no_match')) {
+      return 'No candidates found: hard_keyword_no_match'
+    }
+    if (reasons.includes('duration_mismatch')) {
+      return 'No candidates found: duration_mismatch'
+    }
+    if (reasons.includes('program_type_mismatch')) {
+      return 'No candidates found: program_type_mismatch'
+    }
+    if (reasons.includes('column_has_no_programs')) {
+      return 'No candidates found: column_has_no_programs'
+    }
+    return reasons.length ? `No candidates found: ${reasons.join(',')}` : 'No candidates found'
   }
 
   private async executePreparedPlan(plan: PreparedGapPlan): Promise<ExecutedGapPlanResult> {
@@ -745,6 +860,41 @@ export class Orchestrator extends EventEmitter {
     }
 
     const existingItems = this.atomicCapabilities.getAllItems()
+    const intentError = this.detectSelectedCandidateIntentMismatch(plan.selectedCandidate, plan.thought)
+    if (intentError) {
+      this.log('warn', 'execution', `空窗 ${plan.gap.id} 命中明确编排意图冲突，已阻止写入`, {
+        gapId: plan.gap.id,
+        startTime: plan.gap.startTime,
+        endTime: plan.gap.endTime,
+        intentError,
+        selectedCandidateId: plan.selectedCandidate.id,
+        selectedCandidateName: plan.selectedCandidate.programName,
+        searchKeywords: plan.thought?.searchKeywords,
+      })
+      throw new Error(intentError)
+    }
+
+    const strategyError = this.detectSelectedCandidateStrategyMismatch(
+      plan.selectedCandidate,
+      plan.candidates,
+      plan.thought,
+      plan.queryCommand,
+    )
+    if (strategyError) {
+      this.log('warn', 'execution', `空窗 ${plan.gap.id} 命中编排策略冲突，已阻止写入`, {
+        gapId: plan.gap.id,
+        startTime: plan.gap.startTime,
+        endTime: plan.gap.endTime,
+        strategyError,
+        selectedCandidateId: plan.selectedCandidate.id,
+        selectedCandidateName: plan.selectedCandidate.programName,
+        topCandidateId: plan.candidates[0]?.id,
+        topCandidateName: plan.candidates[0]?.programName,
+        selectionPolicy: plan.thought?.selectionPolicy ?? plan.queryCommand.data.criteria.selectionPolicy,
+      })
+      throw new Error(strategyError)
+    }
+
     const conflictError = this.detectAppendConflict(materialized.items, existingItems, plan.gap)
     if (conflictError) {
       this.log('warn', 'execution', `空窗 ${plan.gap.id} 命中时间冲突，已阻止写入`, {
@@ -762,6 +912,26 @@ export class Orchestrator extends EventEmitter {
         })),
       })
       throw new Error(conflictError)
+    }
+
+    const sequenceError = this.detectAppendSequenceOrderViolation(materialized.items, existingItems)
+    if (sequenceError) {
+      this.log('warn', 'execution', `空窗 ${plan.gap.id} 命中顺播上下文冲突，已阻止写入`, {
+        gapId: plan.gap.id,
+        startTime: plan.gap.startTime,
+        endTime: plan.gap.endTime,
+        sequenceError,
+        selectedCandidateId: plan.selectedCandidate.id,
+        selectedCandidateName: plan.selectedCandidate.programName,
+        insertedItems: materialized.items.map((entry) => ({
+          itemId: entry.id,
+          programName: entry.programName,
+          programCode: entry.programCode,
+          startTime: entry.startTime,
+          endTime: entry.endTime,
+        })),
+      })
+      throw new Error(sequenceError)
     }
 
     const appendResult = await this.atomicCapabilities.appendItems(materialized.items, { skipValidation: true })
@@ -787,9 +957,11 @@ export class Orchestrator extends EventEmitter {
       selectionReason: plan.fillCommand.data.selectionReason,
       selectedCandidateId: plan.selectedCandidate.id,
       selectedCandidateName: plan.selectedCandidate.programName,
+      selectedCandidate: this.toCandidateDetail(plan.selectedCandidate),
       sequenceNo: (plan.selectedCandidate as ProgramCandidate & { sequenceNo?: number }).sequenceNo,
       selectionMode: (plan.selectedCandidate as ProgramCandidate & { selectionMode?: string }).selectionMode,
       selectionNote: (plan.selectedCandidate as ProgramCandidate & { selectionNote?: string }).selectionNote,
+      editorialDecision: plan.selectedCandidate.editorialDecision,
     })
 
     return {
@@ -813,6 +985,15 @@ export class Orchestrator extends EventEmitter {
     for (const slot of layoutReference.slots) {
       if (this.isCancelled) break
       if (slotIdFilter && !slotIdFilter.has(slot.id)) continue
+      if (this.hasProtectedFailedGapInSlot(slot)) {
+        this.log('info', 'execution', '版面 ' + slot.id + ' 存在明确编排意图失败空窗，已跳过广告补位', {
+          slotId: slot.id,
+          slotStartTime: slot.startTime,
+          slotEndTime: slot.endTime,
+          reason: 'protected_failed_gap',
+        })
+        continue
+      }
 
       let slotChanged = true
       while (!this.isCancelled && slotChanged) {
@@ -898,6 +1079,20 @@ export class Orchestrator extends EventEmitter {
     }
 
     return insertedCount
+  }
+
+  private hasProtectedFailedGapInSlot(slot: LayoutReference['slots'][number]): boolean {
+    const protectedReasons = [
+      'hard_keyword_no_match',
+      'explicit_sequence_no_match',
+      'functional_keyword_no_match',
+      'sequence_context_order_conflict',
+    ]
+    return this.gapManager?.getActiveGaps().some((gap) => {
+      if (gap.status !== 'failed') return false
+      if (!gap.error || !protectedReasons.some((reason) => gap.error?.includes(reason))) return false
+      return this.rangesOverlap(gap.startTime, gap.endTime, slot.startTime, slot.endTime)
+    }) ?? false
   }
 
   private buildPlanningPrompt(gapCount: number): ChatMessage[] {
@@ -1022,9 +1217,13 @@ export class Orchestrator extends EventEmitter {
     if (!this.session || !this.gapManager) return
 
     this.session.gaps.pending = this.gapManager.queryRemainingGaps()
-    this.session.gaps.failed = this.gapManager.getActiveGaps()
-      .filter((gap) => gap.status === 'failed')
-      .map((gap) => gap.id)
+    const failedGaps = this.gapManager.getActiveGaps().filter((gap) => gap.status === 'failed')
+    this.session.gaps.failed = failedGaps.map((gap) => gap.id)
+    failedGaps.forEach((gap) => {
+      if (gap.error) {
+        this.session!.gaps.failedReasons[gap.id] = gap.error
+      }
+    })
   }
 
   private resolveRelevantLayoutSlotIds(gaps: GapInfo[], layoutReference?: LayoutReference | null): string[] {
@@ -1097,12 +1296,247 @@ export class Orchestrator extends EventEmitter {
     return null
   }
 
+  private detectSelectedCandidateIntentMismatch(
+    candidate: ProgramCandidate,
+    thought?: GapPlanningThought,
+  ): string | null {
+    const hardKeywords = extractSpecificSearchKeywords(thought?.searchKeywords ?? [])
+    const sequenceRequired = hasExplicitSequenceRequirements(thought?.searchKeywords ?? [])
+    const editorialRequirements = extractEditorialKeywordRequirements(thought?.searchKeywords ?? [])
+    const editorialRequired = hasEditorialKeywordRequirements(thought?.searchKeywords ?? [])
+    const functionalRequired = hasFunctionalSearchKeywords(thought?.searchKeywords ?? [])
+    if (hardKeywords.length === 0 && !sequenceRequired && !editorialRequired && !functionalRequired) {
+      return null
+    }
+
+    const haystack = this.buildCandidateSearchText(candidate)
+    const titleMatched = hardKeywords.length === 0 || matchesSpecificSearchKeywords(haystack, thought?.searchKeywords ?? [])
+    const sequenceMatched = !sequenceRequired || matchesExplicitSequenceRequirements(haystack, thought?.searchKeywords ?? [])
+    const editorialMatched = !editorialRequired || this.matchesEditorialKeywordRequirements(candidate, thought?.searchKeywords ?? [])
+    const functionalMatched = !functionalRequired || matchesFunctionalSearchKeywords(haystack, thought?.searchKeywords ?? [])
+    if (titleMatched && sequenceMatched && editorialMatched && functionalMatched) {
+      return null
+    }
+
+    return [
+      `待写入节目《${candidate.programName}》未命中明确编排关键词`,
+      `需要命中：${[
+        ...hardKeywords,
+        ...(sequenceRequired ? ['指定集数/期数'] : []),
+        ...editorialRequirements.map((item) => `${item.kind}:${item.raw}`),
+        ...(functionalRequired ? ['功能型内容要求'] : []),
+      ].join('、')}`,
+      '已保留空缺并中止自动写入',
+    ].join('；')
+  }
+
+  private matchesEditorialKeywordRequirements(candidate: ProgramCandidate, searchKeywords: string[]): boolean {
+    return matchesEditorialKeywordRequirementsByFields({
+      column: [candidate.columnName, candidate.columnId].filter(Boolean).join(' '),
+      title: [candidate.programName, candidate.instanceName].filter(Boolean).join(' '),
+      content: [
+        candidate.programName,
+        candidate.instanceName,
+        ...(candidate.contentTags ?? []),
+      ].filter(Boolean).join(' '),
+      all: this.buildCandidateSearchText(candidate),
+    }, searchKeywords)
+  }
+
+  private detectSelectedCandidateStrategyMismatch(
+    selectedCandidate: ProgramCandidate,
+    rankedCandidates: ProgramCandidate[],
+    thought: GapPlanningThought | undefined,
+    queryCommand: QueryCandidatesCommand,
+  ): string | null {
+    const primary = thought?.selectionPolicy?.primary ?? queryCommand.data.criteria.selectionPolicy?.primary
+    if (!primary || !['sequence', 'rating', 'trending', 'content_match'].includes(primary)) {
+      return null
+    }
+    if (rankedCandidates.length <= 1) {
+      return null
+    }
+
+    const selectedFromPool = rankedCandidates.find((candidate) => candidate.id === selectedCandidate.id)
+    if (!selectedFromPool) {
+      return [
+        `待写入节目《${selectedCandidate.programName}》不在本段候选池中`,
+        '已中止自动写入，避免绕过候选检索与策略排序',
+      ].join('；')
+    }
+
+    const topCandidate = rankedCandidates[0]
+    if (!topCandidate || topCandidate.id === selectedCandidate.id) {
+      return null
+    }
+
+    const topScore = topCandidate.editorialDecision?.totalScore
+    const selectedScore = selectedFromPool.editorialDecision?.totalScore ?? selectedCandidate.editorialDecision?.totalScore
+    if (primary === 'content_match' && typeof topScore === 'number' && typeof selectedScore === 'number' && selectedScore >= topScore) {
+      return null
+    }
+
+    const strategyLabel = primary === 'sequence'
+      ? '电视顺播'
+      : primary === 'rating'
+        ? '轮播单收视率优先'
+        : primary === 'trending'
+          ? '轮播单热播优先'
+          : '轮播单内容匹配优先'
+    const scoreText = typeof topScore === 'number' || typeof selectedScore === 'number'
+      ? `首选评分 ${topScore ?? '无'}，待写入评分 ${selectedScore ?? '无'}`
+      : '候选池已按策略排序'
+
+    return [
+      `待写入节目《${selectedCandidate.programName}》不是本段${strategyLabel}策略下的首选候选`,
+      `候选池首位为《${topCandidate.programName}》`,
+      scoreText,
+      '已中止自动写入，避免上游绕过策略判断',
+    ].join('；')
+  }
+
+  private detectAppendSequenceOrderViolation(
+    incomingItems: ScheduleItemSnapshot[],
+    existingItems: ScheduleItemSnapshot[],
+  ): string | null {
+    const incomingIds = new Set(incomingItems.map((item) => item.id))
+    const items = [...existingItems, ...incomingItems].sort(
+      (left, right) => new Date(left.startTime).getTime() - new Date(right.startTime).getTime(),
+    )
+    const previousBySeries = new Map<string, ScheduleItemSnapshot>()
+
+    for (const item of items) {
+      const seriesKey = this.buildSeriesKey(item.programName, item.programCode)
+      const sequenceNo = this.extractSequenceNo(item)
+      if (!seriesKey || typeof sequenceNo !== 'number') {
+        continue
+      }
+
+      const previous = previousBySeries.get(seriesKey)
+      if (previous) {
+        const previousSequence = this.extractSequenceNo(previous)
+        const involvesIncoming = incomingIds.has(item.id) || incomingIds.has(previous.id)
+        if (typeof previousSequence === 'number' && involvesIncoming) {
+          if (sequenceNo < previousSequence) {
+            return [
+              `待写入节目《${item.programName}》会造成顺播倒序`,
+              `前面 ${this.toClock(previous.startTime)} 已有第${previousSequence}集`,
+              `后面 ${this.toClock(item.startTime)} 出现第${sequenceNo}集`,
+            ].join('；')
+          }
+          if (sequenceNo > previousSequence + 1) {
+            return [
+              `待写入节目《${item.programName}》会造成顺播跳集`,
+              `前面 ${this.toClock(previous.startTime)} 已有第${previousSequence}集`,
+              `后面 ${this.toClock(item.startTime)} 直接出现第${sequenceNo}集`,
+            ].join('；')
+          }
+        }
+      }
+
+      previousBySeries.set(seriesKey, item)
+    }
+
+    return null
+  }
+
+  private buildCandidateSearchText(candidate: ProgramCandidate): string {
+    return [
+      candidate.programName,
+      candidate.instanceName,
+      candidate.programCode,
+      candidate.issueNo,
+      candidate.columnName,
+      candidate.columnId,
+      ...(candidate.contentTags ?? []),
+    ].filter(Boolean).join(' ')
+  }
+
   private isTimeOverlapping(left: ScheduleItemSnapshot, right: ScheduleItemSnapshot): boolean {
-    const leftStart = new Date(left.startTime).getTime()
-    const leftEnd = new Date(left.endTime).getTime()
-    const rightStart = new Date(right.startTime).getTime()
-    const rightEnd = new Date(right.endTime).getTime()
+    return this.rangesOverlap(left.startTime, left.endTime, right.startTime, right.endTime)
+  }
+
+  private rangesOverlap(leftStartTime: string, leftEndTime: string, rightStartTime: string, rightEndTime: string): boolean {
+    const leftStart = new Date(leftStartTime).getTime()
+    const leftEnd = new Date(leftEndTime).getTime()
+    const rightStart = new Date(rightStartTime).getTime()
+    const rightEnd = new Date(rightEndTime).getTime()
     return leftStart < rightEnd && rightStart < leftEnd
+  }
+
+  private buildSeriesKey(programName?: string, programCode?: string): string {
+    const normalizedName = this.normalizeSeriesName(programName)
+    if (normalizedName) {
+      return `name:${normalizedName}`
+    }
+    return programCode ? `code:${programCode.replace(/\d{1,4}$/, '')}` : ''
+  }
+
+  private normalizeSeriesName(programName?: string): string {
+    if (!programName) return ''
+    return programName
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '')
+      .replace(/^[^:：]+[:：]/u, '')
+      .replace(/第\s*[0-9零〇一二两三四五六七八九十百]+\s*[集期]/gu, '')
+      .replace(/[上中下][集期]/gu, '')
+      .replace(/[《》“”"'（）()【】·、。；;：:\-—]/g, '')
+  }
+
+  private extractSequenceNo(item: ScheduleItemSnapshot): number | null {
+    const issueNo = this.parsePositiveNumber((item as ScheduleItemSnapshot & { issueNo?: string }).issueNo)
+    if (issueNo !== null) {
+      return issueNo
+    }
+
+    const codeMatch = item.programCode?.match(/(\d{1,4})$/)
+    if (codeMatch) {
+      const parsed = Number(codeMatch[1])
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed
+      }
+    }
+
+    const nameMatch = item.programName?.match(/第\s*([0-9零〇一二两三四五六七八九十百]+)\s*[集期]/u)
+    return nameMatch ? this.parseChineseNumber(nameMatch[1]!) : null
+  }
+
+  private parsePositiveNumber(value?: string): number | null {
+    if (!value) return null
+    const parsed = Number(value)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+  }
+
+  private parseChineseNumber(value: string): number | null {
+    const direct = Number(value)
+    if (Number.isFinite(direct) && direct > 0) return direct
+    const digits: Record<string, number> = {
+      零: 0,
+      〇: 0,
+      一: 1,
+      二: 2,
+      两: 2,
+      三: 3,
+      四: 4,
+      五: 5,
+      六: 6,
+      七: 7,
+      八: 8,
+      九: 9,
+    }
+    if (value === '十') return 10
+    const tenIndex = value.indexOf('十')
+    if (tenIndex >= 0) {
+      const high = tenIndex === 0 ? 1 : digits[value[tenIndex - 1]!] ?? 0
+      const low = digits[value[tenIndex + 1]!] ?? 0
+      return high * 10 + low
+    }
+    return value.split('').reduce((sum, char) => sum * 10 + (digits[char] ?? 0), 0) || null
+  }
+
+  private toClock(value: string): string {
+    return value.split('T')[1]?.slice(0, 8) ?? value
   }
 
   private async yieldToBrowser(): Promise<void> {
@@ -1144,6 +1578,3 @@ export function getOrchestrator(
 export function resetOrchestrator(): void {
   globalOrchestrator = null
 }
-
-
-

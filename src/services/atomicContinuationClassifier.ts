@@ -93,6 +93,10 @@ export class AtomicContinuationClassifier {
       return hasExactTime || hasQuotedTitle || hasOffset || hasProgramLikeText
     }
 
+    if (detectedAction === 'replace' && hasExactTime && /(替换成|替换为|替换|换成|换播|换掉|改成|改为|改播).+/.test(normalizedInput)) {
+      return true
+    }
+
     switch (detectedAction) {
       case 'move':
         return hasExactTime && hasOffset
@@ -114,14 +118,14 @@ export class AtomicContinuationClassifier {
       .trim()
       .replace(/《([^》]+)》/g, '$1')
       .replace(/(?:\d{1,2}[:：]\d{1,2}(?::\d{1,2})?|(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})(?:点|點)(?:半|(?:\d{1,2}|[零〇一二两三四五六七八九十]{1,3})分?)?)/g, '')
-      .replace(/(?:提前|延后|顺延|前移|后移|往前挪|往后挪)?(?:\d{1,3}|[零〇一二两三四五六七八九十]{1,4}|半)(?:个)?(?:分钟|小时|分|秒)/g, '')
+      .replace(/(?:提前|延后|顺延|推迟|推后|延迟|前移|后移|往前挪|往后挪)?(?:\d{1,3}|[零〇一二两三四五六七八九十]{1,4}|半)(?:个)?(?:分钟|小时|分|秒)/g, '')
       .replace(/[，,。！？!?：:\s]/g, '')
       .replace(/^(?:把|将|在|于)/, '')
 
     const actionPatternByType: Record<NonNullable<RuntimePendingAtomicContext['action']>, RegExp> = {
       insert: /^(?:插入节目|插入|插个|插一|加一条|加一档|加个|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/,
-      delete: /^(?:删除|删掉|移除|去掉|撤掉|拿掉)/,
-      move: /^(?:后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前)/,
+      delete: /^(?:删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉)/,
+      move: /^(?:后移|前移|移动到|移到|调到|调整到|改到|挪到|放到|排到|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前|推迟|推后|延迟)/,
       replace: /^(?:替换成|替换为|替换|换成|换掉|改成|改为|改掉)/,
     }
 
@@ -145,8 +149,12 @@ export class AtomicContinuationClassifier {
   }
 
   private detectAtomicAction(normalizedInput: string): RuntimePendingAtomicContext['action'] {
-    if (/(后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前)/.test(normalizedInput)) return 'move'
-    if (/(删除|删掉|移除|去掉|撤掉|拿掉)/.test(normalizedInput)) return 'delete'
+    if (/(向后移动|向前移动|移动到|移到|调到|调整到|改到|挪到|放到|排到|后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前|推迟|推后|延迟)/.test(normalizedInput)) return 'move'
+    if (/(删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉)/.test(normalizedInput)) return 'delete'
+    if (/(替换|换成|换播|替换成|替换为|换掉|改掉|改成|改为|改播)/.test(normalizedInput)) return 'replace'
+    if (/(插入|插个|插一|插播|加播|加一条|加一档|加个|加一段|加一些|添加节目|添加|安排节目|安排|排入|排个|排一条|排一档|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段)/.test(normalizedInput)) return 'insert'
+    if (/(后移|前移|移动到|移到|调到|调整到|改到|挪到|放到|排到|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前|推迟|推后|延迟)/.test(normalizedInput)) return 'move'
+    if (/(删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉)/.test(normalizedInput)) return 'delete'
     if (/(替换|换成|替换成|替换为|换掉|改掉|改成|改为)/.test(normalizedInput)) return 'replace'
     if (/(插入|插个|插一|加一条|加一档|加个|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|上个)/.test(normalizedInput)) return 'insert'
     return null

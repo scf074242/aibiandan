@@ -1,0 +1,98 @@
+{
+  "generatedAt": "2026-06-16T00:03:19.233Z",
+  "status": "skipped",
+  "config": {
+    "runRequested": true,
+    "strict": false,
+    "apiKeyPresent": true,
+    "apiKeyUsable": false,
+    "model": "deepseek-ai/DeepSeek-V3.2",
+    "baseURL": "https://api.siliconflow.cn/v1",
+    "skipReason": "The configured API key is empty or a placeholder value."
+  },
+  "acceptanceCoverage": [
+    {
+      "tag": "tv_sequence",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "covered": false,
+      "sections": []
+    },
+    {
+      "tag": "rotation_short_clip",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "covered": false,
+      "sections": []
+    },
+    {
+      "tag": "missing_param",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "covered": false,
+      "sections": []
+    },
+    {
+      "tag": "target_occupied",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "covered": false,
+      "sections": []
+    },
+    {
+      "tag": "professional_refusal",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "covered": false,
+      "sections": []
+    },
+    {
+      "tag": "pending_context",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "covered": false,
+      "sections": []
+    }
+  ],
+  "sections": [
+    {
+      "id": "intent_contract",
+      "title": "Structured intent contract",
+      "status": "skipped",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "skippedReason": "The configured API key is empty or a placeholder value.",
+      "tagCoverage": [],
+      "failures": []
+    },
+    {
+      "id": "runtime_loop",
+      "title": "Runtime preview and constraint loop",
+      "status": "skipped",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "skippedReason": "The configured API key is empty or a placeholder value.",
+      "tagCoverage": [],
+      "failures": []
+    },
+    {
+      "id": "conversation_loop",
+      "title": "Multi-turn pending context loop",
+      "status": "skipped",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "skippedReason": "The configured API key is empty or a placeholder value.",
+      "tagCoverage": [],
+      "failures": []
+    }
+  ]
+}

@@ -234,7 +234,7 @@ describe('DemoRuntimeFacade insert recommendation', () => {
     expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(0)
   })
 
-  it('会根据当前节目名锚点反推前置插入时间并进入推荐确认', async () => {
+  it('会根据当前节目名锚点反推前置插入时间，并在目标时间被占用时阻止推荐', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.95,
@@ -250,13 +250,13 @@ describe('DemoRuntimeFacade insert recommendation', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') {
-      throw new Error('expected pending_atomic_context')
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') {
+      throw new Error('expected blocked insert recommendation message')
     }
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.slots.targetTime).toBe('09:00:00')
-    expect(result.pendingAtomicContext.slots.rawProgramText).toBe('天气服务')
+    expect(result.feedback.content).toContain('空闲时段不足')
+    expect(result.feedback.details?.targetTime).toBe('09:00:00')
+    expect(result.feedback.details?.rejectedReason).toBe('insert_time_not_available')
   })
 
   it('当前节目单有多个同名锚点时不会静默选择插入位置', async () => {
@@ -285,5 +285,40 @@ describe('DemoRuntimeFacade insert recommendation', () => {
     expect(result.pendingAtomicContext.phase).toBe('clarifying')
     expect(result.feedback.content).toContain('多个《看东方》')
     expect(result.pendingAtomicContext.insertRecommendations).toBeUndefined()
+  })
+
+  it('semantic live-guide insert intent returns content-matched recommendations instead of hard-blocking', async () => {
+    mockIntentRecognize.mockResolvedValue({
+      type: 'insert',
+      confidence: 0.95,
+      reasoning: 'semantic insert live guide',
+    })
+    mockExtractInsertParams.mockResolvedValue({
+      targetTime: '14:00:00',
+      rawProgramText: '\u9759\u5b89\u5bfa\u5916\u573a\u76f4\u64ad\u5bfc\u89c6',
+      semanticLabel: '\u9759\u5b89\u5bfa\u5916\u573a\u76f4\u64ad\u5bfc\u89c6',
+      programTypeHint: 'news_magazine',
+    })
+
+    const facade = new DemoRuntimeFacade()
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState({ playlistType: 'rotation', rotationStrategy: 'content_match' }),
+      userInput: '14\u70b9\u63d2\u5165\u4e00\u6bb5\u9759\u5b89\u5bfa\u5916\u573a\u76f4\u64ad\u5bfc\u89c6',
+      currentSchedule: [],
+      history: [],
+    })
+
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context')
+    }
+    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
+    expect(result.pendingAtomicContext.slots.targetTime).toBe('14:00:00')
+    expect(result.pendingAtomicContext.slots.rawProgramText).toBe('\u9759\u5b89\u5bfa\u5916\u573a\u76f4\u64ad\u5bfc\u89c6')
+    const recommendationText = result.pendingAtomicContext.insertRecommendations
+      ?.map((candidate) => [candidate.programName, ...candidate.reasonTags].join(' '))
+      .join('\n') ?? ''
+    expect(recommendationText).toMatch(/\u9759\u5b89\u5bfa|\u5916\u573a|\u76f4\u64ad|\u5bfc\u89c6/)
+    expect(result.feedback.details?.rejectedReason).not.toBe('insert_keyword_no_match')
   })
 })

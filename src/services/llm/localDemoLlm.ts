@@ -99,6 +99,9 @@ const cleanSemanticLabel = (value: string): string | undefined => {
     .replace(/[零〇一二两三四五六七八九十]{1,3}(?:点半|点一刻|点三刻|點一刻|點三刻|点|點)(?:开始|起|起播|开播|左右|前后|附近|以后|之后|往后|后)?/g, '')
     .replace(/(?:一刻钟|三刻钟|(?:(?:\d+(?:\.\d+)?)|[零〇一二两三四五六七八九十]{1,3})(?:个)?半小时|(?:(?:\d+(?:\.\d+)?)|[零〇一二两三四五六七八九十]{1,3})(?:个)?小时半|半个?小时|(?:(?:\d+(?:\.\d+)?)|[零〇一二两三四五六七八九十]{1,3})(?:个)?小时|(?:(?:\d+)|[零〇一二两三四五六七八九十]{1,3})分钟)/g, '')
     .replace(/(?:全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|早间|清晨|白天|傍晚|黄金时段|黄金档|七点档|八点档|周末|今晚|明晚|今天|明天)/g, '')
+    .replace(/(?:按)?(?:纯电视频道|电视频道|频道编排|常规频道)/g, '')
+    .replace(/(?:接昨天进度|接昨日进度|接昨天|接昨日|昨天进度|昨日进度|顺播|续播|继续播|接着播|顺着排)/g, '')
+    .replace(/(?:顺着|按照|根据)?(?:当前|现有|今天)?(?:版面|节目单|编排单)?(?:补中间集|补缺集|补空档|补空窗|补空缺)/g, '')
     .replace(/^(?:我准备在|请|给我|帮我|帮忙|麻烦|需要|想要|先|全部|都|整体|统一|一个|一份|一版|一段|加个|加一段|加一点|垫个|垫一点|垫一段|做个|做一段|的)+/g, '')
     .replace(/(?:节目单|编排单|串联单|排单|直播单|轮播单|播单|节目|版面|单子)+$/g, '')
     .replace(/[，,。；;、]/g, '')
@@ -127,6 +130,38 @@ const inferProgramTypeHint = (label: string | undefined, input: string): string 
   if (/(评论|观察|访谈|民生)/.test(text)) return 'commentary'
   if (/(预热|预告|导视|垫片|暖场|串场|过渡|集锦|精编|精选|回看|短片|片花|花絮|宣推|互动|轻松|收尾)/.test(text)) return 'news_magazine'
   return 'news_magazine'
+}
+
+const buildSegmentQueryHints = (semanticLabel: string, programTypeHint: string): string[] => {
+  const text = `${semanticLabel}${programTypeHint}`
+  const hints = [semanticLabel, programTypeHint]
+
+  ;[
+    '直播',
+    '户外',
+    '现场',
+    '活动',
+    '静安寺',
+    '商圈',
+    '会场',
+    '发布会',
+    '预热',
+    '预告',
+    '导视',
+    '服务',
+    '提醒',
+    '集锦',
+    '回看',
+    '花絮',
+    '短片',
+    '暖场',
+  ].forEach((keyword) => {
+    if (text.includes(keyword)) {
+      hints.push(keyword)
+    }
+  })
+
+  return Array.from(new Set(hints))
 }
 
 const buildDemoSchedulingDecision = (userInput: string): {
@@ -189,7 +224,7 @@ export function createLocalDemoLlmResponse(messages: ChatMessage[]): LLMResponse
           startTime: targetTimeRange.start,
           endTime: targetTimeRange.end,
           programType: programTypeHint,
-          queryHints: [semanticLabel, programTypeHint, '直播', '活动', '服务'],
+          queryHints: buildSegmentQueryHints(semanticLabel, programTypeHint),
           sequential: programTypeHint === 'drama',
         },
       ],

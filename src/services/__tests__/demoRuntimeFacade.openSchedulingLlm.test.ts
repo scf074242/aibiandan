@@ -138,6 +138,12 @@ const openSchedulingCases: OpenSchedulingCase[] = [
     range: { start: '14:00:00', end: '15:00:00' },
   },
   {
+    userInput: '麻烦来个14-15点静安寺外场直播播单',
+    label: '静安寺户外直播轮播',
+    programType: 'news_magazine',
+    range: { start: '14:00:00', end: '15:00:00' },
+  },
+  {
     userInput: '下午两点二十起播，三点结束，安排发布会直播',
     label: '发布会直播',
     programType: 'news_magazine',
@@ -307,6 +313,11 @@ describe('DemoRuntimeFacade open scheduling LLM fallback', () => {
     expect(result.draft.layoutReference.slots).toHaveLength(1)
     expect(result.draft.columns[0]?.semanticLabel).toBe(label)
     expect(result.draft.columns[0]?.defaultProgramType).toBe(programType)
+    if (userInput.includes('播单')) {
+      expect(result.draft.strategyProfile?.kind).toBe('carousel')
+      expect(result.draft.strategyProfile?.requiresPreviousSchedule).toBe(false)
+      expect(result.draft.strategyProfile?.selectionPriority).toBe('content_match')
+    }
     expect(mockTaskClassify).not.toHaveBeenCalled()
   })
 })

@@ -29,6 +29,7 @@ export interface TaskClassification {
     targetItems?: string[]     // 鐩爣鏉＄洰ID鍒楄〃
     userIntent?: string        // 瑙ｆ瀽鍚庣殑鐢ㄦ埛鎰忓浘
     targetTimeRange?: { start: string; end: string }
+    rotationDurationSeconds?: number
     ignoreExistingLayout?: boolean
     semanticLabel?: string
     programTypeHint?: string
@@ -37,6 +38,10 @@ export interface TaskClassification {
 }
 
 /** 节目单状态 */
+export type PlaylistType = 'none' | 'tv' | 'rotation'
+
+export type RotationPlaylistStrategy = 'content_match' | 'rating' | 'trending'
+
 export interface ScheduleState {
   channelId: string
   channelName: string
@@ -45,6 +50,9 @@ export interface ScheduleState {
   itemCount: number
   gapCount: number
   hasSelectedTimeRange: boolean
+  playlistType?: PlaylistType
+  rotationStrategy?: RotationPlaylistStrategy
+  rotationDurationSeconds?: number
 }
 
 /** 风险等级 */
@@ -164,6 +172,7 @@ export interface PlanningSession {
     processing?: GapInfo
     completed: string[]
     failed: string[]
+    failedReasons: Record<string, string>
   }
   execution: ExecutionStats
   logs: PlanningLogEntry[]
@@ -211,8 +220,11 @@ export interface CandidateQueryCriteria {
   programTypePreference?: string[]
   searchKeywords?: string[]
   excludeUsed: boolean
+  selectionPolicy?: DraftSegmentSelectionPolicy
+  historyReference?: HistoryReference
 }
-/** 鍊欓€夋绱㈠懡浠?*/
+
+/** 候选检索命令 */
 export interface QueryCandidatesCommand extends BaseCommand {
   action: 'query_candidates'
   data: {
@@ -357,11 +369,53 @@ export interface ProgramCandidate {
   programCode: string
   programName: string
   channelId: string
+  columnId?: string
+  columnName?: string
   duration: number
   programType: string
   issueNo?: string
   instanceName: string
+  contentTags?: string[]
   adBreaks?: ProgramAdBreak[]
+  estimatedRating?: number
+  playCount?: number
+  popularityScore?: number
+  editorialDecision?: EditorialSelectionDecision
+}
+
+export interface EditorialSelectionDimension {
+  key: 'content_match' | 'duration_fit' | 'rating' | 'trend' | 'sequence' | 'type_fit' | 'schedule_context'
+  score: number
+  weight: number
+  note: string
+}
+
+export interface EditorialSelectionDecision {
+  strategy: DraftSelectionPriority | 'default'
+  totalScore: number
+  summary: string
+  strengths: string[]
+  concerns: string[]
+  dimensions: EditorialSelectionDimension[]
+}
+
+export interface CandidateQueryDiagnostics {
+  sourcePoolCount: number
+  columnMatchedCount: number
+  durationMatchedCount: number
+  typeMatchedCount: number
+  usageMatchedCount: number
+  historyMatchedCount: number
+  keywordMatchedCount: number
+  finalCandidateCount: number
+  hardKeywordRequired: boolean
+  explicitSequenceRequired?: boolean
+  functionalKeywordRequired?: boolean
+  sequenceContextRejected?: boolean
+  fallbackToBroadQuery: boolean
+  selectionPriority?: DraftSelectionPriority
+  rejectionReasons: string[]
+  notes: string[]
 }
 
 /** 候选检索结果 */
@@ -370,6 +424,7 @@ export interface CandidateQueryResult {
   candidates: ProgramCandidate[]
   totalCount: number
   queryTime: string
+  diagnostics?: CandidateQueryDiagnostics
 }
 
 // ==================== 校验相关 ====================
@@ -468,6 +523,12 @@ export interface ScheduleItemSnapshot {
   id: string
   programCode: string
   programName: string
+  programId?: string
+  instanceName?: string
+  issueNo?: string
+  columnId?: string
+  columnName?: string
+  contentTags?: string[]
   startTime: string
   endTime: string
   duration: number
@@ -610,17 +671,18 @@ export interface ColumnDefinition {
   isSequential?: boolean
   semanticLabel?: string
   queryHints?: string[]
+  selectionPolicy?: DraftSegmentSelectionPolicy
   source?: 'generated' | 'imported' | 'default'
 }
 
-/** 鐗堥潰鍙傝€?*/
+/** 版面参考 */
 export interface LayoutReference {
   id: string
   name: string
   slots: LayoutSlot[]
 }
 
-/** 鐗堥潰鏃舵 */
+/** 版面时段 */
 export interface LayoutSlot {
   id: string
   channelId: string
@@ -637,6 +699,7 @@ export interface LayoutDraftSpecSegment {
   programType: string
   queryHints?: string[]
   sequential?: boolean
+  selectionPolicy?: DraftSegmentSelectionPolicy
 }
 
 export interface LayoutIntentSegment {
@@ -666,6 +729,7 @@ export interface LayoutDraft {
   version: number
   source: 'generated' | 'uploaded' | 'channel_default'
   userIntent: string
+  strategyProfile?: LayoutDraftStrategyProfile
   coverage: {
     start: string
     end: string
@@ -675,13 +739,46 @@ export interface LayoutDraft {
   warnings?: string[]
 }
 
+export type LayoutDraftStrategyKind = 'tv_channel' | 'carousel'
+
+export type DraftSelectionPriority = 'content_match' | 'rating' | 'trending' | 'sequence'
+
+export type LayoutDraftStrategyBasis = 'previous_schedule_sequence' | 'content_match' | 'rating' | 'trending'
+
+export interface DraftSegmentSelectionPolicy {
+  primary: DraftSelectionPriority
+  fallback: DraftSelectionPriority[]
+  requiresPreviousSchedule?: boolean
+  notes?: string[]
+}
+
+export interface LayoutDraftStrategyProfile {
+  kind: LayoutDraftStrategyKind
+  label: string
+  reasoning: string
+  requiresPreviousSchedule: boolean
+  referenceDate?: string
+  selectionPriority: DraftSelectionPriority
+  strategyBasis: LayoutDraftStrategyBasis
+  contextSummary: string
+  selectionSummary: string
+  constraintSummary: string
+  selectionRules: string[]
+  keywordPolicy: 'hard_match' | 'soft_match'
+  segmentPolicies: Record<string, DraftSegmentSelectionPolicy>
+}
+
 export interface DraftFeasibilitySegmentReport {
   segmentId: string
   label: string
   startTime: string
   endTime: string
   status: 'ready' | 'warning' | 'blocked'
+  blockerKind?: 'program_type' | 'duration' | 'keyword' | 'schedule_context'
   matchedCandidateCount: number
+  expectedSequenceNo?: number
+  historyReferenceDate?: string
+  historyContextSummary?: string
   reasons: string[]
 }
 
@@ -706,6 +803,7 @@ export interface ScheduleSummary {
   itemCount: number
   programTypes: Record<string, number>
   avgRating?: number
+  items?: ScheduleItemSnapshot[]
 }
 
 /** 编排约束 */

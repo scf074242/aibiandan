@@ -32,12 +32,7 @@ export class ParamExtractor {
 
   async extractInsertParams(context: DialogueContext): Promise<InsertParams | null> {
     const ruleBased = this.ruleBasedExtractInsert(context.userInput)
-    if (ruleBased && !this.shouldRefineWithContext(context, 'insert', ruleBased.programName, ruleBased.rawProgramText)) {
-      return ruleBased
-    }
-    if (!ruleBased && !this.hasExplicitTargetTimeHint(context)) {
-      return null
-    }
+    const canAcceptLlmTargetTime = this.canAcceptLlmTargetTime(context)
 
     try {
       const response = await this.llmClient.chat(
@@ -55,7 +50,7 @@ export class ParamExtractor {
               '输出格式: {"targetTime":"09:00:00","programName":"看东方","rawProgramText":"看东方","semanticLabel":"新闻资讯","programTypeHint":"news_magazine"}',
           },
         ],
-        { temperature: 0, maxTokens: 120 },
+        { temperature: 0, maxTokens: 120, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_insert_params' },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
@@ -64,6 +59,7 @@ export class ParamExtractor {
       if (!parsed.targetTime) return ruleBased ?? null
       const normalizedTargetTime = this.normalizeTime(parsed.targetTime)
       if (!normalizedTargetTime) return ruleBased ?? null
+      if (!canAcceptLlmTargetTime) return ruleBased ?? null
       return this.normalizeInsertParams({
         targetTime: normalizedTargetTime,
         programName: parsed.programName,
@@ -78,12 +74,7 @@ export class ParamExtractor {
 
   async extractMoveParams(context: DialogueContext): Promise<MoveParams | null> {
     const ruleBased = this.ruleBasedExtractMove(context.userInput)
-    if (ruleBased && !this.shouldRefineWithContext(context, 'move')) {
-      return ruleBased
-    }
-    if (!ruleBased && !this.hasExplicitTargetTimeHint(context)) {
-      return null
-    }
+    const canAcceptLlmTargetTime = this.canAcceptLlmTargetTime(context)
 
     try {
       const response = await this.llmClient.chat(
@@ -101,7 +92,7 @@ export class ParamExtractor {
               '输出格式: {"targetTime":"22:00:00","direction":"forward","offsetSeconds":3600}',
           },
         ],
-        { temperature: 0, maxTokens: 120 },
+        { temperature: 0, maxTokens: 120, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_move_params' },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
@@ -110,6 +101,7 @@ export class ParamExtractor {
       if (!parsed.targetTime || !parsed.direction || !parsed.offsetSeconds) return ruleBased ?? null
       const normalizedTargetTime = this.normalizeTime(parsed.targetTime)
       if (!normalizedTargetTime) return ruleBased ?? null
+      if (!canAcceptLlmTargetTime) return ruleBased ?? null
       const extracted: MoveParams = {
         targetTime: normalizedTargetTime,
         direction: parsed.direction === 'backward' ? 'backward' : 'forward',
@@ -123,12 +115,7 @@ export class ParamExtractor {
 
   async extractDeleteParams(context: DialogueContext): Promise<DeleteParams | null> {
     const ruleBased = this.ruleBasedExtractDelete(context.userInput)
-    if (ruleBased && !this.shouldRefineWithContext(context, 'delete', ruleBased.programName)) {
-      return ruleBased
-    }
-    if (!ruleBased && !this.hasExplicitTargetTimeHint(context)) {
-      return null
-    }
+    const canAcceptLlmTargetTime = this.canAcceptLlmTargetTime(context)
 
     try {
       const response = await this.llmClient.chat(
@@ -146,7 +133,7 @@ export class ParamExtractor {
               '输出格式: {"targetTime":"12:00:00","programName":"午间30"}',
           },
         ],
-        { temperature: 0, maxTokens: 120 },
+        { temperature: 0, maxTokens: 120, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_delete_params' },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
@@ -155,6 +142,7 @@ export class ParamExtractor {
       if (!parsed.targetTime) return ruleBased ?? null
       const normalizedTargetTime = this.normalizeTime(parsed.targetTime)
       if (!normalizedTargetTime) return ruleBased ?? null
+      if (!canAcceptLlmTargetTime) return ruleBased ?? null
       const extracted = {
         targetTime: normalizedTargetTime,
         programName: parsed.programName?.trim(),
@@ -167,12 +155,7 @@ export class ParamExtractor {
 
   async extractReplaceParams(context: DialogueContext): Promise<ReplaceParams | null> {
     const ruleBased = this.ruleBasedExtractReplace(context.userInput)
-    if (ruleBased && !this.shouldRefineWithContext(context, 'replace', ruleBased.programName)) {
-      return ruleBased
-    }
-    if (!ruleBased && !this.hasExplicitTargetTimeHint(context)) {
-      return null
-    }
+    const canAcceptLlmTargetTime = this.canAcceptLlmTargetTime(context)
 
     try {
       const response = await this.llmClient.chat(
@@ -190,7 +173,7 @@ export class ParamExtractor {
               '输出格式: {"targetTime":"10:00:00","replacementProgramName":"中国考古报道"}',
           },
         ],
-        { temperature: 0, maxTokens: 120 },
+        { temperature: 0, maxTokens: 120, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_replace_params' },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
@@ -204,6 +187,7 @@ export class ParamExtractor {
       if (!parsed.targetTime || !programName) return ruleBased ?? null
       const normalizedTargetTime = this.normalizeTime(parsed.targetTime)
       if (!normalizedTargetTime) return ruleBased ?? null
+      if (!canAcceptLlmTargetTime) return ruleBased ?? null
       const extracted = {
         targetTime: normalizedTargetTime,
         programName: programName.trim(),
@@ -219,7 +203,7 @@ export class ParamExtractor {
     const timeMatch =
       normalized.match(/在?(\d{1,2})点(?:(\d{1,2})分)?/) ||
       normalized.match(/在?(\d{1,2})[:：](\d{2})/)
-    const insertVerbPattern = /(?:插入节目|插入|插个|插一|添加节目|安排节目|加一条|加一档|加个|加个节目|加一段|加一些|插个节目|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)(?:的)?)/
+    const insertVerbPattern = /(?:插入节目|插入|插个|插一|插播|加播|添加节目|安排节目|排入|排个|排一条|排一档|加一条|加一档|加个|加个节目|加点|加一点|加一段|加一些|插个节目|来个|来点|来一点|来一条|来一档|来一段|放个|放点|放一点|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)(?:的)?)/
     const insertVerbMatched = insertVerbPattern.test(normalized)
     const programMatch = normalized.match(new RegExp(`${insertVerbPattern.source}(.*)$`))
 
@@ -236,7 +220,7 @@ export class ParamExtractor {
 
   private ruleBasedExtractMove(userInput: string): MoveParams | null {
     const normalized = userInput.replace(/\s+/g, '')
-    if (!/(移动|后移|前移|顺延|延后|提前|往后挪|往前挪|挪一下|顺一下|顺一个)/.test(normalized)) return null
+    if (!/(移动到|移到|调到|调整到|改到|挪到|放到|排到|移动|后移|前移|顺延|延后|提前|推迟|推后|延迟|往后挪|往前挪|挪一下|顺一下|顺一个)/.test(normalized)) return null
 
     const timeMatch = this.findTimeExpression(normalized)
     const offset = this.extractOffsetFromNormalized(normalized)
@@ -254,15 +238,23 @@ export class ParamExtractor {
 
   private ruleBasedExtractDelete(userInput: string): DeleteParams | null {
     const normalized = userInput.replace(/\s+/g, '')
-    if (!/(删除|删掉|移除|去掉|撤掉|拿掉)/.test(normalized)) return null
+    const deleteVerbPattern = /(?:删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉)/
+    if (!deleteVerbPattern.test(normalized)) return null
 
     const timeMatch = this.findTimeExpression(normalized)
     if (!timeMatch) return null
 
     const quotedProgramName = normalized.match(/《([^》]+)》/)?.[1]?.trim()
+    const afterTimeText = normalized
+      .slice(timeMatch.index + timeMatch.matchedText.length)
+      .replace(deleteVerbPattern, '')
+    const beforeTimeText = normalized
+      .slice(0, timeMatch.index)
+      .replace(/^(?:删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉)/, '')
+      .replace(deleteVerbPattern, '')
     const programFragment = quotedProgramName
-      ?? this.normalizeProgramSelection(normalized.slice(timeMatch.index + timeMatch.matchedText.length))
-      ?? this.normalizeProgramSelection(normalized.slice(0, timeMatch.index).replace(/^(?:删除|删掉|移除|去掉|撤掉|拿掉)/, ''))
+      ?? this.normalizeProgramSelection(afterTimeText)
+      ?? this.normalizeProgramSelection(beforeTimeText)
 
     return {
       targetTime: timeMatch.targetTime,
@@ -273,7 +265,7 @@ export class ParamExtractor {
   private ruleBasedExtractReplace(userInput: string): ReplaceParams | null {
     const normalized = userInput.replace(/\s+/g, '')
     const timeMatch = this.findTimeExpression(normalized)
-    const replacementMatch = normalized.match(/(?:替换成|替换为|替换|换掉成|换成|换掉|改成|改为)(.+)$/)
+    const replacementMatch = normalized.match(/(?:替换成|替换为|替换|换掉成|换成|换播|换掉|改成|改为|改播)(.+)$/)
     if (!timeMatch || !replacementMatch?.[1]) return null
 
     const replacementProgramName = this.normalizeProgramSelection(replacementMatch[1])
@@ -299,11 +291,11 @@ export class ParamExtractor {
       .replace(/[，。！？!?]/g, '')
       .replace(/^(?:一档|一个|一条|一期|一部|个|条|档|期|部)/, '')
       .replace(/^(?:适合的|合适的|当前的|更适合[^的]*的?)/, '')
-      .replace(/^(?:的|节目|栏目|补充说明[:：]?|要删除的|删除的|这条|那条|这个|那个)+/, '')
+      .replace(/^(?:把|的|节目|栏目|补充说明[:：]?|要删除的|删除的|这条|那条|这档|那档|这个|那个)+/, '')
       .replace(/(?:补充说明[:：]?)+$/g, '')
       .trim()
     if (!normalized) return undefined
-    if (/^(节目|栏目|这条|那条|这个节目|那个节目|补充说明[:：]?)$/.test(normalized)) return undefined
+    if (/^(把|节目|栏目|这条|那条|这档|那档|这个节目|那个节目|补充说明[:：]?)$/.test(normalized)) return undefined
     return this.normalizeProgramName(normalized)
   }
 
@@ -334,7 +326,8 @@ export class ParamExtractor {
     const hasProgramHint = typeof programName === 'string' && programName.trim().length > 0
 
     if (intentType === 'delete' || intentType === 'replace') {
-      return hasTimeHints || hasNearbyItems || hasProgramHint
+      if (hasTimeHints) return false
+      return hasNearbyItems || hasProgramHint
     }
 
     if (intentType === 'insert') {
@@ -344,11 +337,18 @@ export class ParamExtractor {
       return hasProgramHint || hasTimeHints
     }
 
+    if (intentType === 'move' && hasTimeHints) return false
+
     return hasTimeHints && hasNearbyItems
   }
 
   private hasExplicitTargetTimeHint(context: DialogueContext): boolean {
     return context.targetTimeHints.length > 0
+  }
+
+  private canAcceptLlmTargetTime(context: DialogueContext): boolean {
+    if (this.hasExplicitTargetTimeHint(context)) return true
+    return /(它|这条|那条|这个|那个|这档|那档|刚才|刚刚|上一个|下一个|当前|选中)/.test(context.userInput)
   }
 
   private normalizeTime(timeText: string): string | null {
@@ -447,7 +447,7 @@ export class ParamExtractor {
     const normalized = value.replace(/\s+/g, '')
     if (!normalized) return true
     if (/^(节目|栏目|内容|片子|合适的节目|当前的节目)$/.test(normalized)) return true
-    return /^(新闻|资讯|预告|导视|垫片|现场导视|电视剧|剧场|综艺|纪录片|纪实|少儿|动画|评论|访谈|养生|健康|娱乐|电影|短剧)(节目|栏目|内容)?$/.test(normalized)
+    return /^(新闻|资讯|预告|导视|垫片|现场导视|电视剧|剧场|综艺|纪录片|纪实|少儿|动画|评论|访谈|养生|健康|娱乐|电影|短剧|热闹|轻松|热闹的内容|轻松的内容)(节目|栏目|内容)?$/.test(normalized)
   }
 
   private inferProgramTypeHint(value?: string): string | undefined {
@@ -457,7 +457,7 @@ export class ParamExtractor {
       { pattern: /(新闻|快报|联播)/, type: 'news' },
       { pattern: /(资讯|观察|预告|导视|垫片|Eye)/i, type: 'news_magazine' },
       { pattern: /(电视剧|剧场|短剧|剧情)/, type: 'drama' },
-      { pattern: /(综艺|娱乐)/, type: 'entertainment' },
+      { pattern: /(综艺|娱乐|热闹|轻松)/, type: 'entertainment' },
       { pattern: /(养生|健康)/, type: 'health' },
       { pattern: /(评论|访谈|观点)/, type: 'commentary' },
       { pattern: /(少儿|动画|童)/, type: 'kids' },
@@ -472,7 +472,7 @@ export class ParamExtractor {
       if (/(新闻|快报|联播)/.test(normalized)) return '新闻'
       if (/(资讯|观察|预告|导视|垫片|Eye)/i.test(normalized)) return '资讯'
       if (/(电视剧|剧场|短剧|剧情)/.test(normalized)) return '剧场'
-      if (/(综艺|娱乐)/.test(normalized)) return '娱乐'
+      if (/(综艺|娱乐|热闹|轻松)/.test(normalized)) return '娱乐'
       if (/(养生|健康)/.test(normalized)) return '养生'
       if (/(评论|访谈|观点)/.test(normalized)) return '评论'
       if (/(少儿|动画|童)/.test(normalized)) return '少儿'

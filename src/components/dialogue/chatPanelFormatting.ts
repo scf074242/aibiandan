@@ -166,13 +166,20 @@ export const buildCandidateComparisonNote = (
   const explicitNote = normalizeDecisionExplanation(
     typeof candidate.selectionNote === 'string' ? candidate.selectionNote : undefined,
   )
+  const editorialNote = normalizeDecisionExplanation(
+    toDetailMap(candidate.editorialDecision)?.summary as string | undefined,
+  )
 
   if (selected) {
-    return truncateText(explicitNote || fallbackSelectionReason, 40)
+    return truncateText(explicitNote || editorialNote || fallbackSelectionReason, 40)
   }
 
   if (explicitNote) {
     return truncateText(explicitNote, 36)
+  }
+
+  if (editorialNote) {
+    return truncateText(editorialNote, 36)
   }
 
   if (selectionMode === 'sequential') {

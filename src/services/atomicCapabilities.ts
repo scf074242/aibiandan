@@ -163,6 +163,7 @@ export class AtomicCapabilities {
     options?: { skipValidation?: boolean },
   ): Promise<AtomicOperationResult<{ items: ScheduleItemSnapshot[] }>> {
     try {
+      const previousItems = new Map(this.items)
       const addedItems: ScheduleItemSnapshot[] = []
       const changes: OperationChange[] = []
 
@@ -190,7 +191,15 @@ export class AtomicCapabilities {
 
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {
-        await this.triggerValidation('full')
+        const validationFailure = await this.validateOrRollback('full', '批量添加', () => {
+          this.items = previousItems
+        })
+        if (validationFailure) {
+          return {
+            success: false,
+            error: validationFailure,
+          }
+        }
       }
 
       return {
@@ -234,7 +243,16 @@ export class AtomicCapabilities {
 
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {
-        await this.triggerValidation('item')
+        const validationFailure = await this.validateOrRollback('item', '替换', () => {
+          this.items.set(itemId, oldItem)
+          this.normalizeSequences()
+        })
+        if (validationFailure) {
+          return {
+            success: false,
+            error: validationFailure,
+          }
+        }
       }
 
       return {
@@ -280,7 +298,16 @@ export class AtomicCapabilities {
 
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {
-        await this.triggerValidation('full')
+        const validationFailure = await this.validateOrRollback('full', '删除', () => {
+          this.items.set(itemId, item)
+          this.normalizeSequences()
+        })
+        if (validationFailure) {
+          return {
+            success: false,
+            error: validationFailure,
+          }
+        }
       }
 
       return {
@@ -342,7 +369,16 @@ export class AtomicCapabilities {
 
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {
-        await this.triggerValidation('item')
+        const validationFailure = await this.validateOrRollback('item', '移动', () => {
+          this.items.set(itemId, item)
+          this.normalizeSequences()
+        })
+        if (validationFailure) {
+          return {
+            success: false,
+            error: validationFailure,
+          }
+        }
       }
 
       return {
@@ -407,7 +443,16 @@ export class AtomicCapabilities {
 
       // 触发校验
       if (this.config.enableAutoValidation && !options?.skipValidation) {
-        await this.triggerValidation('item')
+        const validationFailure = await this.validateOrRollback('item', '更新字段', () => {
+          this.items.set(itemId, item)
+          this.normalizeSequences()
+        })
+        if (validationFailure) {
+          return {
+            success: false,
+            error: validationFailure,
+          }
+        }
       }
 
       return {
@@ -490,6 +535,7 @@ export class AtomicCapabilities {
     itemIds: string[],
     options?: { skipValidation?: boolean },
   ): Promise<AtomicOperationResult<{ deletedItems: ScheduleItemSnapshot[] }>> {
+    const previousItems = new Map(this.items)
     const deletedItems: ScheduleItemSnapshot[] = []
     const errors: string[] = []
 
@@ -504,7 +550,17 @@ export class AtomicCapabilities {
 
     // 触发校验
     if (this.config.enableAutoValidation && !options?.skipValidation && deletedItems.length > 0) {
-      await this.triggerValidation('full')
+      const validationFailure = await this.validateOrRollback('full', '批量删除', () => {
+        this.items = previousItems
+      })
+      if (validationFailure) {
+        return {
+          success: false,
+          data: { deletedItems },
+          error: validationFailure,
+          affectedItems: deletedItems.map((i) => i.id),
+        }
+      }
     }
 
     return {
@@ -539,6 +595,7 @@ export class AtomicCapabilities {
     options?: { skipValidation?: boolean },
   ): Promise<AtomicOperationResult<{ items: ScheduleItemSnapshot[] }>> {
     try {
+      const previousItems = new Map(this.items)
       if (this.config.enableSnapshot) {
         for (const [itemId] of this.items) {
           this.createSnapshot(itemId, 'replace_all')
@@ -552,7 +609,15 @@ export class AtomicCapabilities {
       this.normalizeSequences()
 
       if (this.config.enableAutoValidation && !options?.skipValidation) {
-        await this.triggerValidation('full')
+        const validationFailure = await this.validateOrRollback('full', '整体替换', () => {
+          this.items = previousItems
+        })
+        if (validationFailure) {
+          return {
+            success: false,
+            error: validationFailure,
+          }
+        }
       }
 
       return {
@@ -577,6 +642,28 @@ export class AtomicCapabilities {
   private async triggerValidation(scope: 'item' | 'full'): Promise<ValidationReport | undefined> {
     if (!this.onValidation) return undefined
     return this.onValidation(scope)
+  }
+
+  private async validateOrRollback(
+    scope: 'item' | 'full',
+    actionLabel: string,
+    rollback: () => void,
+  ): Promise<string | null> {
+    try {
+      const validationReport = await this.triggerValidation(scope)
+      if (validationReport && !validationReport.isValid) {
+        rollback()
+        return this.formatValidationFailure(validationReport, actionLabel)
+      }
+      return null
+    } catch (error) {
+      rollback()
+      return `${actionLabel}后自动校验异常，已回滚本次修改：${(error as Error).message}`
+    }
+  }
+
+  private formatValidationFailure(report: ValidationReport, actionLabel: string): string {
+    return `${actionLabel}后自动校验未通过，已回滚本次修改（发现 ${report.summary.totalIssues} 个问题）`
   }
 
   /**

@@ -67,6 +67,59 @@ describe('RuntimeSessionStore', () => {
     expect(second.context.date).toBe('2026-04-08')
   })
 
+  it('复用会话时后续输入未携带播单状态会保留已有策略', () => {
+    const store = new RuntimeSessionStore()
+
+    const first = store.upsertSessionForConversation({
+      conversationId: 'conv-playlist-state',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-04-07',
+      currentSchedule: [],
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+    })
+
+    const second = store.upsertSessionForConversation({
+      conversationId: 'conv-playlist-state',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-04-07',
+      currentSchedule: [],
+    })
+
+    expect(first.sessionId).toBe(second.sessionId)
+    expect(second.context.playlistType).toBe('rotation')
+    expect(second.context.rotationStrategy).toBe('content_match')
+  })
+
+  it('复用会话时显式切换为电视播单会清空轮播策略', () => {
+    const store = new RuntimeSessionStore()
+
+    store.upsertSessionForConversation({
+      conversationId: 'conv-playlist-state-update',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-04-07',
+      currentSchedule: [],
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+    })
+
+    const updated = store.upsertSessionForConversation({
+      conversationId: 'conv-playlist-state-update',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-04-07',
+      currentSchedule: [],
+      playlistType: 'tv',
+      rotationStrategy: undefined,
+    })
+
+    expect(updated.context.playlistType).toBe('tv')
+    expect(updated.context.rotationStrategy).toBeUndefined()
+  })
+
   it('会在更新时通知订阅者', () => {
     const store = new RuntimeSessionStore()
     const session = store.createSession({

@@ -63,4 +63,39 @@ describe('GapManager', () => {
     expect(gaps[0]?.constraints.fixedEnd).toBe(true)
     expect(gaps[0]?.constraints.maxDuration).toBe(900)
   })
+  it('keeps the remaining part of a long layout band ahead of later bands after filling one episode', () => {
+    const manager = createGapManager('dragon', '2026-03-25')
+
+    manager.initializeFromLayoutBands([
+      {
+        startTime: '2026-03-25T09:00:00+08:00',
+        endTime: '2026-03-25T12:00:00+08:00',
+        programType: 'drama',
+        preferredProgramTypes: ['drama'],
+      },
+      {
+        startTime: '2026-03-25T12:00:00+08:00',
+        endTime: '2026-03-25T13:00:00+08:00',
+        programType: 'news',
+        preferredProgramTypes: ['news'],
+      },
+    ])
+
+    const firstGap = manager.queryRemainingGaps()[0]!
+    manager.onGapFilled(firstGap.id, {
+      id: 'episode-1',
+      programCode: '881120030001',
+      programName: '品质剧场：纵有疾风起 第1集',
+      startTime: '2026-03-25T09:00:00+08:00',
+      endTime: '2026-03-25T09:45:00+08:00',
+      duration: 2700,
+      programType: 'drama',
+    })
+
+    const remaining = manager.queryRemainingGaps()
+    expect(remaining[0]?.startTime).toBe('2026-03-25T09:45:00+08:00')
+    expect(remaining[0]?.endTime).toBe('2026-03-25T12:00:00+08:00')
+    expect(remaining[0]?.constraints.allowedTypes).toEqual(['drama'])
+    expect(remaining[1]?.startTime).toBe('2026-03-25T12:00:00+08:00')
+  })
 })

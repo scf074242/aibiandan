@@ -7,6 +7,7 @@ import type { LayoutDraft, TaskMode } from '@/types/orchestration'
 import { useBroadcastPlanFocus } from './useBroadcastPlanFocus'
 import type { ValidationReport } from '@/types/orchestration'
 import { setRuntimeLayout } from '@/services/orchestration/runtimeLayoutRegistry'
+import type { ChatScheduleUpdateItem } from './broadcastPlanScheduleBridge'
 
 type UseBroadcastPlanOrchestrationOptions = {
   currentChannelId: ComputedRef<string>
@@ -16,7 +17,9 @@ type UseBroadcastPlanOrchestrationOptions = {
   displayGapCount: ComputedRef<number>
   syncPageItemsToAtomic: () => void
   syncAtomicItemsToPage: () => void
+  applyRuntimeScheduleItems: (items: ChatScheduleUpdateItem[]) => void
   syncAtomicItemsToPageDeferred: () => void
+  persistCurrentPlaylistDocument: () => void
   focusRuntime: ReturnType<typeof useBroadcastPlanFocus>
   normalizeClockText: (value: string) => string
 }
@@ -133,8 +136,14 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
     }
   }
 
-  const handleChatScheduleUpdated = () => {
+  const handleChatScheduleUpdated = (items?: ChatScheduleUpdateItem[]) => {
+    if (items?.length) {
+      options.applyRuntimeScheduleItems(items)
+      options.persistCurrentPlaylistDocument()
+      return
+    }
     options.syncAtomicItemsToPage()
+    options.persistCurrentPlaylistDocument()
   }
 
   const handleChatOrchestrateRequested = async (

@@ -14,6 +14,9 @@ import type {
 import { loadLLMConfig, validateLLMConfig } from './llmConfig'
 import { createLocalDemoLlmResponse, isPlaceholderApiKey } from './localDemoLlm'
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 15000
+const MAX_REQUEST_TIMEOUT_MS = 30000
+
 export class LLMClient {
   private client: OpenAI | null = null
   private config: LLMConfig
@@ -75,22 +78,31 @@ export class LLMClient {
       throw this.cachedFatalConfigError
     }
 
-    const maxRetries = 3
+    const requestTimeout = Math.min(
+      options?.timeout ?? this.config.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      MAX_REQUEST_TIMEOUT_MS,
+    )
+    const maxRetries = Math.max(1, options?.maxRetries ?? 1)
+    const traceLabel = options?.traceLabel ?? 'chat'
+    const startedAt = Date.now()
     let lastError: Error | null = null
     let attempts = 0
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       attempts = attempt + 1
       try {
-        const response = await this.client.chat.completions.create({
-          model: this.config.model,
-          messages: messages.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-          temperature: options?.temperature ?? this.config.temperature,
-          max_tokens: options?.maxTokens ?? this.config.maxTokens,
-        })
+        const response = await this.withTimeout(
+          this.client.chat.completions.create({
+            model: this.config.model,
+            messages: messages.map((m) => ({
+              role: m.role,
+              content: m.content,
+            })),
+            temperature: options?.temperature ?? this.config.temperature,
+            max_tokens: options?.maxTokens ?? this.config.maxTokens,
+          }, { timeout: requestTimeout }),
+          requestTimeout,
+        )
 
         const usage = response.usage
         if (usage) {
@@ -99,6 +111,15 @@ export class LLMClient {
           this.tokenUsage.totalTokens += usage.total_tokens
           this.tokenUsage.requestCount++
         }
+
+        this.recordRequestTrace({
+          label: traceLabel,
+          attemptCount: attempts,
+          durationMs: Date.now() - startedAt,
+          timeoutMs: requestTimeout,
+          success: true,
+          startedAt: new Date(startedAt).toISOString(),
+        })
 
         return {
           content: response.choices[0]?.message?.content || '',
@@ -128,6 +149,16 @@ export class LLMClient {
         }
       }
     }
+
+    this.recordRequestTrace({
+      label: traceLabel,
+      attemptCount: attempts,
+      durationMs: Date.now() - startedAt,
+      timeoutMs: requestTimeout,
+      success: false,
+      error: lastError?.message,
+      startedAt: new Date(startedAt).toISOString(),
+    })
 
     throw new Error(
       `LLM request failed after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${lastError?.message}`,
@@ -223,11 +254,32 @@ export class LLMClient {
     return { ...this.config }
   }
 
+  getRecentRequestTraces(): LLMRequestTrace[] {
+    return [...this.recentRequestTraces]
+  }
+
+  private recordRequestTrace(trace: LLMRequestTrace): void {
+    this.recentRequestTraces = [trace, ...this.recentRequestTraces].slice(0, 20)
+  }
+
   /**
    * 延迟函数
    */
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  private withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(Object.assign(new Error(`LLM request timed out after ${timeoutMs}ms`), { code: 'ETIMEDOUT' }))
+      }, timeoutMs)
+    })
+
+    return Promise.race([promise, timeout]).finally(() => {
+      if (timeoutId) clearTimeout(timeoutId)
+    })
   }
 
   /**

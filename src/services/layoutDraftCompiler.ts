@@ -1,6 +1,7 @@
 import type {
   GeneratedColumnDefinition,
   LayoutDraft,
+  LayoutDraftStrategyProfile,
   LayoutDraftSpec,
   LayoutReference,
   LayoutSlot,
@@ -13,6 +14,7 @@ export interface LayoutDraftCompileContext {
   userIntent: string
   source: LayoutDraft['source']
   version?: number
+  strategyProfile?: LayoutDraftStrategyProfile
 }
 
 const SOURCE_TO_COLUMN_SOURCE: Record<LayoutDraft['source'], GeneratedColumnDefinition['source']> = {
@@ -44,6 +46,7 @@ export class LayoutDraftCompiler {
       isSequential: segment.sequential,
       semanticLabel: segment.label,
       queryHints: segment.queryHints,
+      selectionPolicy: segment.selectionPolicy,
       source: columnSource,
     }))
 
@@ -68,6 +71,7 @@ export class LayoutDraftCompiler {
       version,
       source: context.source,
       userIntent: context.userIntent,
+      strategyProfile: context.strategyProfile,
       coverage: spec.coverage,
       layoutReference,
       columns,

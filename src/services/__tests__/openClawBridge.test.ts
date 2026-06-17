@@ -156,6 +156,46 @@ describe('OpenClawBridge', () => {
     expect(session?.pendingLayoutDraft).toBeTruthy()
   })
 
+  it('纯电视频道编排草案会声明顺播策略并要求参考昨日记录', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-tv-strategy',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '帮我全天编排，电视剧顺着昨天继续排',
+      currentSchedule: [],
+      gapCount: 2,
+      history: [],
+    })
+
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(prepare.payload?.pendingLayoutDraft?.strategyProfile?.kind).toBe('tv_channel')
+    expect(prepare.payload?.pendingLayoutDraft?.strategyProfile?.requiresPreviousSchedule).toBe(true)
+    expect(prepare.payload?.pendingLayoutDraft?.strategyProfile?.referenceDate).toBe('2026-03-24')
+  })
+
+  it('轮播单草案会声明收视率优先策略', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-carousel-rating-strategy',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '静安寺户外直播，14点到15点做轮播单，按收视率优先',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(prepare.payload?.pendingLayoutDraft?.strategyProfile?.kind).toBe('carousel')
+    expect(prepare.payload?.pendingLayoutDraft?.strategyProfile?.selectionPriority).toBe('rating')
+    expect(prepare.payload?.pendingLayoutDraft?.strategyProfile?.requiresPreviousSchedule).toBe(false)
+  })
+
   it('会在确认版面草案后返回 layout_commit', async () => {
     const bridge = new OpenClawBridge()
 
@@ -185,6 +225,48 @@ describe('OpenClawBridge', () => {
 
     expect(commit.payload?.lastDecisionKind).toBe('layout_commit')
     expect(commit.status).toBe('accepted')
+  }, 20_000)
+
+  it('外部 Confirm 会确认待确认版面草案并返回 layout_commit', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-confirm-layout-draft-api',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '按纯电视频道，09:45到10:30继续播品质剧场：纵有疾风起，顺着当前版面补中间集',
+      currentSchedule: [
+        {
+          id: 'existing-0900-episode-1',
+          programCode: '002601120001',
+          programName: '品质剧场：纵有疾风起 第1集',
+          startTime: '09:00:00',
+          endTime: '09:45:00',
+          duration: 2700,
+          programType: 'drama',
+        },
+        {
+          id: 'existing-1030-episode-3',
+          programCode: '002601120003',
+          programName: '品质剧场：纵有疾风起 第3集',
+          startTime: '10:30:00',
+          endTime: '11:15:00',
+          duration: 2700,
+          programType: 'drama',
+        },
+      ],
+      gapCount: 3,
+      history: [],
+    })
+
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+
+    const commit = await bridge.confirm(prepare.sessionId)
+
+    expect(commit.status).toBe('accepted')
+    expect(commit.payload?.lastDecisionKind).toBe('layout_commit')
+    expect(commit.payload?.pendingLayoutDraft).toBeUndefined()
   })
 
   it('确认草案后再校验会清空旧草案上下文并读取实际节目单状态', async () => {
@@ -487,6 +569,81 @@ describe('OpenClawBridge', () => {
     expect(refine.payload?.pendingAtomicContext).toBeNull()
     expect(refine.payload?.pendingCommand).toBeUndefined()
     expect(refine.summary).toContain('更新当前版面草案')
+  })
+
+  it('当前存在不可编排草案时会把改成具体节目理解为版面微调', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-refine-blocked-draft',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '14点到15点排生命树电视剧',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(prepare.payload?.layoutDraftFeasibility?.summary.blockedCount).toBe(1)
+
+    const refine = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-refine-blocked-draft',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '改成梦想剧场：归路 第1集',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+
+    const refinedDraft = bridge.getSessionState(refine.sessionId)?.pendingLayoutDraft
+    const refinedHints = refinedDraft?.columns.flatMap((column) => [
+      column.semanticLabel ?? '',
+      column.columnName,
+      ...(column.queryHints ?? []),
+    ]).join(' ')
+
+    expect(refine.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(refine.payload?.pendingAtomicContext).toBeNull()
+    expect(refinedHints).toContain('归路')
+  })
+
+  it('结构化栏目和内容字段要求无匹配时确认草案仍会阻断正式编排', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-structured-editorial-blocked-draft',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '14:00到15:00安排所属栏目静安寺、节目内容看东方的轮播单，内容匹配优先',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(prepare.payload?.layoutDraftFeasibility?.summary.blockedCount).toBe(1)
+    expect(prepare.payload?.layoutDraftFeasibility?.segments[0]?.blockerKind).toBe('keyword')
+
+    const confirm = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-structured-editorial-blocked-draft',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '确认版面',
+      currentSchedule: [],
+      gapCount: 1,
+      history: [],
+    })
+
+    expect(confirm.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(confirm.payload?.layoutDraftFeasibility?.summary.blockedCount).toBe(1)
+    expect(confirm.payload?.orchestrationRequest).toBeUndefined()
+    expect(confirm.summary).toContain('版面草案还有')
   })
 
   it('当前存在自定义草案时新增时段不会回退加载频道默认版面', async () => {

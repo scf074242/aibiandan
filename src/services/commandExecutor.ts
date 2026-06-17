@@ -19,6 +19,7 @@ import type { MaterializeInput } from '@/types/orchestration'
 import { getAtomicCapabilities, type AtomicCapabilities } from './atomicCapabilities'
 import { getCandidateService } from './candidateService'
 import { getMaterializer } from './materializer'
+import { detectMovingItemSequenceViolation } from './scheduleSequenceGuard'
 
 export interface ExecutionResult<T = unknown> {
   success: boolean
@@ -146,6 +147,13 @@ export class CommandExecutor {
           if (!this.atomicCapabilities.isTimeRangeAvailable(command.data.newStartTime, endTime, command.data.itemId)) {
             risks.push('目标时间段与其他条目重叠')
           }
+          const sequenceViolation = detectMovingItemSequenceViolation(
+            { ...item, startTime: command.data.newStartTime, endTime },
+            this.atomicCapabilities.getAllItems().filter((existing) => existing.id !== item.id),
+          )
+          if (sequenceViolation) {
+            risks.push(sequenceViolation.message)
+          }
         }
         break
       }
@@ -170,10 +178,39 @@ export class CommandExecutor {
         }
         break
       }
+      case 'update_field': {
+        const item = this.atomicCapabilities.getItem(command.data.itemId)
+        if (!item) {
+          warnings.push(`Item not found: ${command.data.itemId}`)
+          break
+        }
+        affectedItems.push(item.id)
+        const updatePreview = this.buildTimeFieldUpdatePreview(command, item)
+        if (updatePreview?.warning) {
+          warnings.push(updatePreview.warning)
+          break
+        }
+        if (updatePreview?.updatedItem) {
+          affectedTimeRanges.push({ start: item.startTime, end: item.endTime })
+          affectedTimeRanges.push({ start: updatePreview.updatedItem.startTime, end: updatePreview.updatedItem.endTime })
+          if (!this.atomicCapabilities.isTimeRangeAvailable(updatePreview.updatedItem.startTime, updatePreview.updatedItem.endTime, item.id)) {
+            risks.push('目标时间段与其他条目重叠')
+          }
+          const sequenceViolation = detectMovingItemSequenceViolation(
+            updatePreview.updatedItem,
+            this.atomicCapabilities.getAllItems().filter((existing) => existing.id !== item.id),
+            '字段更新',
+          )
+          if (sequenceViolation) {
+            risks.push(sequenceViolation.message)
+          }
+        }
+        break
+      }
     }
 
     return {
-      canExecute: warnings.length === 0,
+      canExecute: warnings.length === 0 && risks.length === 0,
       command,
       affectedItems,
       affectedTimeRanges,
@@ -370,6 +407,32 @@ export class CommandExecutor {
   }
 
   private async executeMove(command: MoveCommand): Promise<ExecutionResult> {
+    const item = this.atomicCapabilities.getItem(command.data.itemId)
+    if (!item) {
+      return { success: false, message: `Item not found: ${command.data.itemId}` }
+    }
+
+    const newEndTime = this.calculateEndTime(command.data.newStartTime, item.duration)
+    if (!this.atomicCapabilities.isTimeRangeAvailable(command.data.newStartTime, newEndTime, command.data.itemId)) {
+      return {
+        success: false,
+        message: '移动后的节目时段与其他已编排节目重叠，已拒绝执行。',
+        error: 'time_range_overlap',
+      }
+    }
+
+    const sequenceViolation = detectMovingItemSequenceViolation(
+      { ...item, startTime: command.data.newStartTime, endTime: newEndTime },
+      this.atomicCapabilities.getAllItems().filter((existing) => existing.id !== item.id),
+    )
+    if (sequenceViolation) {
+      return {
+        success: false,
+        message: sequenceViolation.message,
+        error: sequenceViolation.type,
+      }
+    }
+
     const result = await this.atomicCapabilities.moveItem(command.data.itemId, command.data.newStartTime, {
       skipValidation: !this.config.enableAutoValidation,
     })
@@ -393,6 +456,42 @@ export class CommandExecutor {
   }
 
   private async executeUpdateField(command: UpdateFieldCommand): Promise<ExecutionResult> {
+    const currentItem = this.atomicCapabilities.getItem(command.data.itemId)
+    if (!currentItem) {
+      return { success: false, message: `Item not found: ${command.data.itemId}` }
+    }
+
+    const updatePreview = this.buildTimeFieldUpdatePreview(command, currentItem)
+    if (updatePreview?.warning) {
+      return {
+        success: false,
+        message: updatePreview.warning,
+        error: 'invalid_time_field_update',
+      }
+    }
+    if (updatePreview?.updatedItem) {
+      if (!this.atomicCapabilities.isTimeRangeAvailable(updatePreview.updatedItem.startTime, updatePreview.updatedItem.endTime, command.data.itemId)) {
+        return {
+          success: false,
+          message: '字段更新后的节目时段与其他已编排节目重叠，已拒绝执行。',
+          error: 'time_range_overlap',
+        }
+      }
+
+      const sequenceViolation = detectMovingItemSequenceViolation(
+        updatePreview.updatedItem,
+        this.atomicCapabilities.getAllItems().filter((existing) => existing.id !== currentItem.id),
+        '字段更新',
+      )
+      if (sequenceViolation) {
+        return {
+          success: false,
+          message: sequenceViolation.message,
+          error: sequenceViolation.type,
+        }
+      }
+    }
+
     const result = await this.atomicCapabilities.updateField(
       command.data.itemId,
       command.data.field,
@@ -430,6 +529,54 @@ export class CommandExecutor {
     const startMs = new Date(startTime).getTime()
     const end = new Date(startMs + durationSeconds * 1000)
     return this.formatLocalDateTime(end)
+  }
+
+  private buildTimeFieldUpdatePreview(
+    command: UpdateFieldCommand,
+    item: ScheduleItemSnapshot,
+  ): { updatedItem?: ScheduleItemSnapshot; warning?: string } | null {
+    const { field, value } = command.data
+    if (!['startTime', 'endTime', 'duration'].includes(field)) {
+      return null
+    }
+
+    let startTime = item.startTime
+    let endTime = item.endTime
+    let duration = item.duration
+
+    if (field === 'startTime') {
+      if (typeof value !== 'string') return { warning: 'startTime 字段更新必须提供有效时间。' }
+      startTime = value
+      endTime = this.calculateEndTime(startTime, duration)
+    } else if (field === 'duration') {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+        return { warning: 'duration 字段更新必须提供正数时长。' }
+      }
+      duration = value
+      endTime = this.calculateEndTime(startTime, duration)
+    } else if (field === 'endTime') {
+      if (typeof value !== 'string') return { warning: 'endTime 字段更新必须提供有效时间。' }
+      endTime = value
+      const startMs = new Date(startTime).getTime()
+      const endMs = new Date(endTime).getTime()
+      duration = Math.floor((endMs - startMs) / 1000)
+    }
+
+    const startMs = new Date(startTime).getTime()
+    const endMs = new Date(endTime).getTime()
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+      return { warning: '字段更新后的节目时间范围无效，已拒绝执行。' }
+    }
+
+    return {
+      updatedItem: {
+        ...item,
+        [field]: value,
+        startTime,
+        endTime,
+        duration,
+      },
+    }
   }
 
   private formatLocalDateTime(value: Date): string {
@@ -487,4 +634,3 @@ export function getCommandExecutor(
 export function resetCommandExecutor(): void {
   globalCommandExecutor = null
 }
-

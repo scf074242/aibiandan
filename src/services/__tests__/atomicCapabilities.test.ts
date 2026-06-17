@@ -22,6 +22,28 @@ const createValidationReport = (): ValidationReport => ({
   isValid: true,
 })
 
+const createInvalidValidationReport = (): ValidationReport => ({
+  ...createValidationReport(),
+  issues: [
+    {
+      id: 'issue-1',
+      type: 'constraint_violation',
+      severity: 'critical',
+      message: '节目时段重叠',
+      location: { itemId: 'item-1' },
+      suggestion: '调整节目时间',
+      createdAt: iso('00:00:00'),
+    },
+  ],
+  summary: {
+    totalIssues: 1,
+    criticalCount: 1,
+    warningCount: 0,
+    infoCount: 0,
+  },
+  isValid: false,
+})
+
 const createItem = (overrides: Partial<ScheduleItemSnapshot> = {}): ScheduleItemSnapshot => ({
   id: 'item-1',
   programCode: 'CODE-001',
@@ -123,5 +145,121 @@ describe('AtomicCapabilities', () => {
 
     expect(capabilities.isTimeRangeAvailable(iso('06:00:00'), iso('06:30:00'), 'item-1')).toBe(true)
     expect(capabilities.isTimeRangeAvailable(iso('06:15:00'), iso('06:45:00'))).toBe(false)
+  })
+
+  it('appendItems rolls back when automatic validation fails', async () => {
+    const capabilities = new AtomicCapabilities(undefined, vi.fn(async () => createInvalidValidationReport()))
+    capabilities.loadItems([
+      createItem(),
+    ])
+
+    const result = await capabilities.appendItems([
+      createItem({
+        id: 'invalid-overlap',
+        programCode: 'CODE-002',
+        startTime: iso('06:15:00'),
+        endTime: iso('06:45:00'),
+      }),
+    ])
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('已回滚')
+    expect(capabilities.getAllItems().map((item) => item.id)).toEqual(['item-1'])
+  })
+
+  it('appendItems rolls back when automatic validation throws', async () => {
+    const capabilities = new AtomicCapabilities(undefined, vi.fn(async () => {
+      throw new Error('validation service unavailable')
+    }))
+    capabilities.loadItems([
+      createItem(),
+    ])
+
+    const result = await capabilities.appendItems([
+      createItem({
+        id: 'new-item',
+        programCode: 'CODE-002',
+        startTime: iso('07:00:00'),
+        endTime: iso('07:30:00'),
+      }),
+    ])
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('自动校验异常')
+    expect(result.error).toContain('已回滚')
+    expect(capabilities.getAllItems().map((item) => item.id)).toEqual(['item-1'])
+  })
+
+  it('moveItem rolls back when automatic validation fails', async () => {
+    const capabilities = new AtomicCapabilities(undefined, vi.fn(async () => createInvalidValidationReport()))
+    capabilities.loadItems([
+      createItem(),
+    ])
+
+    const result = await capabilities.moveItem('item-1', iso('07:00:00'))
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('已回滚')
+    expect(capabilities.getItem('item-1')?.startTime).toBe(iso('06:00:00'))
+    expect(capabilities.getItem('item-1')?.endTime).toBe(iso('06:30:00'))
+  })
+
+  it('updateField rolls back when automatic validation throws', async () => {
+    const capabilities = new AtomicCapabilities(undefined, vi.fn(async () => {
+      throw new Error('validation service unavailable')
+    }))
+    capabilities.loadItems([
+      createItem(),
+    ])
+
+    const result = await capabilities.updateField('item-1', 'duration', 3600)
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('自动校验异常')
+    expect(result.error).toContain('已回滚')
+    expect(capabilities.getItem('item-1')?.duration).toBe(1800)
+    expect(capabilities.getItem('item-1')?.endTime).toBe(iso('06:30:00'))
+  })
+
+  it('replaceAllItems restores the previous schedule when automatic validation fails', async () => {
+    const capabilities = new AtomicCapabilities(undefined, vi.fn(async () => createInvalidValidationReport()))
+    capabilities.loadItems([
+      createItem(),
+    ])
+
+    const result = await capabilities.replaceAllItems([
+      createItem({
+        id: 'replacement',
+        programCode: 'CODE-999',
+        startTime: iso('09:00:00'),
+        endTime: iso('09:30:00'),
+      }),
+    ])
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('已回滚')
+    expect(capabilities.getAllItems().map((item) => item.id)).toEqual(['item-1'])
+  })
+
+  it('batchDelete restores the previous schedule when automatic validation throws', async () => {
+    const capabilities = new AtomicCapabilities(undefined, vi.fn(async () => {
+      throw new Error('validation service unavailable')
+    }))
+    capabilities.loadItems([
+      createItem(),
+      createItem({
+        id: 'item-2',
+        programCode: 'CODE-002',
+        startTime: iso('06:30:00'),
+        endTime: iso('07:00:00'),
+      }),
+    ])
+
+    const result = await capabilities.batchDelete(['item-1'])
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('自动校验异常')
+    expect(result.error).toContain('已回滚')
+    expect(capabilities.getAllItems().map((item) => item.id)).toEqual(['item-1', 'item-2'])
   })
 })

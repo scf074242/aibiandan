@@ -239,6 +239,61 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
+  it('单条移动会在生成命令前阻止后续剧集移到前序剧集之前', async () => {
+    const episode1 = {
+      ...mockedItem,
+      id: 'episode-1',
+      programCode: '881120030001',
+      programName: '品质剧场：纵有疾风起 第1集',
+      startTime: '09:00:00',
+      endTime: '09:45:00',
+      duration: 2700,
+      programType: 'drama',
+    }
+    const episode2 = {
+      ...mockedItem,
+      id: 'episode-2',
+      programCode: '881120030002',
+      programName: '品质剧场：纵有疾风起 第2集',
+      startTime: '10:00:00',
+      endTime: '10:45:00',
+      duration: 2700,
+      programType: 'drama',
+    }
+    mockIntentRecognize.mockResolvedValue({
+      type: 'move',
+      confidence: 0.96,
+      reasoning: 'move sequence backwards',
+    })
+    mockExtractMoveParams.mockResolvedValue(null)
+    mockResolveTarget.mockResolvedValue({
+      status: 'unique',
+      selectedItem: { ...episode2 },
+      reasoning: 'matched target by inferred time and name',
+      matchedBy: ['time_window', 'name_match'],
+      candidates: [{ ...episode2 }],
+    })
+
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '把纵有疾风起第2集前移2小时',
+      currentSchedule: [episode1, episode2],
+      history: [],
+    })
+
+    expect(mockResolveTarget).toHaveBeenCalledWith(expect.objectContaining({
+      targetTime: '10:00:00',
+    }))
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') {
+      throw new Error('expected blocked message decision')
+    }
+    expect(result.feedback.content).toContain('顺播倒序')
+    expect(result.feedback.details?.error).toBe('reverse_order')
+  })
+
   it('无时间但节目名唯一的替换命令会用当前节目单反推目标时间并生成待确认替换', async () => {
     const currentItem = {
       ...mockedItem,
@@ -509,6 +564,42 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     }
     expect(result.pendingCommand.command.action).toBe('delete')
     expect(result.pendingCommand.command.data).toEqual({ itemId: targetItem.id })
+  })
+
+  it('会把向后移动1小时解析为后移而不是前移', async () => {
+    mockIntentRecognize.mockResolvedValue({
+      type: 'move',
+      confidence: 0.92,
+      reasoning: 'move by explicit time and offset',
+    })
+    mockExtractMoveParams.mockResolvedValue(null)
+    mockResolveTarget.mockResolvedValue({
+      status: 'unique',
+      selectedItem: { ...mockedItem },
+      reasoning: 'matched 09:00 item',
+      matchedBy: ['time_window'],
+      candidates: [{ ...mockedItem }],
+    })
+
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '把9点的节目向后移动1小时',
+      currentSchedule: [mockedItem],
+      history: [],
+    })
+
+    expect(result.kind).toBe('execute_command')
+    if (result.kind !== 'execute_command') {
+      throw new Error('expected execute_command decision')
+    }
+    expect(result.execution.command.action).toBe('move')
+    expect(result.execution.command.data).toMatchObject({
+      itemId: mockedItem.id,
+      newStartTime: '2026-03-25T10:00:00+08:00',
+    })
+    expect(result.execution.successMessage).toContain('10:00:00')
   })
 
   it('会把看东方前一条后移识别为相邻节目移动', async () => {
@@ -818,6 +909,67 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
+  it('替换时会跳过时长冲突候选并选择可落入当前空窗的候选', async () => {
+    const targetItem = {
+      ...mockedItem,
+      id: 'item-1000-target',
+      programName: '东方快报',
+      startTime: '2026-03-25T10:00:00+08:00',
+      endTime: '2026-03-25T10:30:00+08:00',
+      duration: 1800,
+    }
+    const nextItem = {
+      ...mockedItem,
+      id: 'item-1030-next',
+      programName: '午间30分',
+      startTime: '2026-03-25T10:30:00+08:00',
+      endTime: '2026-03-25T11:00:00+08:00',
+      duration: 1800,
+    }
+    await getAtomicCapabilities().appendItems([targetItem, nextItem], { skipValidation: true })
+    mockIntentRecognize.mockResolvedValue({
+      type: 'replace',
+      confidence: 0.96,
+      reasoning: 'replace by exact time range',
+    })
+    mockExtractReplaceParams.mockResolvedValue({
+      targetTime: '10:00:00',
+      programName: '看东方',
+    })
+    mockResolveTarget.mockResolvedValue({
+      status: 'unique',
+      selectedItem: { ...targetItem },
+      reasoning: 'matched exact range target',
+      matchedBy: ['time_window'],
+      candidates: [{ ...targetItem }],
+    })
+
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '把10:00-10:30这段换成看东方',
+      currentSchedule: [mockedItem, targetItem, nextItem],
+      history: [],
+    })
+
+    expect(result.kind).toBe('pending_command')
+    if (result.kind !== 'pending_command') {
+      throw new Error('expected pending_command decision')
+    }
+    expect(result.pendingCommand.command.action).toBe('replace')
+    expect(result.pendingCommand.details?.selectedCandidate).toMatchObject({
+      duration: 1800,
+    })
+    expect(result.pendingCommand.details?.preview).toMatchObject({
+      canExecute: true,
+      timeRange: {
+        start: targetItem.startTime,
+        end: '2026-03-25T10:30:00+08:00',
+      },
+    })
+  })
+
   it('明确时间段没有完整匹配时不会误命中覆盖该起点的长节目', async () => {
     const longItem = {
       ...mockedItem,
@@ -1000,6 +1152,51 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     ]))
   })
 
+  it('范围批量平移会阻止把后续剧集移到前序剧集之前', async () => {
+    const episode1 = {
+      ...mockedItem,
+      id: 'episode-1',
+      programCode: '881120030001',
+      programName: '品质剧场：纵有疾风起 第1集',
+      startTime: '09:00:00',
+      endTime: '09:45:00',
+      duration: 2700,
+      programType: 'drama',
+    }
+    const episode2 = {
+      ...mockedItem,
+      id: 'episode-2',
+      programCode: '881120030002',
+      programName: '品质剧场：纵有疾风起 第2集',
+      startTime: '10:00:00',
+      endTime: '10:45:00',
+      duration: 2700,
+      programType: 'drama',
+    }
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '将现有10点到11点的节目整体前移2小时',
+      currentSchedule: [episode1, episode2],
+      history: [],
+    })
+
+    expect(mockIntentRecognize).not.toHaveBeenCalled()
+    expect(mockResolveTarget).not.toHaveBeenCalled()
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') {
+      throw new Error('expected blocked message decision')
+    }
+    expect(result.feedback.content).toContain('暂不能执行')
+    expect(result.feedback.details).toMatchObject({
+      actionType: 'batch_move',
+      isExecutable: false,
+    })
+    const validation = result.feedback.details?.validation as { issues?: string[] } | undefined
+    expect(validation?.issues?.some((issue) => issue.includes('顺播倒序'))).toBe(true)
+  })
+
   it('精确中文半点时间段删除会定位到实际节目段', async () => {
     const afternoonItem = {
       ...mockedItem,
@@ -1180,6 +1377,53 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(executed.success).toBe(true)
     expect(toClock(getAtomicCapabilities().getItem('item-0900')?.startTime)).toBe('09:05:00')
     expect(toClock(getAtomicCapabilities().getItem('item-1000')?.startTime)).toBe('10:05:00')
+  })
+
+  it('确认批量平移前会重新校验当前节目单并阻止预演后的新增冲突', async () => {
+    const tenItem = {
+      ...mockedItem,
+      id: 'item-1000',
+      programName: '上午资讯',
+      startTime: '10:00:00',
+      endTime: '11:00:00',
+    }
+    const lateConflictItem = {
+      ...mockedItem,
+      id: 'item-1105',
+      programName: '临时插入专题',
+      startTime: '2026-03-25T10:55:00+08:00',
+      endTime: '2026-03-25T11:30:00+08:00',
+      duration: 2100,
+    }
+    await getAtomicCapabilities().appendItems([mockedItem, tenItem], { skipValidation: true })
+    const facade = new DemoRuntimeFacade()
+
+    const preview = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '将现有9点到12点的节目整体后移5分钟',
+      currentSchedule: [mockedItem, tenItem],
+      history: [],
+    })
+
+    expect(preview.kind).toBe('pending_command')
+    if (preview.kind !== 'pending_command') {
+      throw new Error('expected pending_command decision')
+    }
+
+    await getAtomicCapabilities().appendItems([lateConflictItem], { skipValidation: true })
+
+    const executed = await facade.executePendingCommand({
+      pendingCommand: preview.pendingCommand,
+      scheduleDate: '2026-03-25',
+      channelId: 'dragon',
+    })
+
+    expect(executed.success).toBe(false)
+    expect(executed.error).toBe('batch_move_execution_validation_failed')
+    expect(executed.message).toContain('已取消写回')
+    expect(JSON.stringify(executed.details?.validation)).toContain('发生重叠')
+    expect(toClock(getAtomicCapabilities().getItem('item-0900')?.startTime)).toBe('09:00:00')
+    expect(toClock(getAtomicCapabilities().getItem('item-1000')?.startTime)).toBe('10:00:00')
   })
 
   it('批量平移支持中文数字移动幅度', async () => {
@@ -1832,15 +2076,14 @@ describe('DemoRuntimeFacade atomic fallback', () => {
       history: [],
     })
 
-    expect(second.kind).toBe('pending_atomic_context')
-    if (second.kind !== 'pending_atomic_context') {
-      throw new Error('expected pending_atomic_context decision')
+    expect(second.kind).toBe('message')
+    if (second.kind !== 'message') {
+      throw new Error('expected blocked insert message')
     }
 
-    expect(second.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(second.pendingAtomicContext.missingFields).toEqual(['selection'])
-    expect(second.pendingAtomicContext.slots.programName).toBe('看东方')
-    expect(second.pendingAtomicContext.slots.targetTime).toBe('09:00:00')
+    expect(second.feedback.content).toContain('空闲时段不足')
+    expect(second.feedback.details?.targetTime).toBe('09:00:00')
+    expect(second.feedback.details?.rejectedReason).toBe('insert_time_not_available')
   })
 
   it('统一 pendingAtomicContext 超时后会结束旧上下文并提示用户重述', async () => {

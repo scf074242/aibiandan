@@ -1,7 +1,7 @@
 ﻿<template>
   <div class="create-schedule-page">
     <!-- 顶部信息栏 -->
-    <div class="page-header">
+    <div v-if="false" class="page-header">
       <div class="header-breadcrumb">
         <el-button link :icon="ArrowLeft" class="back-button" @click="handleBack">返回</el-button>
       </div>
@@ -41,26 +41,65 @@
         </el-form-item>
       </el-form>
       <div class="broadcast-window-chip">
-        <span class="broadcast-window-label">播出时段</span>
+        <span class="broadcast-window-label">{{ currentBroadcastWindowLabel }}</span>
         <span class="broadcast-window-value">{{ currentBroadcastWindowText }}</span>
       </div>
     </div>
 
     <!-- 主内容区：左侧表格 + 右侧 AI 侧边栏 -->
-    <div class="content-wrapper" :class="{ 'with-ai-sidebar': aiSidebarVisible }">
+    <div class="content-wrapper with-ai-sidebar">
       <!-- 左侧：节目单编辑区 -->
       <div class="schedule-content">
+        <div class="playlist-workspace-bar" :class="{ 'is-empty': playlistType === 'none' }">
+          <div class="playlist-workspace-tabs" :class="{ 'is-disabled': playlistType === 'none' }">
+            <button
+              type="button"
+              class="playlist-workspace-tab"
+              :class="{ 'is-active': playlistType !== 'none' && isScheduleWorkspaceActive }"
+              :disabled="playlistType === 'none'"
+              @click="activeWorkspaceTab = 'schedule'"
+            >
+              编排内容
+            </button>
+            <button
+              v-if="playlistType === 'tv'"
+              type="button"
+              class="playlist-workspace-tab"
+              :class="{ 'is-active': showLayoutDraftWorkspace && activeWorkspaceTab === 'draft' }"
+              :disabled="!showLayoutDraftWorkspace"
+              @click="activeWorkspaceTab = 'draft'"
+            >
+              版面草案
+              <span v-if="currentLayoutDraft" class="playlist-workspace-tab-count">{{ currentLayoutDraft.layoutReference.slots.length }}</span>
+            </button>
+          </div>
+          <div class="playlist-workspace-title">
+            <span class="playlist-workspace-kicker">{{ currentPlaylistWorkspaceKicker }}</span>
+            <span class="playlist-workspace-name">{{ currentPlaylistDocumentName }}</span>
+            <span class="playlist-workspace-meta">{{ currentPlaylistDocumentMeta }}</span>
+          </div>
+        </div>
+        <div v-if="playlistType === 'none'" class="playlist-empty-state">
+          <div class="playlist-empty-content">
+            <h2 class="playlist-empty-title">先创建播单</h2>
+            <p class="playlist-empty-desc">创建电视播单或轮播单后，再进入插入、移动、替换等原子调整；补空窗和全天编排属于后续长流程。</p>
+            <div v-if="false" class="playlist-empty-actions">
+              <el-button type="primary" @click="handleCreatePlaylist('tv')">新建电视播单</el-button>
+              <el-button @click="handleCreatePlaylist('rotation')">新建轮播单</el-button>
+            </div>
+          </div>
+        </div>
         <!-- 时间轴表格区 -->
-        <div class="timeline-container">
+        <div v-else class="timeline-container">
           <!-- 时间轴头部 -->
-          <div class="timeline-header">
+          <div v-if="isScheduleWorkspaceActive" class="timeline-header">
             <div class="timeline-header-left">
               <div class="timeline-heading">
                 <h2 class="timeline-title">时间轴与素材清单</h2>
               </div>
               <div class="timeline-action-group">
                 <el-button
-                  v-if="!isViewMode && !scheduleForm.isLocked"
+                  v-if="false"
                   type="primary"
                   :icon="Plus"
                   :disabled="allowedDialogTypes.length === 0"
@@ -127,7 +166,7 @@
                     @click="handleFocusGapEntry(gap)"
                   >
                     <div class="continuity-text">
-                      缺失时间：{{ formatTime4(gap.from) }} - {{ formatTime4(gap.to) }}
+                      {{ formatGapEntryText(gap) }}
                     </div>
                     <div class="continuity-actions">
                       <el-tag
@@ -139,7 +178,7 @@
                         {{ getGapEntryStatusText(gap.status) }}
                       </el-tag>
                       <el-button
-                        v-else
+                        v-if="false"
                         class="gap-fix-btn"
                         type="primary"
                         size="small"
@@ -166,7 +205,7 @@
                     class="header-alert-tag"
                   >
                     <el-icon><WarningFilled /></el-icon>
-                    时间冲突 {{ overlapConflicts.length }} 处
+                    {{ playlistType === 'rotation' ? '位置冲突' : '时间冲突' }} {{ overlapConflicts.length }} 处
                   </el-tag>
                 </template>
                 <div class="continuity-popover">
@@ -177,7 +216,7 @@
                     @click="handleFocusConflict(conflict)"
                   >
                     <div class="continuity-text">
-                      {{ formatTime4(conflict.startTime) }} - {{ formatTime4(conflict.endTime) }} 存在重叠
+                      {{ formatOverlapConflictText(conflict) }}
                     </div>
                     <div class="continuity-actions">
                       <el-tag type="danger" effect="light" size="small">定位</el-tag>
@@ -187,12 +226,13 @@
               </el-popover>
             </div>
           </div>
-          <div class="timeline-insight-bar">
+          <div v-if="isScheduleWorkspaceActive" class="timeline-insight-bar">
             <div class="insight-group">
               <span class="insight-label">当前视图</span>
               <span class="insight-pill">{{ isViewMode ? '查看模式' : '编辑模式' }}</span>
-              <span class="insight-pill">{{ currentChannelName }}</span>
-              <span class="insight-pill">{{ scheduleDate }}</span>
+              <span class="insight-pill">{{ currentPlaylistTypeLabel }}</span>
+              <span v-if="playlistType === 'tv'" class="insight-pill">{{ currentChannelName }}</span>
+              <span class="insight-pill">{{ playlistType === 'rotation' ? rotationDurationScopeText : scheduleDate }}</span>
             </div>
             <div class="insight-group is-risk">
               <span class="insight-label">风险概览</span>
@@ -203,12 +243,12 @@
                 空成品 {{ emptyMaterialItemCount }}
               </span>
               <span class="insight-pill" :class="{ 'is-warning': displayGapCount > 0 }">
-                空窗 {{ displayGapCount }}
+                {{ playlistType === 'rotation' ? '时长空缺' : '空窗' }} {{ displayGapCount }}
               </span>
             </div>
           </div>
           <!-- 时间轴主体 -->
-          <div class="timeline-body" ref="timelineBodyRef">
+          <div v-if="isScheduleWorkspaceActive" class="timeline-body" ref="timelineBodyRef">
             <!-- 表格内容 -->
             <div
               class="timeline-content"
@@ -218,8 +258,8 @@
             >
               <div class="timeline-table-header">
                 <div class="header-cell index-cell">序号</div>
-                <div class="header-cell start-time-cell">起始时间</div>
-                <div class="header-cell end-time-cell">结束时间</div>
+                <div class="header-cell start-time-cell">{{ timelineStartHeaderLabel }}</div>
+                <div class="header-cell end-time-cell">{{ timelineEndHeaderLabel }}</div>
                 <div class="header-cell type-cell">类型</div>
                 <div class="header-cell content-type-cell">内容类型</div>
                 <div class="header-cell episode-cell">节目名称</div>
@@ -269,7 +309,7 @@
                 <div v-if="displayItems.length === 0" class="empty-state">
                   <el-empty description="暂无节目安排">
                     <el-button
-                      v-if="!isViewMode && !scheduleForm.isLocked"
+                      v-if="false"
                       type="primary"
                       @click="handleAddItem"
                     >
@@ -305,11 +345,11 @@
 
                   <!-- 时间显示 -->
                   <div class="item-cell start-time-cell">
-                    <span class="time-text">{{ formatTime4(item.startTime) }}</span>
+                    <span class="time-text">{{ formatTimelinePositionText(item.startTime) }}</span>
                   </div>
 
                   <div class="item-cell end-time-cell">
-                    <span class="time-text">{{ formatTime4(item.endTime) }}</span>
+                    <span class="time-text">{{ formatTimelinePositionText(item.endTime) }}</span>
                   </div>
 
                   <!-- 类型 -->
@@ -355,7 +395,7 @@
                           (item.isUnlinkedProduct || shouldWarnEmptyMaterialFields(item)) && !item.relativeStart
                       }"
                     >
-                      {{ item.relativeStart || '-' }}
+                      {{ item.relativeStart ? formatTimelinePositionText(item.relativeStart) : '-' }}
                     </span>
                     <span v-else class="small-text">-</span>
                   </div>
@@ -437,27 +477,80 @@
                 </div>
               </div>
             </div>
+            <div
+              v-if="contentScrollWidth > contentClientWidth"
+              ref="scrollTrackRef"
+              class="timeline-horizontal-scroll"
+              @scroll="handleTimelineScrollbarScroll"
+            >
+              <div
+                class="timeline-horizontal-scroll-inner"
+                :style="{ width: `${contentScrollWidth}px` }"
+              />
+            </div>
+          </div>
+          <div v-else-if="showLayoutDraftWorkspace && currentLayoutDraft" class="layout-draft-workspace">
+            <div class="layout-draft-workspace-head">
+              <div>
+                <h2 class="layout-draft-workspace-title">{{ currentLayoutDraft.layoutReference.name }}</h2>
+                <p class="layout-draft-workspace-subtitle">
+                  {{ formatTime4(currentLayoutDraft.coverage.start) }} - {{ formatTime4(currentLayoutDraft.coverage.end) }}
+                  · {{ currentLayoutDraft.layoutReference.slots.length }} 个时段
+                </p>
+              </div>
+              <el-tag
+                v-if="currentLayoutDraftFeasibility"
+                :type="currentLayoutDraftFeasibility.ok ? 'success' : 'warning'"
+                effect="light"
+              >
+                {{ currentLayoutDraftFeasibility.ok ? '可进入编排' : '需调整' }}
+              </el-tag>
+            </div>
+            <div v-if="currentLayoutDraft.strategyProfile" class="layout-draft-strategy-summary">
+              <strong>{{ currentLayoutDraft.strategyProfile.label }}</strong>
+              <span>{{ currentLayoutDraft.strategyProfile.selectionSummary }}</span>
+            </div>
+            <div class="layout-draft-workspace-list">
+              <div
+                v-for="segment in layoutDraftWorkspaceSegments"
+                :key="segment.id"
+                class="layout-draft-workspace-item"
+                :class="`is-${segment.status}`"
+              >
+                <div class="layout-draft-workspace-time">{{ segment.timeRange }}</div>
+                <div class="layout-draft-workspace-main">
+                  <div class="layout-draft-workspace-label">{{ segment.label }}</div>
+                  <div class="layout-draft-workspace-desc">{{ segment.desc }}</div>
+                </div>
+                <span class="layout-draft-workspace-status">{{ segment.statusText }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="showLayoutDraftWorkspace" class="layout-draft-workspace is-empty">
+            <div class="layout-draft-workspace-head">
+              <div>
+                <h2 class="layout-draft-workspace-title">暂无版面草案</h2>
+                <p class="layout-draft-workspace-subtitle">这里仅用于查看编排参考；正式调整仍由右侧对话驱动。</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- 右侧：AI 助手侧边栏 -->
-      <div v-if="aiSidebarVisible" class="ai-sidebar">
+      <div class="ai-sidebar">
         <div class="ai-sidebar-header">
           <div class="ai-sidebar-heading">
             <h3 class="ai-sidebar-title">
               <el-icon><ChatDotRound /></el-icon>
               AI 助手
             </h3>
-            <p class="ai-sidebar-subtitle">围绕当前频道、日期和时间空窗，直接补齐、调整或校验编单。</p>
+            <p class="ai-sidebar-subtitle">{{ aiSidebarSubtitle }}</p>
           </div>
           <div class="ai-sidebar-actions">
             <el-button link @click="llmConfigVisible = true">
               <el-icon><Setting /></el-icon>
               LLM配置
-            </el-button>
-            <el-button link @click="aiSidebarVisible = false">
-              <el-icon><Close /></el-icon>
             </el-button>
           </div>
         </div>
@@ -468,6 +561,10 @@
             :channel-name="currentChannelName"
             :date="scheduleDate"
             :gap-count="displayGapCount"
+            :playlist-type="playlistType"
+            :rotation-strategy="rotationStrategy"
+            :rotation-duration-seconds="rotationTargetDurationSeconds"
+            :playlist-id="currentPlaylistId"
             :orchestration-logs="orchestratorRuntime.logs.value"
             :orchestration-session="orchestratorRuntime.session.value"
             :is-orchestrating="orchestratorRuntime.isRunning.value"
@@ -478,8 +575,10 @@
             @cancel-requested="handleCancelOrchestration"
             @focus-requested="handleChatFocusRequested"
             @layout-draft-updated="handleChatLayoutDraftUpdated"
+            @playlist-state-changed="handlePlaylistStateChanged"
+            @playlist-file-open-requested="handlePlaylistFileOpenRequested"
+            @seed-tv-sequence-context-requested="handleSeedTvSequenceContext"
           />
-          <OpenClawDemoPanel :adapter="openClawHostAdapter" />
         </div>
       </div>
     </div>
@@ -517,7 +616,6 @@ import {
   View,
   WarningFilled,
   ChatDotRound,
-  Close,
   Setting,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
@@ -540,8 +638,10 @@ import { demoBaseDate } from '@/mock/demoData'
 import { layoutReferenceData } from './layoutReferenceData'
 import {
   mapAtomicItemToPageItem,
+  mapChatScheduleUpdateItemToAtomicSnapshot,
   mapPageItemToAtomicSnapshot,
   mapScheduleItemToChatSchedule,
+  type ChatScheduleUpdateItem,
 } from './broadcastPlanScheduleBridge'
 import {
   buildDisplayGapEntries,
@@ -570,18 +670,33 @@ type OverlapConflict = {
   endTime: string
 }
 
+type PlaylistDocumentState = {
+  id: string
+  playlistType: Exclude<PlaylistType, 'none'>
+  channelId?: string
+  channelName?: string
+  date?: string
+  rotationStrategy?: RotationPlaylistStrategy
+  rotationDurationSeconds?: number | null
+  scheduleItems: ScheduleItem[]
+  layoutDraft: LayoutDraft | null
+  layoutDraftFeasibility: DraftFeasibilityReport | null
+  broadcastWindow: {
+    startTime: string
+    endTime: string
+  }
+}
+
 // AI 编排相关导入
 import { getAtomicCapabilities } from '@/services/atomicCapabilities'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
 import { getManualCommandAdapter } from '@/services/manualCommandAdapter'
 import { getCandidateService } from '@/services/candidateService'
 import { getDataService } from '@/services/orchestration/dataService'
-import { getOpenClawHostAdapter } from '@/services/openclaw/openClawHostAdapter'
 import type { GapProcessingStatus } from '@/types/orchestration'
-import type { LayoutDraft, ValidationReport, ValidationIssue } from '@/types/orchestration'
+import type { DraftFeasibilityReport, LayoutDraft, PlaylistType, RotationPlaylistStrategy, ValidationReport, ValidationIssue } from '@/types/orchestration'
 import ChatPanel from '@/components/dialogue/ChatPanel.vue'
 import LLMConfigPanel from '@/components/llm/LLMConfigPanel.vue'
-import OpenClawDemoPanel from './components/OpenClawDemoPanel.vue'
 import { getScheduleValidationService } from '@/services/scheduleValidationService'
 
 const route = useRoute()
@@ -631,6 +746,108 @@ const headerFormRules: FormRules = {
 
 // 编单项列表
 const scheduleItems = ref<ScheduleItem[]>([])
+const playlistType = ref<PlaylistType>('none')
+const currentPlaylistId = ref<string | null>(null)
+const playlistDocuments = ref<PlaylistDocumentState[]>([])
+const rotationStrategy = ref<RotationPlaylistStrategy>('content_match')
+const rotationTargetDurationSeconds = ref<number | null>(null)
+const activeWorkspaceTab = ref<'schedule' | 'draft'>('schedule')
+const currentLayoutDraft = ref<LayoutDraft | null>(null)
+const currentLayoutDraftFeasibility = ref<DraftFeasibilityReport | null>(null)
+const showLayoutDraftWorkspace = computed(() => playlistType.value === 'tv')
+const isScheduleWorkspaceActive = computed(() => activeWorkspaceTab.value !== 'draft' || !showLayoutDraftWorkspace.value)
+const currentPlaylistTypeLabel = computed(() => {
+  if (playlistType.value === 'tv') return '电视播单'
+  if (playlistType.value === 'rotation') return '轮播单'
+  return '未创建播单'
+})
+
+const currentPlaylistWorkspaceKicker = computed(() => {
+  if (playlistType.value === 'tv') return '当前工作区 · 电视播单'
+  if (playlistType.value === 'rotation') return '当前工作区 · 轮播单'
+  return '当前工作区 · 等待创建'
+})
+
+const rotationStrategyLabel = computed(() => {
+  if (rotationStrategy.value === 'rating') return '收视率优先'
+  if (rotationStrategy.value === 'trending') return '热播优先'
+  return '内容匹配优先'
+})
+
+const currentPlaylistDocumentName = computed(() => (
+  playlistType.value === 'none'
+    ? '未打开播单'
+    : playlistType.value === 'tv'
+      ? `${currentChannelName.value}电视播单`
+      : '轮播单'
+))
+
+const currentPlaylistDocumentMeta = computed(() => {
+  if (playlistType.value === 'none') {
+    return '等待创建或打开'
+  }
+  if (playlistType.value === 'tv') {
+    return `${scheduleDate.value} · ${currentChannelName.value} · 编排内容`
+  }
+  return `${rotationDurationScopeText.value} · ${rotationStrategyLabel.value}`
+})
+const timelineStartHeaderLabel = computed(() => playlistType.value === 'rotation' ? '起始位置' : '起始时间')
+const timelineEndHeaderLabel = computed(() => playlistType.value === 'rotation' ? '结束位置' : '结束时间')
+
+const cloneScheduleItems = (items: ScheduleItem[]) => items.map((item) => ({ ...item }))
+
+const createLocalPlaylistId = (type: Exclude<PlaylistType, 'none'>) => `${type}-local-${Date.now()}`
+
+const persistCurrentPlaylistDocument = () => {
+  if (!currentPlaylistId.value || playlistType.value === 'none') return
+  const existingIndex = playlistDocuments.value.findIndex((item) => item.id === currentPlaylistId.value)
+  const nextDocument: PlaylistDocumentState = {
+    id: currentPlaylistId.value,
+    playlistType: playlistType.value,
+    channelId: playlistType.value === 'tv' ? currentChannelId.value : undefined,
+    channelName: playlistType.value === 'tv' ? currentChannelName.value : undefined,
+    date: playlistType.value === 'tv' ? scheduleDate.value : undefined,
+    rotationStrategy: playlistType.value === 'rotation' ? rotationStrategy.value : undefined,
+    rotationDurationSeconds: playlistType.value === 'rotation' ? rotationTargetDurationSeconds.value : null,
+    scheduleItems: cloneScheduleItems(scheduleItems.value),
+    layoutDraft: playlistType.value === 'tv' ? currentLayoutDraft.value : null,
+    layoutDraftFeasibility: playlistType.value === 'tv' ? currentLayoutDraftFeasibility.value : null,
+    broadcastWindow: { ...currentBroadcastWindow.value },
+  }
+  if (existingIndex >= 0) {
+    playlistDocuments.value.splice(existingIndex, 1, nextDocument)
+  } else {
+    playlistDocuments.value.push(nextDocument)
+  }
+}
+
+const openPlaylistDocument = (document: PlaylistDocumentState) => {
+  persistCurrentPlaylistDocument()
+  currentPlaylistId.value = document.id
+  playlistType.value = document.playlistType
+  if (document.playlistType === 'tv') {
+    scheduleForm.value.channelId = document.channelId ?? currentChannelId.value
+    scheduleForm.value.channelName = document.channelName ?? currentChannelName.value
+    scheduleForm.value.date = document.date ?? scheduleDate.value
+  }
+  rotationStrategy.value = document.rotationStrategy ?? 'content_match'
+  rotationTargetDurationSeconds.value = document.playlistType === 'rotation'
+    ? document.rotationDurationSeconds ?? null
+    : null
+  scheduleItems.value = cloneScheduleItems(document.scheduleItems)
+  currentLayoutDraft.value = document.playlistType === 'tv' ? document.layoutDraft : null
+  currentLayoutDraftFeasibility.value = document.playlistType === 'tv' ? document.layoutDraftFeasibility : null
+  currentBroadcastWindow.value = document.playlistType === 'rotation'
+    ? {
+        startTime: '00:00:00',
+        endTime: document.rotationDurationSeconds ? secondsToClockText(document.rotationDurationSeconds) : '00:00:00',
+      }
+    : { ...document.broadcastWindow }
+  activeWorkspaceTab.value = 'schedule'
+  syncPageItemsToAtomic()
+  refreshValidationReport()
+  updateScrollMetrics()
+}
 
 const permission = computed(() => getBroadcastPlanPermission('editor'))
 
@@ -694,7 +911,28 @@ const formatRelativeStart = (seconds = 0) => {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainSeconds).padStart(2, '0')}`
 }
 
-const formatPlayLengthText = (durationSeconds: number) => `${Math.max(1, Math.round(durationSeconds / 60))}分钟`
+const formatDurationText = (durationSeconds: number) => {
+  const totalSeconds = Math.max(0, Math.round(durationSeconds))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  const parts = [
+    hours > 0 ? `${hours}小时` : '',
+    minutes > 0 ? `${minutes}分钟` : '',
+    seconds > 0 ? `${seconds}秒` : '',
+  ].filter(Boolean)
+  return parts.join('') || '0秒'
+}
+
+const formatPlayLengthText = (durationSeconds: number) => formatDurationText(durationSeconds)
+
+const secondsToClockText = (value: number) => {
+  const normalized = Math.max(0, Math.floor(value))
+  const hours = Math.floor(normalized / 3600)
+  const minutes = Math.floor((normalized % 3600) / 60)
+  const seconds = normalized % 60
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
 
 const fillLiveStudios = () => {
   const studios = currentStudioOptions.value
@@ -997,10 +1235,104 @@ const handleChatFocusRequested = async (payload: {
 
 const handleChatLayoutDraftUpdated = (payload: {
   draft: LayoutDraft | null
+  feasibilityReport?: DraftFeasibilityReport | null
 }) => {
+  if (playlistType.value === 'rotation') {
+    currentLayoutDraft.value = null
+    currentLayoutDraftFeasibility.value = null
+    activeWorkspaceTab.value = 'schedule'
+    return
+  }
+  currentLayoutDraft.value = payload.draft
+  currentLayoutDraftFeasibility.value = payload.feasibilityReport ?? null
   if (payload.draft) {
     showLayoutReference.value = false
+    activeWorkspaceTab.value = 'draft'
+  } else {
+    activeWorkspaceTab.value = 'schedule'
   }
+}
+
+const handleCreatePlaylist = (type: Exclude<PlaylistType, 'none'>) => {
+  persistCurrentPlaylistDocument()
+  currentPlaylistId.value = createLocalPlaylistId(type)
+  playlistType.value = type
+  rotationStrategy.value = type === 'rotation' ? 'content_match' : rotationStrategy.value
+  rotationTargetDurationSeconds.value = null
+  scheduleItems.value = []
+  currentLayoutDraft.value = null
+  currentLayoutDraftFeasibility.value = null
+  activeWorkspaceTab.value = 'schedule'
+  persistCurrentPlaylistDocument()
+  updateScrollMetrics()
+  ElMessage.success(type === 'tv' ? '已新建电视播单' : '已新建轮播单')
+}
+
+const handlePlaylistStateChanged = (payload: {
+  playlistId?: string
+  playlistType: PlaylistType
+  rotationStrategy?: RotationPlaylistStrategy
+  rotationDurationSeconds?: number
+  channelId?: string
+  channelName?: string
+  date?: string
+}) => {
+  const isNewPlaylistDocument = Boolean(payload.playlistId && payload.playlistId !== currentPlaylistId.value)
+  if (isNewPlaylistDocument) {
+    persistCurrentPlaylistDocument()
+    currentPlaylistId.value = payload.playlistId ?? null
+    scheduleItems.value = []
+    currentLayoutDraft.value = null
+    currentLayoutDraftFeasibility.value = null
+  } else if (!currentPlaylistId.value && payload.playlistType !== 'none') {
+    currentPlaylistId.value = createLocalPlaylistId(payload.playlistType)
+  }
+  playlistType.value = payload.playlistType
+  if (payload.playlistType === 'tv') {
+    scheduleForm.value.channelId = payload.channelId ?? currentChannelId.value
+    scheduleForm.value.channelName = payload.channelName ?? currentChannelName.value
+    scheduleForm.value.date = payload.date ?? scheduleDate.value
+  }
+  if (payload.playlistType === 'rotation') {
+    currentLayoutDraft.value = null
+    currentLayoutDraftFeasibility.value = null
+    activeWorkspaceTab.value = 'schedule'
+  }
+  rotationStrategy.value = payload.rotationStrategy ?? 'content_match'
+  rotationTargetDurationSeconds.value = payload.playlistType === 'rotation'
+    ? payload.rotationDurationSeconds ?? null
+    : null
+  if (payload.playlistType === 'rotation' && payload.rotationDurationSeconds) {
+    currentBroadcastWindow.value = {
+      startTime: '00:00:00',
+      endTime: secondsToClockText(payload.rotationDurationSeconds),
+    }
+  } else if (payload.playlistType === 'rotation') {
+    currentBroadcastWindow.value = {
+      startTime: '00:00:00',
+      endTime: '00:00:00',
+    }
+  } else if (payload.playlistType === 'tv') {
+    void syncCurrentBroadcastWindow()
+  }
+  if (payload.playlistType !== 'none') {
+    activeWorkspaceTab.value = 'schedule'
+    persistCurrentPlaylistDocument()
+    updateScrollMetrics()
+  }
+}
+
+const handlePlaylistFileOpenRequested = (payload: {
+  playlistId?: string
+}) => {
+  if (payload.playlistId) {
+    const document = playlistDocuments.value.find((item) => item.id === payload.playlistId)
+    if (document) {
+      openPlaylistDocument(document)
+      return
+    }
+  }
+  activeWorkspaceTab.value = 'schedule'
 }
 
 const handleDeleteExecuted = (payload: {
@@ -1051,6 +1383,14 @@ const handleTimelineContentScroll = (event: Event) => {
   isSyncingScroll = false
 }
 
+const handleTimelineScrollbarScroll = (event: Event) => {
+  if (isSyncingScroll || !timelineContentRef.value) return
+  const target = event.target as HTMLElement
+  isSyncingScroll = true
+  timelineContentRef.value.scrollLeft = target.scrollLeft
+  isSyncingScroll = false
+}
+
 const handleTimelineAreaClick = () => {
   focusRuntime.pauseAutoFollow()
   focusRuntime.clearDeletedEcho()
@@ -1066,6 +1406,13 @@ const handleResize = () => {
 }
 
 const syncCurrentBroadcastWindow = async () => {
+  if (playlistType.value === 'rotation') {
+    currentBroadcastWindow.value = {
+      startTime: '00:00:00',
+      endTime: rotationTargetDurationSeconds.value ? secondsToClockText(rotationTargetDurationSeconds.value) : '00:00:00',
+    }
+    return
+  }
   const channelId = currentChannelId.value
   if (!channelId) return
   const channelInfo = await dataService.getChannelInfo(channelId)
@@ -1080,7 +1427,6 @@ const syncCurrentBroadcastWindow = async () => {
 const showLayoutReference = ref(false)
 
 // AI 编排相关状态
-const aiSidebarVisible = ref(true)
 const llmConfigVisible = ref(false)
 const atomicCapabilities = getAtomicCapabilities()
 const scheduleCommandBus = getScheduleCommandBus()
@@ -1096,8 +1442,14 @@ const currentBroadcastWindow = ref({
   endTime: '23:59:59',
 })
 
+const currentBroadcastWindowLabel = computed(() =>
+  playlistType.value === 'rotation' ? '轮播总时长' : '播出时段',
+)
+
 const currentBroadcastWindowText = computed(
-  () => `${formatTime4(currentBroadcastWindow.value.startTime)} - ${formatTime4(currentBroadcastWindow.value.endTime)}`,
+  () => playlistType.value === 'rotation'
+    ? rotationDurationScopeText.value
+    : `${formatTime4(currentBroadcastWindow.value.startTime)} - ${formatTime4(currentBroadcastWindow.value.endTime)}`,
 )
 
 const syncPageItemsToAtomic = () => {
@@ -1120,6 +1472,17 @@ const syncAtomicItemsToPage = () => {
   }))
 }
 
+const applyRuntimeScheduleItems = (items: ChatScheduleUpdateItem[]) => {
+  const date = scheduleForm.value.date || demoBaseDate
+  atomicCapabilities.loadItems(
+    items.map((item, index) => mapChatScheduleUpdateItemToAtomicSnapshot(item, index, date, {
+      normalizeClockText,
+      timeToSeconds,
+    })),
+  )
+  syncAtomicItemsToPage()
+}
+
 const syncAtomicItemsToPageDeferred = () => {
   if (syncAtomicItemsRaf) {
     return
@@ -1128,6 +1491,58 @@ const syncAtomicItemsToPageDeferred = () => {
     syncAtomicItemsRaf = 0
     syncAtomicItemsToPage()
   })
+}
+
+const handleSeedTvSequenceContext = () => {
+  scheduleItems.value = [
+    {
+      id: 'demo-sequence-episode-1',
+      scheduleId: scheduleForm.value.id || '',
+      businessType: 'program',
+      sourceType: 'record',
+      programType: 'drama',
+      startTime: '09:00:00',
+      endTime: '09:45:00',
+      relativeStart: '00:00:00',
+      playLength: '45分钟',
+      duration: 45,
+      programCode: '002601120001',
+      code18: '002601120001',
+      programName: '品质剧场：纵有疾风起 第1集',
+      instanceName: '品质剧场：纵有疾风起 第1集',
+      keySlot: '112',
+      sortOrder: 1,
+      materialStatus: 'ready',
+      materialName: '002601120001-MAT',
+      remark: '顺播上下文演示：已排第1集',
+    },
+    {
+      id: 'demo-sequence-episode-3',
+      scheduleId: scheduleForm.value.id || '',
+      businessType: 'program',
+      sourceType: 'record',
+      programType: 'drama',
+      startTime: '10:30:00',
+      endTime: '11:15:00',
+      relativeStart: '00:00:00',
+      playLength: '45分钟',
+      duration: 45,
+      programCode: '002601120003',
+      code18: '002601120003',
+      programName: '品质剧场：纵有疾风起 第3集',
+      instanceName: '品质剧场：纵有疾风起 第3集',
+      keySlot: '112',
+      sortOrder: 2,
+      materialStatus: 'ready',
+      materialName: '002601120003-MAT',
+      remark: '顺播上下文演示：已排第3集',
+    },
+  ]
+  syncPageItemsToAtomic()
+  persistCurrentPlaylistDocument()
+  refreshValidationReport()
+  updateScrollMetrics()
+  ElMessage.success('已载入顺播上下文：09:00 第1集，10:30 第3集')
 }
 
 const chatScheduleItems = computed(() =>
@@ -1224,7 +1639,17 @@ const displayGapEntries = computed<GapEntry[]>(() => {
 })
 
 const displayGapCount = computed(() => displayGapEntries.value.length)
-const gapSummaryLabel = computed(() => resolveGapSummaryLabel(runtimeGapEntries.value))
+const gapSummaryLabel = computed(() => playlistType.value === 'rotation' ? '时长空缺' : resolveGapSummaryLabel(runtimeGapEntries.value))
+
+const aiSidebarSubtitle = computed(() => {
+  if (playlistType.value === 'rotation') {
+    return '围绕当前轮播单总时长和素材线索，直接查找、插入、调整或校验编单。'
+  }
+  if (playlistType.value === 'tv') {
+    return '围绕当前频道、日期和时间空窗，直接补齐、调整或校验编单。'
+  }
+  return '先创建电视播单或轮播单，再通过自然语言驱动编排。'
+})
 
 const {
   orchestratorRuntime,
@@ -1240,30 +1665,11 @@ const {
   displayGapCount,
   syncPageItemsToAtomic,
   syncAtomicItemsToPage,
+  applyRuntimeScheduleItems,
   syncAtomicItemsToPageDeferred,
+  persistCurrentPlaylistDocument,
   focusRuntime,
   normalizeClockText,
-})
-
-const openClawHostAdapter = getOpenClawHostAdapter({
-  getContext: () => ({
-    channelId: currentChannelId.value,
-    channelName: currentChannelName.value,
-    date: scheduleDate.value,
-    currentSchedule: chatScheduleItems.value,
-    gapCount: displayGapCount.value,
-  }),
-  onOrchestrationRequest: handleChatOrchestrateRequested,
-  getOrchestrationSnapshot: () => ({
-    channelId: currentChannelId.value,
-    channelName: currentChannelName.value,
-    date: scheduleDate.value,
-    status: orchestratorRuntime.status.value,
-    isRunning: orchestratorRuntime.isRunning.value,
-    sessionId: orchestratorRuntime.session.value?.id,
-    latestLog: orchestratorRuntime.logs.value.at(-1)?.message,
-    progress: orchestratorRuntime.progress.value as Record<string, unknown> | null,
-  }),
 })
 
 const getGapEntryStatusText = (status: GapProcessingStatus) => {
@@ -1290,6 +1696,27 @@ const getGapEntryTagType = (status: GapProcessingStatus): 'info' | 'warning' | '
     default:
       return 'info'
   }
+}
+
+const formatClockGapDurationText = (startTime: string, endTime: string) => {
+  const startSeconds = timeToSeconds(startTime)
+  const endSeconds = timeToSeconds(endTime)
+  const durationSeconds = Math.max(0, endSeconds - startSeconds)
+  return formatDurationScopeText(durationSeconds)
+}
+
+const formatGapEntryText = (gap: GapEntry) => {
+  if (playlistType.value === 'rotation') {
+    return `缺失时长：${formatClockGapDurationText(gap.from, gap.to)}（0 点起算的相对位置）`
+  }
+  return `缺失时间：${formatTime4(gap.from)} - ${formatTime4(gap.to)}`
+}
+
+const formatOverlapConflictText = (conflict: OverlapConflict) => {
+  if (playlistType.value === 'rotation') {
+    return `相对位置存在重叠，重叠时长约 ${formatClockGapDurationText(conflict.startTime, conflict.endTime)}`
+  }
+  return `${formatTime4(conflict.startTime)} - ${formatTime4(conflict.endTime)} 存在重叠`
 }
 
 const {
@@ -1340,16 +1767,30 @@ const totalDurationText = computed(() => {
     ? referenceItems.value
     : scheduleItems.value
   const total = items.reduce((sum, item) => sum + (item.duration || 0), 0)
-  const hours = Math.floor(total / 60)
-  const minutes = total % 60
-  if (hours > 0 && minutes > 0) {
-    return `${hours}小时${minutes}分钟`
-  } else if (hours > 0) {
-    return `${hours}小时`
-  } else {
-    return `${minutes}分钟`
-  }
+  return formatDurationText(total * 60)
 })
+
+const formatDurationScopeText = (durationSeconds: number) => {
+  return formatDurationText(durationSeconds)
+}
+
+const rotationDurationScopeText = computed(() => {
+  if (rotationTargetDurationSeconds.value) {
+    return `时长制 · 总时长 ${formatDurationScopeText(rotationTargetDurationSeconds.value)} · 0 点起算`
+  }
+  return scheduleItems.value.length > 0
+    ? `时长制 · 当前总时长 ${totalDurationText.value} · 0 点起算`
+    : '时长制 · 待确定总时长 · 0 点起算'
+})
+
+const formatTimelinePositionText = (time: string) => {
+  if (playlistType.value !== 'rotation') {
+    return formatTime4(time)
+  }
+  const seconds = timeToSeconds(normalizeClockText(time))
+  if (seconds <= 0) return '0点起算'
+  return `+${formatDurationScopeText(seconds)}`
+}
 
 /**
  * 处理频道变化
@@ -1379,6 +1820,29 @@ const formatTime4 = (time: string) => {
   const f = String(parseInt(parts[3] || '0', 10) || 0).padStart(2, '0')
   return `${h}:${m}:${s}:${f}`
 }
+
+const layoutDraftWorkspaceSegments = computed(() => {
+  const draft = currentLayoutDraft.value
+  if (!draft) return []
+  return draft.layoutReference.slots.map((slot, index) => {
+    const column = draft.columns[index]
+    const feasibility = currentLayoutDraftFeasibility.value?.segments.find((segment) => segment.segmentId === slot.id)
+    const status = feasibility?.status ?? 'ready'
+    const matchedCount = feasibility?.matchedCandidateCount ?? 0
+    const desc = feasibility?.reasons[0]
+      ?? column?.selectionPolicy?.notes?.[0]
+      ?? column?.queryHints?.slice(0, 2).join('、')
+      ?? '等待正式编排时读取候选'
+    return {
+      id: slot.id,
+      timeRange: `${formatTime4(slot.startTime)} - ${formatTime4(slot.endTime)}`,
+      label: column?.semanticLabel ?? column?.columnName ?? `时段 ${index + 1}`,
+      status,
+      statusText: status === 'blocked' ? '不可编排' : status === 'warning' ? '候选较少' : '待确认',
+      desc: matchedCount > 0 ? `候选 ${matchedCount} 个 · ${desc}` : desc,
+    }
+  })
+})
 
 const getTypeText = (item: Pick<ScheduleItem, 'sourceType' | 'businessType'>) => {
   if (item.businessType === 'ad') return '广告'
@@ -1483,17 +1947,6 @@ onMounted(async () => {
   refreshValidationReport()
   await syncCurrentBroadcastWindow()
   updateScrollMetrics()
-  openClawHostAdapter.install()
-  openClawHostAdapter.publishOrchestrationState({
-    channelId: currentChannelId.value,
-    channelName: currentChannelName.value,
-    date: scheduleDate.value,
-    status: orchestratorRuntime.status.value,
-    isRunning: orchestratorRuntime.isRunning.value,
-    sessionId: orchestratorRuntime.session.value?.id,
-    latestLog: orchestratorRuntime.logs.value.at(-1)?.message,
-    progress: orchestratorRuntime.progress.value as Record<string, unknown> | null,
-  })
 })
 
 watch(
@@ -1507,6 +1960,13 @@ watch(
 
 watch(
   () => [displayItems.value.length, showLayoutReference.value, scheduleForm.value.channelId],
+  () => {
+    updateScrollMetrics()
+  }
+)
+
+watch(
+  () => [playlistType.value, activeWorkspaceTab.value],
   () => {
     updateScrollMetrics()
   }
@@ -1548,32 +2008,6 @@ watch(
   },
 )
 
-watch(
-  () => ({
-    channelId: currentChannelId.value,
-    channelName: currentChannelName.value,
-    date: scheduleDate.value,
-    status: orchestratorRuntime.status.value,
-    isRunning: orchestratorRuntime.isRunning.value,
-    sessionId: orchestratorRuntime.session.value?.id || '',
-    latestLog: orchestratorRuntime.logs.value.at(-1)?.message || '',
-    progress: orchestratorRuntime.progress.value,
-  }),
-  (snapshot) => {
-    openClawHostAdapter.publishOrchestrationState({
-      channelId: snapshot.channelId,
-      channelName: snapshot.channelName,
-      date: snapshot.date,
-      status: snapshot.status,
-      isRunning: snapshot.isRunning,
-      sessionId: snapshot.sessionId || undefined,
-      latestLog: snapshot.latestLog || undefined,
-      progress: snapshot.progress as Record<string, unknown> | null,
-    })
-  },
-  { deep: true },
-)
-
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
   if (resizeRaf) cancelAnimationFrame(resizeRaf)
@@ -1581,7 +2015,6 @@ onBeforeUnmount(() => {
     window.clearTimeout(focusScrollResetTimer)
   }
   focusRuntime.dispose()
-  openClawHostAdapter.dispose()
 })
 </script>
 
@@ -1656,6 +2089,41 @@ onBeforeUnmount(() => {
   overflow: hidden;
   padding: var(--xnews-spacing-4);
   transition: width 0.3s ease;
+}
+
+.playlist-empty-state {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  min-height: 420px;
+  padding: var(--xnews-spacing-6);
+  background: var(--xnews-bg-white);
+  border: 1px solid var(--xnews-border-color);
+}
+
+.playlist-empty-content {
+  width: min(460px, 100%);
+  text-align: center;
+}
+
+.playlist-empty-title {
+  margin: 0 0 var(--xnews-spacing-2);
+  color: var(--xnews-text-primary);
+  font-size: var(--xnews-font-size-xl);
+  font-weight: var(--xnews-font-weight-semibold);
+}
+
+.playlist-empty-desc {
+  margin: 0 0 var(--xnews-spacing-5);
+  color: var(--xnews-text-secondary);
+  line-height: 1.7;
+}
+
+.playlist-empty-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--xnews-spacing-3);
+  flex-wrap: wrap;
 }
 
 // 时间轴头部
@@ -2471,6 +2939,115 @@ onBeforeUnmount(() => {
   gap: 0;
 }
 
+.playlist-workspace-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  padding: 8px 12px;
+  border: 1px solid #e5e7eb;
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.playlist-workspace-bar.is-empty {
+  border-bottom: none;
+  background: #ffffff;
+}
+
+.playlist-workspace-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  text-align: right;
+}
+
+.playlist-workspace-kicker {
+  color: #2563eb;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.playlist-workspace-name {
+  color: #111827;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.playlist-workspace-meta {
+  overflow: hidden;
+  min-width: 0;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playlist-workspace-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #d7e3f5;
+  border-radius: 8px;
+  background: #eef5ff;
+  flex: 0 0 auto;
+  order: -1;
+}
+
+.playlist-workspace-tabs.is-disabled {
+  border-color: #e5e7eb;
+  background: #f9fafb;
+}
+
+.playlist-workspace-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  min-width: 76px;
+  justify-content: center;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #34445a;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.playlist-workspace-tab:disabled {
+  color: #9ca3af;
+  cursor: default;
+  opacity: 0.72;
+}
+
+.playlist-workspace-tab.is-active {
+  background: #ffffff;
+  color: #1d4ed8;
+  box-shadow: 0 1px 5px rgba(37, 99, 235, 0.18);
+}
+
+.playlist-workspace-tab-count {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #e8f1ff;
+  color: #2563eb;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: center;
+}
+
 .timeline-header {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) auto;
@@ -2479,7 +3056,7 @@ onBeforeUnmount(() => {
   padding: 10px 12px 10px;
   border: 1px solid #e5e7eb;
   border-bottom: none;
-  border-radius: 10px 10px 0 0;
+  border-radius: 0;
   background: #ffffff;
   box-shadow: none;
 }
@@ -2539,6 +3116,167 @@ onBeforeUnmount(() => {
   border-radius: 0 0 10px 10px;
   border-color: #e5e7eb;
   box-shadow: none;
+}
+
+.timeline-horizontal-scroll {
+  flex: 0 0 auto;
+  height: 18px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-top: 1px solid #e5e7eb;
+  background: #f8fafc;
+}
+
+.timeline-horizontal-scroll::-webkit-scrollbar {
+  height: 12px;
+}
+
+.timeline-horizontal-scroll::-webkit-scrollbar-track {
+  background: #eef2f7;
+}
+
+.timeline-horizontal-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.timeline-horizontal-scroll-inner {
+  height: 1px;
+}
+
+.layout-draft-workspace {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 0 0 10px 10px;
+  background: #f8fafc;
+}
+
+.layout-draft-workspace-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.layout-draft-workspace-title {
+  margin: 0;
+  color: #111827;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.layout-draft-workspace-subtitle {
+  margin: 4px 0 0;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.layout-draft-strategy-summary {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-left: 3px solid #2563eb;
+  border-radius: 6px;
+  background: #eef5ff;
+  color: #34445a;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.layout-draft-workspace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.layout-draft-workspace-item {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.layout-draft-workspace-item.is-warning {
+  border-color: #f3c371;
+}
+
+.layout-draft-workspace-item.is-blocked {
+  border-color: #f3a6a6;
+}
+
+.layout-draft-workspace-time {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.layout-draft-workspace-main {
+  min-width: 0;
+}
+
+.layout-draft-workspace-label {
+  overflow: hidden;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layout-draft-workspace-desc {
+  margin-top: 2px;
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layout-draft-workspace-status {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.layout-draft-empty {
+  display: flex;
+  min-height: 220px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 6px;
+  color: #718096;
+  text-align: center;
+}
+
+.layout-draft-empty h2 {
+  margin: 0;
+  color: #111827;
+  font-size: 16px;
+}
+
+.layout-draft-empty p {
+  max-width: 420px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 .timeline-insight-bar {

@@ -256,7 +256,7 @@ const stripLayoutPrefix = (input: string): string => input
   .replace(/^(?:\d{1,2}:\d{2}|\d{1,2}(?::\d{1,2})?点(?:半)?)(?:到|至|-)(?:\d{1,2}:\d{2}|\d{1,2}(?::\d{1,2})?点(?:半)?)/u, '')
   .replace(/^(?:\d{1,2})(?:到|至|-)(?:\d{1,2})(?:点)?/u, '')
   .replace(/^(?:全部|都|统一|整体)+/u, '')
-  .replace(/^(?:改成|换成|替换成|替换为|改为|调整为|统一成|变成|排入|编入|铺成|安排成|做成|做个|做一段|做|上点|上一段|放点|放一段|加点|加个|加一点|加一些|加一段|加一条|垫点|垫个|垫一点|垫一段|垫一条|串场|衔接|过渡|收个|收一段|补点)+/u, '')
+  .replace(/^(?:改成|换成|替换成|替换为|改为|调整为|统一成|变成|排入|编入|铺成|安排成|安排|编排|排|继续播|续播|接着播|顺着排|做成|做个|做一段|做|上点|上一段|放点|放一段|加点|加个|加一点|加一些|加一段|加一条|垫点|垫个|垫一点|垫一段|垫一条|串场|衔接|过渡|收个|收一段|补点)+/u, '')
   .replace(/(?:节目|栏目|版面|内容|轮播单|直播单|播单|节目单|编排单|串联单|排单)+$/u, '')
   .trim()
 
@@ -481,6 +481,9 @@ export class LayoutIntentRecognizer {
       const response = await this.llmClient.chat(this.buildPrompt(input), {
         temperature: 0.1,
         maxTokens: 400,
+        timeout: 8000,
+        maxRetries: 1,
+        traceLabel: 'layout_intent',
       })
       const parsed = this.parseResponse(response.content)
       if (!parsed) {
@@ -795,14 +798,20 @@ export class LayoutIntentRecognizer {
     fallback: LayoutIntentRecognition,
     parsed: LayoutIntentRecognition,
   ): LayoutIntentRecognition {
+    const mergedSegments = this.mergeSegments(fallback.segments, parsed.segments)
+    const mergedTargetTimeRange = this.resolveMergedTargetTimeRange(
+      parsed.targetTimeRange ?? fallback.targetTimeRange,
+      mergedSegments,
+    )
+
     if (parsed.confidence >= CONFIDENCE_THRESHOLD) {
       return {
         ...fallback,
         ...parsed,
-        targetTimeRange: parsed.targetTimeRange ?? fallback.targetTimeRange,
+        targetTimeRange: mergedTargetTimeRange,
         semanticLabel: parsed.semanticLabel ?? fallback.semanticLabel,
         programTypeHint: parsed.programTypeHint ?? fallback.programTypeHint,
-        segments: parsed.segments?.length ? parsed.segments : fallback.segments,
+        segments: mergedSegments,
         ignoreExistingLayout: parsed.ignoreExistingLayout || fallback.ignoreExistingLayout,
       }
     }
@@ -813,11 +822,38 @@ export class LayoutIntentRecognizer {
 
     return {
       ...parsed,
-      targetTimeRange: parsed.targetTimeRange ?? fallback.targetTimeRange,
+      targetTimeRange: mergedTargetTimeRange,
       semanticLabel: parsed.semanticLabel ?? fallback.semanticLabel,
       programTypeHint: parsed.programTypeHint ?? fallback.programTypeHint,
-      segments: parsed.segments?.length ? parsed.segments : fallback.segments,
+      segments: mergedSegments,
       ignoreExistingLayout: parsed.ignoreExistingLayout || fallback.ignoreExistingLayout,
+    }
+  }
+
+  private mergeSegments(
+    fallbackSegments?: LayoutIntentSegment[],
+    parsedSegments?: LayoutIntentSegment[],
+  ): LayoutIntentSegment[] | undefined {
+    if (!fallbackSegments?.length) {
+      return parsedSegments?.length ? parsedSegments : undefined
+    }
+    if (!parsedSegments?.length) {
+      return fallbackSegments
+    }
+    return parsedSegments.length >= fallbackSegments.length ? parsedSegments : fallbackSegments
+  }
+
+  private resolveMergedTargetTimeRange(
+    targetTimeRange?: LayoutIntentRecognition['targetTimeRange'],
+    segments?: LayoutIntentSegment[],
+  ): LayoutIntentRecognition['targetTimeRange'] {
+    if (!segments?.length) {
+      return targetTimeRange
+    }
+    const ordered = [...segments].sort((left, right) => left.start.localeCompare(right.start))
+    return {
+      start: ordered[0]!.start,
+      end: ordered.at(-1)!.end,
     }
   }
 }
