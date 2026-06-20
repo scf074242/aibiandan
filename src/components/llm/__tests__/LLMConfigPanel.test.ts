@@ -14,4 +14,12 @@ describe('LLMConfigPanel', () => {
     expect(panelSource).not.toContain('DeepSeek V3.2')
     expect(panelSource).not.toContain('deepseek-ai/DeepSeek-V3.2')
   })
+
+  it('uses the shared LLM config service instead of writing a separate local key copy', () => {
+    expect(panelSource).toContain("import { getDefaultConfig, loadLLMConfig, saveLLMConfig } from '@/services/llm/llmConfig'")
+    expect(panelSource).toContain('Object.assign(config, loadLLMConfig())')
+    expect(panelSource).toContain('saveLLMConfig({ ...config })')
+    expect(panelSource).not.toContain('localStorage.setItem')
+    expect(panelSource).not.toContain('localStorage.getItem')
+  })
 })

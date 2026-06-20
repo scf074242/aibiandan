@@ -100,16 +100,16 @@ export class InsertCandidateResolver {
 
     if (input.searchMode === 'explicit_name') {
       if (
+        ranked.length === 1
+        &&
         top.score >= DIRECT_EXECUTE_SCORE_THRESHOLD
-        && (ranked.length === 1 || top.score - (second?.score ?? 0) >= DIRECT_EXECUTE_SCORE_DELTA || top.exactNameMatch)
+        && (top.score - (second?.score ?? 0) >= DIRECT_EXECUTE_SCORE_DELTA || top.exactNameMatch)
       ) {
         return {
           status: 'resolved',
           selectedCandidate: top.candidate,
           confidence: top.confidence,
-          reasoning: ranked.length === 1
-            ? '只命中一个高匹配候选，直接采用该节目。'
-            : '已命中高置信度节目候选，并且和其他候选拉开了足够差距，可以直接执行插入。',
+          reasoning: '只命中一个高匹配候选，直接采用该节目。',
           recommendedCandidates,
         }
       }
@@ -251,6 +251,11 @@ export class InsertCandidateResolver {
     if (keywordMatchCount > 0) {
       score += Math.min(18, keywordMatchCount * 6)
       reasonTags.push('关键词匹配')
+    }
+
+    if (input.params.expectedDurationSeconds && candidate.duration === input.params.expectedDurationSeconds) {
+      score += 12
+      reasonTags.push('时长精确匹配')
     }
 
     if (!normalizedTargetName && normalizedRawText && normalizedCandidateName.includes(normalizedRawText)) {

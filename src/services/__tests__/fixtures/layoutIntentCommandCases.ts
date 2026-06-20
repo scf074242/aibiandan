@@ -718,8 +718,7 @@ export const layoutIntentCommandCases: LayoutIntentCommandCase[] = [
     input: '帮我填充全天节目',
     emptySchedule: true,
     expected: {
-      mode: 'layout_prepare',
-      targetTimeRange: { start: '06:00:00', end: '23:59:59' },
+      mode: 'clarify',
     },
   },
   {
@@ -727,14 +726,13 @@ export const layoutIntentCommandCases: LayoutIntentCommandCase[] = [
     input: '全天编排',
     emptySchedule: true,
     expected: {
-      mode: 'layout_prepare',
-      targetTimeRange: { start: '06:00:00', end: '23:59:59' },
+      mode: 'clarify',
     },
   },
   {
     id: 'full-fill-gaps',
     input: '补齐当前所有空窗',
-    expected: { mode: 'layout_prepare' },
+    expected: { mode: 'clarify' },
   },
   {
     id: 'clarify-vague-layout',

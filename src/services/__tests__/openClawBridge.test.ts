@@ -117,7 +117,7 @@ describe('OpenClawBridge', () => {
     expect(first.sessionId).toBe(second.sessionId)
   })
 
-  it('新指令进入版面准备阶段时不会复用上一条原子执行结果', async () => {
+  it('新正式编排指令不会复用上一条原子执行结果', async () => {
     const bridge = new OpenClawBridge()
 
     const first = await bridge.submitInstruction({
@@ -149,11 +149,11 @@ describe('OpenClawBridge', () => {
 
     expect(second.status).toBe('accepted')
     expect(second.message).toBeUndefined()
-    expect(second.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(second.payload?.lastDecisionKind).toBe('orchestration')
 
     const session = bridge.getSessionState(second.sessionId)
     expect(session?.lastExecution).toBeUndefined()
-    expect(session?.pendingLayoutDraft).toBeTruthy()
+    expect(session?.pendingLayoutDraft).toBeUndefined()
   })
 
   it('纯电视频道编排草案会声明顺播策略并要求参考昨日记录', async () => {
@@ -164,7 +164,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '帮我全天编排，电视剧顺着昨天继续排',
+      text: '生成全天版面草案，电视剧顺着昨天继续排',
       currentSchedule: [],
       gapCount: 2,
       history: [],
@@ -204,7 +204,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '帮我全天编排',
+      text: '生成全天版面草案',
       currentSchedule: [],
       gapCount: 2,
       history: [],
@@ -452,7 +452,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '帮我全天编排',
+      text: '生成全天版面草案',
       currentSchedule: [],
       gapCount: 2,
       history: [],
@@ -479,7 +479,7 @@ describe('OpenClawBridge', () => {
     expect(cleared.payload?.pendingAtomicContext).toBeNull()
   })
 
-  it('已有节目后发起全天编排也会直接进入版面草案阶段', async () => {
+  it('已有节目后发起全天编排会进入正式编排而不是草案阶段', async () => {
     const bridge = new OpenClawBridge()
 
     const prepare = await bridge.submitInstruction({
@@ -503,7 +503,8 @@ describe('OpenClawBridge', () => {
     })
 
     expect(prepare.status).toBe('accepted')
-    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(prepare.payload?.lastDecisionKind).toBe('orchestration')
+    expect(prepare.payload?.pendingLayoutDraft).toBeUndefined()
     expect(prepare.message).toBeUndefined()
   })
 
@@ -515,7 +516,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '帮我全天编排',
+      text: '生成全天版面草案',
       currentSchedule: [],
       gapCount: 2,
       history: [],
@@ -528,7 +529,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '晚上全部替换成新闻栏目',
+      text: '把草案晚上全部替换成新闻栏目',
       currentSchedule: [],
       gapCount: 2,
       history: [],
@@ -546,7 +547,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '帮我全天编排',
+      text: '生成全天版面草案',
       currentSchedule: [],
       gapCount: 2,
       history: [],
@@ -579,7 +580,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '14点到15点排生命树电视剧',
+      text: '生成版面草案，14点到15点排生命树电视剧',
       currentSchedule: [],
       gapCount: 1,
       history: [],
@@ -593,7 +594,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '改成梦想剧场：归路 第1集',
+      text: '把草案改成梦想剧场：归路 第1集',
       currentSchedule: [],
       gapCount: 1,
       history: [],
@@ -619,7 +620,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '14:00到15:00安排所属栏目静安寺、节目内容看东方的轮播单，内容匹配优先',
+      text: '生成版面草案，14:00到15:00安排所属栏目静安寺、节目内容看东方的轮播单，内容匹配优先',
       currentSchedule: [],
       gapCount: 1,
       history: [],
@@ -700,7 +701,7 @@ describe('OpenClawBridge', () => {
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
-      text: '不参考版面，下午排入电视剧',
+      text: '生成版面草案，不参考版面，下午排入电视剧',
       currentSchedule: [],
       gapCount: 2,
       history: [],
@@ -710,5 +711,38 @@ describe('OpenClawBridge', () => {
     expect(prepare.summary).not.toContain('当前频道版面参考')
     const session = bridge.getSessionState(prepare.sessionId)
     expect(session?.pendingLayoutDraft?.source).toBe('generated')
+  })
+
+  it('有草案上下文时，普通正式编排命令不会被桥接层改成草案更新', async () => {
+    const bridge = new OpenClawBridge()
+
+    const prepare = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-formal-over-draft',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '下午准备一个版面草案，内容是电视剧',
+      currentSchedule: [],
+      gapCount: 2,
+      history: [],
+    })
+
+    expect(prepare.payload?.lastDecisionKind).toBe('layout_draft')
+    expect(bridge.getSessionState(prepare.sessionId)?.pendingLayoutDraft).toBeTruthy()
+
+    const formal = await bridge.submitInstruction({
+      conversationId: 'conv-bridge-formal-over-draft',
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      text: '下午改成新闻栏目',
+      currentSchedule: [],
+      gapCount: 2,
+      history: [],
+    })
+
+    expect(formal.payload?.lastDecisionKind).toBe('orchestration')
+    expect(formal.payload?.pendingLayoutDraft).toBeUndefined()
+    expect(bridge.getSessionState(formal.sessionId)?.pendingLayoutDraft).toBeUndefined()
   })
 })

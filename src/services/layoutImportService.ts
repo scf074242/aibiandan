@@ -1,4 +1,5 @@
 import { orchestrationDemoColumns } from '@/mock/orchestrationMock'
+import { parseDraftConstraintText } from '@/services/retrievalConstraintCompiler'
 import type { ColumnDefinition, LayoutReference, LayoutSlot } from '@/types/orchestration'
 
 export type LayoutTemplateMode = 'weekday_columns' | 'weekday_sheet' | 'visual_weekday_grid'
@@ -28,6 +29,7 @@ type ParsedLayoutRow = {
   endDayOffset?: number
   columnName: string
   columnId?: string
+  draftConstraintKind?: ColumnDefinition['draftConstraintKind']
   programType?: string
   remark?: string
 }
@@ -64,6 +66,7 @@ type TimelineDefinition = {
 type LayoutNameResolution = {
   displayName: string
   matchedColumn?: ColumnDefinition
+  constraintKind?: ColumnDefinition['draftConstraintKind']
 }
 
 export interface ImportedLayoutPackage {
@@ -275,7 +278,8 @@ function buildColumnNameVariants(text: string) {
 }
 
 function resolveLayoutName(value: unknown): LayoutNameResolution | null {
-  const text = normalizeLayoutCellText(value)
+  const parsedConstraint = parseDraftConstraintText(normalizeLayoutCellText(value))
+  const text = parsedConstraint.name
   if (!isMeaningfulLayoutName(text)) return null
 
   const variants = Array.from(new Set([
@@ -292,14 +296,15 @@ function resolveLayoutName(value: unknown): LayoutNameResolution | null {
   if (matchedColumn) {
     return {
       displayName: matchedColumn.columnName,
-      matchedColumn,
+      matchedColumn: parsedConstraint.kind === 'program' ? undefined : matchedColumn,
+      constraintKind: parsedConstraint.kind,
     }
   }
 
   const cleanedVariant = variants.find(
     (item) => !/^(重播|录播|首播|复播|直播|动画片|电视剧|真人秀|综艺|节目)$/.test(item),
   )
-  return { displayName: cleanedVariant ?? variants[0]! }
+  return { displayName: cleanedVariant ?? variants[0]!, constraintKind: parsedConstraint.kind }
 }
 
 function timeTextToMinutes(value: string) {
@@ -499,6 +504,7 @@ function parseSingleDayRows(rows: unknown[][], headerIndex: number, headerMap: P
       endTime,
       columnName: resolvedName.displayName,
       columnId: resolvedName.matchedColumn?.columnId,
+      draftConstraintKind: resolvedName.constraintKind,
       programType: normalizeText(typeof headerMap.programType === 'number' ? row[headerMap.programType] : ''),
       remark: normalizeText(typeof headerMap.remark === 'number' ? row[headerMap.remark] : ''),
     })
@@ -532,6 +538,7 @@ function parseWeekdayRows(
       endTime,
       columnName: resolvedName.displayName,
       columnId: resolvedName.matchedColumn?.columnId,
+      draftConstraintKind: resolvedName.constraintKind,
       programType: normalizeText(typeof headerMap.programType === 'number' ? row[headerMap.programType] : ''),
       remark: normalizeText(typeof headerMap.remark === 'number' ? row[headerMap.remark] : ''),
     })
@@ -579,6 +586,7 @@ function parseVisualWeekdayGrid(
       endDayOffset: endPosition.dayOffset,
       columnName: resolvedName.displayName,
       columnId: resolvedName.matchedColumn?.columnId,
+      draftConstraintKind: resolvedName.constraintKind,
     })
   }
 
@@ -647,12 +655,21 @@ function buildColumns(channelId: string, date: string, rows: ParsedLayoutRow[], 
   const columns = new Map<string, ColumnDefinition>()
 
   rows.forEach((row) => {
-    const matchedMockColumn = row.columnId
-      ? KNOWN_COLUMN_MATCHERS.find((item) => item.column.columnId === row.columnId)?.column
-      : resolveLayoutName(row.columnName)?.matchedColumn
+    const draftConstraintKind = row.draftConstraintKind ?? 'unspecified'
+    const matchedMockColumn = row.draftConstraintKind === 'program'
+      ? undefined
+      : row.columnId
+        ? KNOWN_COLUMN_MATCHERS.find((item) => item.column.columnId === row.columnId)?.column
+        : resolveLayoutName(row.columnName)?.matchedColumn
 
     if (matchedMockColumn) {
-      columns.set(matchedMockColumn.columnId, matchedMockColumn)
+      const existing = columns.get(matchedMockColumn.columnId)
+      columns.set(matchedMockColumn.columnId, {
+        ...matchedMockColumn,
+        draftConstraintKind: existing?.draftConstraintKind === 'column' || existing?.draftConstraintKind === 'program'
+          ? existing.draftConstraintKind
+          : draftConstraintKind,
+      })
       return
     }
 
@@ -666,6 +683,7 @@ function buildColumns(channelId: string, date: string, rows: ParsedLayoutRow[], 
       channelId,
       defaultProgramType: programType,
       isSequential: inferSequential(row.columnName, programType),
+      draftConstraintKind,
     })
   })
 
@@ -687,9 +705,11 @@ function buildLayoutSlots(
   }
   const layoutSlots: LayoutSlot[] = normalizedRows.map((row, index) => {
     const programType = inferProgramType(row.columnName, row.programType, dominantProgramType)
-    const matchedMockColumn = row.columnId
-      ? KNOWN_COLUMN_MATCHERS.find((item) => item.column.columnId === row.columnId)?.column
-      : resolveLayoutName(row.columnName)?.matchedColumn
+    const matchedMockColumn = row.draftConstraintKind === 'program'
+      ? undefined
+      : row.columnId
+        ? KNOWN_COLUMN_MATCHERS.find((item) => item.column.columnId === row.columnId)?.column
+        : resolveLayoutName(row.columnName)?.matchedColumn
     const columnId = matchedMockColumn?.columnId ?? buildRuntimeColumnId(channelId, date, row.columnName, programType)
 
     if (!matchedMockColumn && inferSequential(row.columnName, programType)) {

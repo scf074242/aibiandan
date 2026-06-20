@@ -12,6 +12,7 @@ import type {
 } from '@/types/orchestration'
 import type { LLMClient } from './llm/llmClient'
 import type { GapPlanningThought } from './orchestrationStrategyService'
+import { compileSearchKeywordsWithColumnConstraint } from './retrievalConstraintCompiler'
 
 export class QueryIntentService {
   constructor(private llmClient: LLMClient) {
@@ -47,7 +48,7 @@ export class QueryIntentService {
           : columnInstances.length > 0
             ? Array.from(new Set(columnPrograms.map((program) => program.programType)))
             : gap.constraints.allowedTypes,
-      searchKeywords: thought.searchKeywords,
+      searchKeywords: compileSearchKeywordsWithColumnConstraint(thought.searchKeywords, column, 'unspecified'),
       excludeUsed: true,
       selectionPolicy,
       historyReference: this.shouldAttachHistoryReference(selectionPolicy) ? context.historyReference : undefined,

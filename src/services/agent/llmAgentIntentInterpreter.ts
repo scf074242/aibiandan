@@ -7,6 +7,9 @@ import type {
   AgentIntentSlots,
   AgentPendingAction,
   AgentSubmitInput,
+  AgentTaskPlanDraft,
+  AgentTaskPlanStageDraft,
+  AgentTaskPlanStageDraftType,
   AtomicCommandIntent,
   QueryCommandPlan,
 } from './types'
@@ -39,6 +42,7 @@ const QUERY_KINDS: QueryCommandPlan['queryKind'][] = [
 ]
 
 const MIN_STRUCTURED_CONFIDENCE = 0.5
+const ASSISTANT_FEEDBACK_TECHNICAL_PATTERN = /intent=|slots=|pendingAction|confidence|JSON|Agent Core|needs_|evidencePackage|pendingTask|taskPlan|runtime|policy|stage|候选源|结构化|置信度|匹配度|上下文包|策略ID|技术词/iu
 
 export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
   readonly usesLlm = true
@@ -75,11 +79,12 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
       confidence,
       source: 'llm',
       slots: this.normalizeSlots(record.slots),
+      taskPlanDraft: this.normalizeTaskPlanDraft(record.taskPlanDraft),
       queryKind: this.normalizeQueryKind(record.queryKind),
       keyword: typeof record.keyword === 'string' ? record.keyword : undefined,
       searchAlternatives: this.normalizeSearchAlternatives(record.searchAlternatives),
       reasoning: typeof record.reasoning === 'string' ? record.reasoning : undefined,
-      assistantFeedback: this.normalizeAssistantFeedback(record.assistantFeedback),
+      assistantFeedback: this.normalizeAssistantFeedback(record.assistantFeedback ?? record.assistantReplyDraft),
       streamingHint: this.normalizeStreamingHint(record.streamingHint),
       rawText: response.content,
     }
@@ -96,12 +101,14 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
           'Use evidencePackage as compact evidence for current schedule, candidate library, readiness, history, constraints, and policy when extracting references such as programme names, time slots, candidate hints, and pending-turn actions.',
           'Use pendingEvidenceSummary as compact evidence for the previous pending task when deciding whether the current turn continues, confirms, selects, cancels, or starts a new task.',
           'Scheduling Agent Core v1.1 only covers atomic playlist commands: move, insert, replace, delete, batch_move, batch_delete, query, and validate.',
+          'If the user request contains multiple ordered tasks, also return taskPlanDraft with isComposite=true, a short goal, and ordered stages. Keep intent as the first executable atomic stage, such as batch_delete or insert.',
           'Do not turn layout drafts, full-day auto scheduling, or multi-user collaboration requests into executable atomic writes; return low confidence when the user request is outside this core scope.',
           'If a destination is occupied, do not infer auto-shift, auto-replace, or auto-reorder behavior; only extract the requested move or insert slots and leave blocking to the runtime.',
           'Return JSON only, without Markdown.',
           'intent must be one of: move, insert, replace, delete, batch_move, batch_delete, query, validate.',
           'When pendingTask is present, also set pendingAction to one of: continue_pending, start_new_task, cancel_pending, select_candidate, confirm, reject.',
           'slots may include: targetTime, newStartTime, rangeStart, rangeEnd, programHint, replacementHint, offsetSeconds, direction, candidateId, targetItemId, targetProgramName.',
+          'taskPlanDraft.stages may include type atomic, batch_atomic, draft_refill, verify, ask_user. Use draft_refill only when the user explicitly asks to use/reference a layout draft or fill gaps. For batch replace stages, target.programName or target range is the existing content, and target.replacementHint is the desired replacement content. For insert stages, target may include candidateId, candidateCode, programType, and durationSeconds only when already known from context or user-selected candidate evidence. Do not claim any stage has executed.',
           'For insert, replace, and candidate_lookup turns, also return searchAlternatives as 2-5 short Chinese keyword rewrites when helpful. Use similar programme names, column names, content facets, and intent-preserving synonyms; do not invent a final candidate.',
           'Use HH:mm:ss for times. Use seconds for offsetSeconds. direction must be forward or backward.',
           'For commands like "把《看东方》移到10点" or "move Morning News to 10", set intent=move, slots.targetProgramName to the existing programme name, and slots.newStartTime to the destination time.',
@@ -109,6 +116,8 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
           'For commands like "把09:00的节目换成东方新闻", set targetTime for the existing slot and replacementHint for the new programme.',
           'For query intent, queryKind must be one of: schedule_summary, time_lookup, program_lookup, candidate_lookup.',
           'Also return assistantFeedback: one short Chinese sentence addressed to the scheduling editor. It should say what you understood and what will happen next, or what information is still needed. Do not include internal field names, JSON keys, policy ids, or technical terms.',
+          'assistantFeedback is the main text the editor sees. Write like a scheduling colleague, not like a system log. Do not mention candidate source, structured intent, confidence, matching score, context package, taskPlan, stage, runtime, policy, evidencePackage, pendingTask, or Agent Core.',
+          'When the command must be blocked or needs more information, assistantFeedback must include three plain-language parts: why I cannot continue yet, what is missing, and what the editor can say next.',
           'For destructive or schedule-changing commands such as delete, replace, move, and insert, use a warm confirmation-oriented sentence. If evidencePackage already identifies the target slot or programme, do not say you will first locate it; say the target has been understood and that confirmation or validation will happen before writing.',
           'assistantFeedback examples: "我理解你想把《看东方》移到10点，我会核对当前播单中的目标节目和10点是否空闲。", "我知道你想插入上海景点相关视频，还需要确认插入时间。", "这看起来是在确认上一条插入建议，我会继续沿用上一轮候选和目标时间。"',
           'You may return streamingHint as "thinking" when the UI can safely stream a short progress sentence; otherwise return "final".',
@@ -231,8 +240,35 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
     if (typeof value !== 'string') return undefined
     const normalized = value.replace(/\s+/g, ' ').trim()
     if (!normalized) return undefined
-    if (/intent=|slots=|pendingAction|confidence|JSON|Agent Core|needs_/iu.test(normalized)) return undefined
-    return normalized.slice(0, 180)
+    const sanitized = this.sanitizeAssistantFeedback(normalized)
+    if (!sanitized) return undefined
+    return sanitized.slice(0, 180)
+  }
+
+  private sanitizeAssistantFeedback(value: string): string | undefined {
+    if (!ASSISTANT_FEEDBACK_TECHNICAL_PATTERN.test(value)) return value
+
+    const sentenceChunks = value.match(/[^。！？!?；;]+[。！？!?；;]?/gu) ?? [value]
+    const readableChunks = sentenceChunks
+      .map((item) => item.trim())
+      .filter((item) => item && !ASSISTANT_FEEDBACK_TECHNICAL_PATTERN.test(item))
+    const readableText = readableChunks.join('')
+    if (readableText.length >= 8) return readableText
+
+    const cleaned = value
+      .replace(/taskPlan\s*stage\s*已生成[，,；;]?\s*/giu, '我已经整理好这次修改，')
+      .replace(/(?:taskPlan|stage|runtime|policy|evidencePackage|pendingTask|Agent Core|JSON)/giu, '')
+      .replace(/(?:置信度和匹配度|confidence and matching score)/giu, '节目线索')
+      .replace(/(?:置信度|匹配度|confidence|matching score)/giu, '节目线索')
+      .replace(/(?:候选源|结构化|上下文包|策略ID|技术词)/gu, '')
+      .replace(/会按节目线索和节目线索/gu, '会按节目线索')
+      .replace(/\s+/g, ' ')
+      .replace(/[，,；;]\s*[，,；;]/g, '，')
+      .trim()
+
+    if (!cleaned || cleaned.length < 8) return undefined
+    if (ASSISTANT_FEEDBACK_TECHNICAL_PATTERN.test(cleaned)) return undefined
+    return cleaned
   }
 
   private normalizeSearchAlternatives(value: unknown): string[] | undefined {
@@ -271,6 +307,74 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
       slots.direction = source.direction
     }
     return Object.keys(slots).length ? slots : undefined
+  }
+
+  private normalizeTaskPlanDraft(value: unknown): AgentTaskPlanDraft | undefined {
+    if (!value || typeof value !== 'object') return undefined
+    const source = value as Record<string, unknown>
+    const goal = typeof source.goal === 'string' ? source.goal.replace(/\s+/g, ' ').trim() : ''
+    const stages = this.normalizeTaskPlanStages(source.stages)
+    const isComposite = source.isComposite === true || stages.length > 1
+    if (!isComposite || !goal || stages.length === 0) return undefined
+    return {
+      isComposite: true,
+      goal: goal.slice(0, 80),
+      stages,
+    }
+  }
+
+  private normalizeTaskPlanStages(value: unknown): AgentTaskPlanStageDraft[] {
+    if (!Array.isArray(value)) return []
+    return value
+      .map((item): AgentTaskPlanStageDraft | null => {
+        if (!item || typeof item !== 'object') return null
+        const source = item as Record<string, unknown>
+        const type = this.normalizeTaskPlanStageType(source.type)
+        if (!type) return null
+        const action = this.normalizeIntent(source.action)
+        const target = source.target && typeof source.target === 'object'
+          ? source.target as Record<string, unknown>
+          : {}
+        const summary = typeof source.summary === 'string'
+          ? source.summary.replace(/\s+/g, ' ').trim().slice(0, 80)
+          : undefined
+        return {
+          type,
+          action,
+          target: {
+            programName: typeof target.programName === 'string' ? target.programName.trim().slice(0, 40) : undefined,
+            replacementHint: typeof target.replacementHint === 'string' ? target.replacementHint.trim().slice(0, 60) : undefined,
+            candidateId: typeof target.candidateId === 'string' ? target.candidateId.trim().slice(0, 80) : undefined,
+            candidateCode: typeof target.candidateCode === 'string' ? target.candidateCode.trim().slice(0, 80) : undefined,
+            programType: typeof target.programType === 'string' ? target.programType.trim().slice(0, 40) : undefined,
+            durationSeconds: typeof target.durationSeconds === 'number' && Number.isFinite(target.durationSeconds)
+              ? target.durationSeconds
+              : undefined,
+            targetTime: typeof target.targetTime === 'string' ? target.targetTime.trim() : undefined,
+            rangeStart: typeof target.rangeStart === 'string' ? target.rangeStart.trim() : undefined,
+            rangeEnd: typeof target.rangeEnd === 'string' ? target.rangeEnd.trim() : undefined,
+            scope: target.scope === 'current_playlist' || target.scope === 'current_gaps' || target.scope === 'time_range'
+              ? target.scope
+              : undefined,
+          },
+          layoutDraftReferenced: source.layoutDraftReferenced === true,
+          requiresLayoutDraft: source.requiresLayoutDraft === true,
+          requiresConfirmation: source.requiresConfirmation === true,
+          summary,
+        }
+      })
+      .filter((item): item is AgentTaskPlanStageDraft => Boolean(item))
+      .slice(0, 5)
+  }
+
+  private normalizeTaskPlanStageType(value: unknown): AgentTaskPlanStageDraftType | undefined {
+    return value === 'atomic'
+      || value === 'batch_atomic'
+      || value === 'draft_refill'
+      || value === 'verify'
+      || value === 'ask_user'
+      ? value
+      : undefined
   }
 
   private copyStringSlot(

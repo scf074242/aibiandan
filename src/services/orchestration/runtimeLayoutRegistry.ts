@@ -18,6 +18,9 @@ export interface RuntimeLayoutEntry {
   sourceFileName: string
   channelId: string
   date: string
+  effectiveFrom?: string
+  effectiveTo?: string
+  version?: number
   templateMode?: LayoutTemplateMode
   matchedSheetName?: string
   matchedWeekday?: ImportedLayoutPackage['matchedWeekday']
@@ -33,6 +36,14 @@ const runtimeLayouts = new Map<string, RuntimeLayoutEntry>()
 const runtimeColumns = new Map<string, ColumnDefinition>()
 
 const buildLayoutKey = (channelId: string, date: string) => `${channelId}_${date}`
+const normalizeDate = (date: string) => date.slice(0, 10)
+
+const isEntryEffectiveForDate = (entry: RuntimeLayoutEntry, date: string) => {
+  const target = normalizeDate(date)
+  if (entry.effectiveFrom && target < normalizeDate(entry.effectiveFrom)) return false
+  if (entry.effectiveTo && target > normalizeDate(entry.effectiveTo)) return false
+  return Boolean(entry.effectiveFrom || entry.effectiveTo)
+}
 
 const isRuntimeColumnId = (columnId: string) => columnId.startsWith('runtime-column:')
 
@@ -71,11 +82,20 @@ export function setRuntimeLayout(entry: Omit<RuntimeLayoutEntry, 'importedAt'>):
 }
 
 export function getRuntimeLayoutEntry(channelId: string, date: string): RuntimeLayoutEntry | null {
-  return runtimeLayouts.get(buildLayoutKey(channelId, date)) ?? null
+  const exact = runtimeLayouts.get(buildLayoutKey(channelId, date))
+  if (exact) return exact
+
+  return [...runtimeLayouts.values()]
+    .filter((entry) => entry.channelId === channelId && isEntryEffectiveForDate(entry, date))
+    .sort((a, b) => {
+      const versionDiff = (b.version ?? 0) - (a.version ?? 0)
+      if (versionDiff !== 0) return versionDiff
+      return b.importedAt.localeCompare(a.importedAt)
+    })[0] ?? null
 }
 
 export function hasRuntimeLayoutEntry(channelId: string, date: string): boolean {
-  return runtimeLayouts.has(buildLayoutKey(channelId, date))
+  return Boolean(getRuntimeLayoutEntry(channelId, date))
 }
 
 export function getEffectiveLayoutReference(channelId: string, date: string): LayoutReference | null {

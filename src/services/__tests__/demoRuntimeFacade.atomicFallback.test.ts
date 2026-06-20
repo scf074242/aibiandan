@@ -1032,18 +1032,19 @@ describe('DemoRuntimeFacade atomic fallback', () => {
 
     expect(mockIntentRecognize).not.toHaveBeenCalled()
     expect(mockResolveTarget).not.toHaveBeenCalled()
-    expect(result.kind).toBe('pending_command')
-    if (result.kind !== 'pending_command') {
-      throw new Error('expected pending_command decision')
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context decision')
     }
-    expect(result.feedback.processTypeLabel).toBe('待确认修改')
-    expect(result.feedback.content).toContain('命中 2 条节目')
-    expect(result.pendingCommand.commands).toHaveLength(2)
-    expect(result.pendingCommand.details).toMatchObject({
-      actionType: 'batch_delete',
-      matchedCount: 2,
-      isExecutable: true,
+    expect(result.feedback.processTypeLabel).toBe('待确认')
+    expect(result.feedback.content).toContain('2 条')
+    expect(result.pendingAtomicContext.compositeTaskRun?.batch).toMatchObject({
+      matchKind: 'time_range',
+      targetLabel: '09:00:00-12:00:00',
+      totalMatched: 2,
+      remainingCount: 2,
     })
+    expect(result.pendingAtomicContext.compositeTaskRun?.stages[0]?.steps).toHaveLength(2)
   })
 
   it('中文时间范围批量删除会生成同样的预演', async () => {
@@ -1065,16 +1066,66 @@ describe('DemoRuntimeFacade atomic fallback', () => {
 
     expect(mockIntentRecognize).not.toHaveBeenCalled()
     expect(mockResolveTarget).not.toHaveBeenCalled()
-    expect(result.kind).toBe('pending_command')
-    if (result.kind !== 'pending_command') {
-      throw new Error('expected pending_command decision')
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context decision')
     }
-    expect(result.pendingCommand.commands).toHaveLength(2)
-    expect(result.pendingCommand.details).toMatchObject({
-      actionType: 'batch_delete',
-      matchedCount: 2,
-      isExecutable: true,
+    expect(result.pendingAtomicContext.compositeTaskRun?.batch).toMatchObject({
+      matchKind: 'time_range',
+      targetLabel: '09:00:00-12:00:00',
+      totalMatched: 2,
+      remainingCount: 2,
     })
+    expect(result.pendingAtomicContext.compositeTaskRun?.stages[0]?.steps).toHaveLength(2)
+  })
+
+  it('同一时间插入多个节目会先要求确认顺序', async () => {
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '9点插入看东方和百姓大讲堂',
+      currentSchedule: [mockedItem],
+      history: [],
+    })
+
+    expect(mockIntentRecognize).not.toHaveBeenCalled()
+    expect(mockResolveTarget).not.toHaveBeenCalled()
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') {
+      throw new Error('expected conflict message')
+    }
+    expect(result.statusHint).toBe('needs_clarification')
+    expect(result.feedback.processTypeLabel).toBe('需要确认顺序')
+    expect(result.feedback.content).toContain('同时要插入多个节目')
+  })
+
+  it('移动到同一时间后又插入节目会先要求确认顺序', async () => {
+    const tenItem = {
+      ...mockedItem,
+      id: 'item-1000',
+      programName: '上午资讯',
+      startTime: '10:00:00',
+      endTime: '11:00:00',
+    }
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '把10点的节目移动到9点，再9点插入一个看东方节目',
+      currentSchedule: [mockedItem, tenItem],
+      history: [],
+    })
+
+    expect(mockIntentRecognize).not.toHaveBeenCalled()
+    expect(mockResolveTarget).not.toHaveBeenCalled()
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') {
+      throw new Error('expected conflict message')
+    }
+    expect(result.statusHint).toBe('needs_clarification')
+    expect(result.feedback.processTypeLabel).toBe('需要确认顺序')
+    expect(result.feedback.content).toContain('同时有移动和插入动作')
   })
 
   it('范围批量平移会生成预演并保留逐条拟操作，不直接改单条节目', async () => {
@@ -1328,18 +1379,24 @@ describe('DemoRuntimeFacade atomic fallback', () => {
       history: [],
     })
 
-    expect(preview.kind).toBe('pending_command')
-    if (preview.kind !== 'pending_command') {
-      throw new Error('expected pending_command decision')
+    expect(preview.kind).toBe('pending_atomic_context')
+    if (preview.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context decision')
     }
 
-    const executed = await facade.executePendingCommand({
-      pendingCommand: preview.pendingCommand,
-      scheduleDate: '2026-03-25',
-      channelId: 'dragon',
+    const executed = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '确认',
+      currentSchedule: [mockedItem, tenItem, noonItem],
+      history: ['删除当前9点到12点已编排的全部节目'],
+      pendingAtomicContext: preview.pendingAtomicContext,
     })
 
-    expect(executed.success).toBe(true)
+    expect(executed.kind).toBe('agent_execution')
+    if (executed.kind !== 'agent_execution') {
+      throw new Error('expected agent_execution decision')
+    }
+    expect(executed.result.executionResult?.committed).toBe(true)
     expect(getAtomicCapabilities().getItem('item-0900')).toBeUndefined()
     expect(getAtomicCapabilities().getItem('item-1000')).toBeUndefined()
     expect(getAtomicCapabilities().getItem('item-1200')).toBeDefined()
@@ -2117,7 +2174,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     }
 
     expect(result.statusHint).toBe('cancelled')
-    expect(result.feedback.processTypeLabel).toBe('上下文已失效')
+    expect(result.feedback.processTypeLabel).toBe('上一条已失效')
   })
 
   it('统一 pendingAtomicContext 超过最大尝试次数后会结束当前补参', async () => {
@@ -2152,5 +2209,39 @@ describe('DemoRuntimeFacade atomic fallback', () => {
 
     expect(result.statusHint).toBe('failed')
     expect(result.feedback.processTypeLabel).toBe('补参失败')
+  })
+
+  it('deterministically answers current schedule program queries after a pending review is interrupted', async () => {
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState(),
+      userInput: '\u67e5\u8be2\u8282\u76ee\u770b\u4e1c\u65b9',
+      currentSchedule: [{
+        id: 'item-0700',
+        programCode: '002601010111',
+        programName: '\u770b\u4e1c\u65b9111\u671f\u65b0\u6625\u7279\u522b\u884c\u52a8',
+        startTime: '07:00:00',
+        endTime: '08:00:00',
+        duration: 3600,
+        programType: 'news',
+      }],
+      history: [],
+      agentCoreEnabled: true,
+    })
+
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') {
+      throw new Error('expected message decision')
+    }
+
+    expect(result.feedback.processTypeLabel).toBe('\u67e5\u8be2\u7ed3\u679c')
+    expect(result.feedback.content).toContain('\u64ad\u5355\u4e2d\u627e\u5230 1 \u4e2a\u5339\u914d\u8282\u76ee')
+    expect(result.feedback.content).toContain('\u770b\u4e1c\u65b9111\u671f\u65b0\u6625\u7279\u522b\u884c\u52a8')
+    expect(result.feedback.details).toMatchObject({
+      queryKind: 'program_lookup',
+      keyword: '\u770b\u4e1c\u65b9',
+      matchedCount: 1,
+    })
   })
 })

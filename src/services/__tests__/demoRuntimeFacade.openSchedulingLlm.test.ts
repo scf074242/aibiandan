@@ -293,12 +293,12 @@ describe('DemoRuntimeFacade open scheduling LLM fallback', () => {
     })
   })
 
-  it.each(openSchedulingCases)('将开放编排话术兜底为版面草案: $userInput', async ({ userInput, label, programType, range }) => {
+  it.each(openSchedulingCases)('显式草案请求会把开放编排话术兜底为版面草案: $userInput', async ({ userInput, label, programType, range }) => {
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState(),
-      userInput,
+      userInput: `生成版面草案：${userInput}`,
       currentSchedule: [],
       history: [],
     })

@@ -74,7 +74,7 @@ describe('OpenClawBridge atomic fallback', () => {
       feedback: {
         content: '上一条待补充的修改任务已经超时失效，请重新描述完整需求。',
         processType: 'general',
-        processTypeLabel: '上下文已失效',
+        processTypeLabel: '上一条已失效',
       },
     })
 

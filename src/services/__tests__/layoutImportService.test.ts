@@ -58,6 +58,28 @@ describe('LayoutImportService', () => {
     expect(result.columns.some((column) => column.defaultProgramType === 'drama')).toBe(true)
   })
 
+  it('保留上传版面中栏目、节目和裸名称的检索约束差异', async () => {
+    const service = new LayoutImportService()
+    const file = createWorkbookFile({
+      Friday: [
+        ['starttime', 'endtime', 'columnname', 'programtype'],
+        ['09:00', '10:00', '栏目：看东方', 'news_magazine'],
+        ['10:00', '11:00', '节目：看东方111期新春特别行动', 'news_magazine'],
+        ['11:00', '12:00', 'ShanghaiEye', 'news_magazine'],
+      ],
+    }, 'draft-constraints.xlsx')
+
+    const result = await service.importFile(file, 'dragon', '2026-04-03')
+    const columnConstraint = result.columns.find((column) => column.columnName === '看东方')
+    const programConstraint = result.columns.find((column) => column.columnName === '看东方111期新春特别行动')
+    const bareConstraint = result.columns.find((column) => column.columnName === 'ShanghaiEye')
+
+    expect(columnConstraint?.draftConstraintKind).toBe('column')
+    expect(programConstraint?.draftConstraintKind).toBe('program')
+    expect(bareConstraint?.draftConstraintKind).toBe('unspecified')
+    expect(result.layoutReference.slots).toHaveLength(3)
+  })
+
   it('无法识别版面模板时抛出错误', async () => {
     const service = new LayoutImportService()
     const file = createWorkbookFile({

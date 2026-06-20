@@ -753,7 +753,7 @@ describe('LayoutIntentRecognizer', () => {
     })
   })
 
-  it('对全天补排这类启动编排命令直接落到 layout_prepare，且不走 LLM 分支', async () => {
+  it('对全天补排这类启动编排命令退出版面草案识别，且不走 LLM 分支', async () => {
     const chat = vi.fn(async () => ({
       content: '{"mode":"layout_prepare","confidence":0.99,"reasoning":"unexpected","ignoreExistingLayout":false}',
     }))
@@ -770,10 +770,7 @@ describe('LayoutIntentRecognizer', () => {
     })
 
     expect(chat).not.toHaveBeenCalled()
-    expect(result.mode).toBe('layout_prepare')
-    expect(result.targetTimeRange).toEqual({
-      start: '06:00:00',
-      end: '23:59:59',
-    })
+    expect(result.mode).toBe('clarify')
+    expect(result.confidence).toBeLessThan(0.72)
   })
 })

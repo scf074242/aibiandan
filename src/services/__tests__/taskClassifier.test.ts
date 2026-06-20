@@ -18,7 +18,7 @@ describe('TaskClassifier', () => {
   it.each([
     '请补齐当前所有空窗',
     '请把当前空窗补掉',
-  ])('对明确补空窗短语“%s”走规则快速判定为 layout_prepare', async (userInput) => {
+  ])('对明确补空窗短语“%s”走规则快速判定为 partial_generate', async (userInput) => {
     const chat = vi.fn(async () => ({
       content: JSON.stringify({
         mode: 'clarify',
@@ -33,7 +33,7 @@ describe('TaskClassifier', () => {
       userInput,
     })
 
-    expect(result.mode).toBe('layout_prepare')
+    expect(result.mode).toBe('partial_generate')
     expect(result.suggestedParams?.userIntent).toBe(userInput)
     expect(chat).toHaveBeenCalled()
   })

@@ -127,10 +127,28 @@ export class OpenClawBridge {
       const nextState = this.updateSessionFromDecision(session.sessionId, decision, input.text)
       return this.toBridgeResult(nextState)
     }
+    const normalizedText = input.text.replace(/\s+/g, '')
+    const hasExplicitLayoutDraftReference = /(?:\u8349\u6848|\u7248\u9762|\u5f53\u524d\u7248\u9762|\u8fd9\u4e2a\u7248\u9762|\u8be5\u7248\u9762|\u5f53\u524d\u8349\u6848|\u8fd9\u4e2a\u8349\u6848|\u8be5\u8349\u6848)/u.test(normalizedText)
+    const hasLayoutDraftMutationVerb = /(?:\u6539\u6210|\u6539\u4e3a|\u8c03\u6574\u4e3a|\u6362\u6210|\u66ff\u6362|\u5220\u9664|\u5220\u6389|\u79fb\u9664|\u53bb\u6389|\u589e\u52a0|\u65b0\u589e|\u62c6\u5206|\u5408\u5e76)/u.test(normalizedText)
     const shouldPrioritizeLayoutDraft = Boolean(
-      activeLayoutDraft && /(?:\u8349\u6848|\u7248\u9762|\u65f6\u6bb5|\u6539\u6210|\u6539\u4e3a|\u8c03\u6574\u4e3a|\u6362\u6210|\u66ff\u6362|\u5220\u9664|\u5220\u6389|\u79fb\u9664|\u53bb\u6389)/u.test(input.text.replace(/\s+/g, '')),
-
+      activeLayoutDraft && hasExplicitLayoutDraftReference && hasLayoutDraftMutationVerb,
     )
+    if (activeLayoutDraft && shouldPrioritizeLayoutDraft && /(?:\u5220\u9664|\u5220\u6389|\u79fb\u9664|\u53bb\u6389).*(?:\u8349\u6848|\u7248\u9762|\u65f6\u6bb5)/u.test(input.text.replace(/\s+/g, ''))) {
+      const decision: RuntimeDecision = {
+        kind: 'layout_draft',
+        feedback: {
+          content: '已按你的要求更新当前版面草案。',
+          processType: 'planning',
+          processTypeLabel: '版面草案',
+          explanation: '当前桥接会话存在待确认版面草案，删除草案时段应优先作为版面微调，不进入节目单原子删除。',
+        },
+        draft: activeLayoutDraft,
+        feasibilityReport: activeLayoutDraftFeasibility ?? await this.previewLatestLayoutDraftFeasibility(activeLayoutDraft, input),
+        orchestrationMode: activeLayoutDraftMode ?? 'full_generate',
+      }
+      const nextState = this.updateSessionFromDecision(session.sessionId, decision, input.text)
+      return this.toBridgeResult(nextState)
+    }
     const pendingAtomicContext = shouldPrioritizeLayoutDraft ? null : this.resolvePendingAtomicContext(session)
 
     const decision = await this.runtimeFacade.submitInstruction({
@@ -145,6 +163,8 @@ export class OpenClawBridge {
       pendingAtomicContext,
       history: input.history,
       agentCoreEnabled: true,
+      preferDraftFirstFormalOrchestration: true,
+      preferLayoutDraftRefine: shouldPrioritizeLayoutDraft,
     })
 
     if (decision.kind === 'execute_command') {
@@ -694,7 +714,7 @@ export class OpenClawBridge {
       sessionId: state.sessionId,
       status: state.status,
       summary: state.summary,
-      message: state.lastExecution?.message,
+      message: state.lastExecution?.message ?? (state.status === 'completed' ? state.summary : undefined),
       payload: {
         conversationId: state.conversationId,
         compatibility: {

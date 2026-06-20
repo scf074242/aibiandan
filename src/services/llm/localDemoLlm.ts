@@ -1,5 +1,6 @@
 import type { ChatMessage, LLMResponse } from '@/types/llm'
 import { looksLikeProgramSchedulingRequest, parseSchedulingTimeRange } from '@/services/schedulingIntentHeuristics'
+import { stripRestartSemanticDaypart } from '@/services/layoutDraftSemanticCleaner'
 
 const normalizeInput = (value: string) => value.trim().replace(/\s+/g, '')
 
@@ -76,6 +77,13 @@ const inferTimeRange = (input: string): { start: string; end: string } | undefin
 const extractSemanticLabel = (input: string): string | undefined => {
   const normalized = normalizeInput(input)
 
+  const restart = normalized.match(/(?:这个|当前|刚才的|原来的)?(?:版面草案|草案|版面)(?:不要了|不用了|取消掉|放弃|清掉|清除|删掉|删除)(?:重新做|重新|重做|再来|再做|改做|换成|改成|做成|来一版|做一版|排一版|做)?(.+)$/)
+  if (restart?.[1]) {
+    const restartLabel = restart[1].replace(/^(?:重新做|重新|重做|再来|再做|改做|换成|改成|做成|来一版|做一版|排一版|做)/, '')
+    const cleanedRestartLabel = cleanSemanticLabel(stripRestartSemanticDaypart(restartLabel) ?? restartLabel)
+    if (cleanedRestartLabel) return cleanedRestartLabel
+  }
+
   const preference = normalized.match(/以(.+?)为主/)
     ?? normalized.match(/主打(.+)$/)
     ?? normalized.match(/围绕(.+)$/)
@@ -84,9 +92,10 @@ const extractSemanticLabel = (input: string): string | undefined => {
     return cleanSemanticLabel(preference[1])
   }
 
-  const verbTail = normalized.match(/(?:替换成|替换为|改成|改为|换成|调整为|统一成|变成|安排|编排|排入|排|做成|做个|做一段|做|准备|制作|生成|创建|来个|来一份|来一版|来一段|搞一版|弄一版|补上|补一段|加个|加一段|加一点|垫个|垫一点|垫一段|串场|衔接|过渡|收个)(.+)$/)
-  const raw = verbTail?.[1] ?? normalized
-  return cleanSemanticLabel(raw)
+  const verbTail = normalized.match(/(?:替换成|替换为|改成|改为|换成|调整为|统一成|变成|安排|编排|排入|排|继续播|接着播|续播|顺播|做成|做个|做一段|做|准备|制作|生成|创建|来个|来一份|来一版|来一段|搞一版|弄一版|补上|补一段|加个|加一段|加一点|垫个|垫一点|垫一段|串场|衔接|过渡|收个)(.+)$/)
+  const fromVerbTail = cleanSemanticLabel(verbTail?.[1] ?? '')
+  if (fromVerbTail) return fromVerbTail
+  return cleanSemanticLabel(normalized)
 }
 
 const cleanSemanticLabel = (value: string): string | undefined => {
@@ -103,13 +112,18 @@ const cleanSemanticLabel = (value: string): string | undefined => {
     .replace(/(?:接昨天进度|接昨日进度|接昨天|接昨日|昨天进度|昨日进度|顺播|续播|继续播|接着播|顺着排)/g, '')
     .replace(/(?:顺着|按照|根据)?(?:当前|现有|今天)?(?:版面|节目单|编排单)?(?:补中间集|补缺集|补空档|补空窗|补空缺)/g, '')
     .replace(/^(?:我准备在|请|给我|帮我|帮忙|麻烦|需要|想要|先|全部|都|整体|统一|一个|一份|一版|一段|加个|加一段|加一点|垫个|垫一点|垫一段|做个|做一段|的)+/g, '')
-    .replace(/(?:节目单|编排单|串联单|排单|直播单|轮播单|播单|节目|版面|单子)+$/g, '')
+    .replace(/^(?:保留|保持)(?:现有|原有|当前)?(?:上午|中午|午间|下午|晚间|晚上|全天|整天|全日)?(?:节目|栏目)?/g, '')
+    .replace(/^(?:补齐|补排|填充|补上|补满|只填|只补)(?:当前|剩余|所有)?(?:空窗|空缺|缺口|节目)?/g, '')
+    .replace(/[，,。；;、]*(?:生成|创建|新建|准备|制作|做成|做一版|做一份|来一版|来一份|做个|做一个|来个|排一版|排一份)?(?:轮播)?版面草案$/g, '')
+    .replace(/[，,。；;、]*(?:生成|创建|新建|准备|制作|做成|做一版|做一份|来一版|来一份|做个|做一个|来个|排一版|排一份)?草案$/g, '')
+    .replace(/(?:节目单|编排单|串联单|排单|直播单|轮播单|播单|节目|版面|草案|单子)+$/g, '')
     .replace(/[，,。；;、]/g, '')
     .replace(/进行/g, '')
     .replace(/(?:的)+$/g, '')
     .trim()
 
   if (!cleaned) return undefined
+  if (/^(?:版面草案|草案|版面|节目单|播单|轮播单|直播单)$/.test(cleaned)) return undefined
   if (/静安寺/.test(cleaned) && /户外|外场|直播/.test(cleaned)) {
     return '静安寺户外直播轮播'
   }

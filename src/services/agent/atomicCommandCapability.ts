@@ -1838,19 +1838,26 @@ export class AtomicCommandCapability implements AgentCapability {
       return this.confirmPendingReplace(input, runtime, pendingTask)
     }
 
+    const explicitSelectedCandidateId = this.resolveSelectedCandidateId(input, pendingTask)
+    const isCandidateSelectionTurn = Boolean(explicitSelectedCandidateId) && this.isPendingCandidateSelectionOpen(pendingTask)
     const latestSlots = this.parseReplace(input)
     const invalidTargetSelectionResult = this.buildInvalidPendingTargetSelectionResultIfNeeded(input, runtime, pendingTask)
     if (invalidTargetSelectionResult) return invalidTargetSelectionResult
     const selectedTargetId = this.resolveSelectedTargetItemId(input, pendingTask)
-    const targetTime = latestSlots.targetTime ?? this.readStringSlot(pendingTask.collectedSlots.targetTime)
+    const targetTime = isCandidateSelectionTurn
+      ? this.readStringSlot(pendingTask.collectedSlots.targetTime) ?? latestSlots.targetTime
+      : latestSlots.targetTime ?? this.readStringSlot(pendingTask.collectedSlots.targetTime)
     const targetItemId = latestSlots.targetItemId
       ?? selectedTargetId
       ?? this.readStringSlot(pendingTask.collectedSlots.targetItemId)
     const pendingTargetProgramName = this.readStringSlot(pendingTask.collectedSlots.targetProgramName)
-    const targetProgramName = pendingTargetProgramName
-      ?? (!targetTime && !targetItemId ? latestSlots.targetProgramName : undefined)
-    const replacementHint = latestSlots.replacementHint ?? this.readStringSlot(pendingTask.collectedSlots.replacementHint)
-    const selectedCandidateId = this.resolveSelectedCandidateId(input, pendingTask)
+    const targetProgramName = isCandidateSelectionTurn
+      ? pendingTargetProgramName
+      : pendingTargetProgramName ?? (!targetTime && !targetItemId ? latestSlots.targetProgramName : undefined)
+    const replacementHint = isCandidateSelectionTurn
+      ? this.readStringSlot(pendingTask.collectedSlots.replacementHint) ?? latestSlots.replacementHint
+      : latestSlots.replacementHint ?? this.readStringSlot(pendingTask.collectedSlots.replacementHint)
+    const selectedCandidateId = explicitSelectedCandidateId
       ?? (this.isPendingCandidateSelectionOpen(pendingTask) ? undefined : latestSlots.selectedCandidateId)
       ?? this.readStringSlot(pendingTask.collectedSlots.candidateId)
     const hasTargetSelector = Boolean(targetTime || targetItemId || targetProgramName)
@@ -1862,7 +1869,7 @@ export class AtomicCommandCapability implements AgentCapability {
       pendingTask,
       latestUserInput: input.userInput,
       slotPatch: {
-        ...(latestSlots.targetTime
+        ...(!isCandidateSelectionTurn && latestSlots.targetTime
           ? {
               targetTime: {
                 value: latestSlots.targetTime,
@@ -1882,7 +1889,7 @@ export class AtomicCommandCapability implements AgentCapability {
               },
             }
           : {}),
-        ...(!pendingTargetProgramName && latestSlots.targetProgramName && !targetTime && !targetItemId
+        ...(!isCandidateSelectionTurn && !pendingTargetProgramName && latestSlots.targetProgramName && !targetTime && !targetItemId
           ? {
               targetProgramName: {
                 value: latestSlots.targetProgramName,
@@ -1892,7 +1899,7 @@ export class AtomicCommandCapability implements AgentCapability {
               },
             }
           : {}),
-        ...(latestSlots.replacementHint
+        ...(!isCandidateSelectionTurn && latestSlots.replacementHint
           ? {
               replacementHint: {
                 value: latestSlots.replacementHint,
@@ -2157,7 +2164,16 @@ export class AtomicCommandCapability implements AgentCapability {
       playlistId: input.playlistId,
       source: replaceSlots.source,
     })
-    const context = await runtime.dataGateway.loadContext(input)
+    let context = await runtime.dataGateway.loadContext(input)
+    const pendingCandidate = replaceSlots.selectedCandidateId
+      ? this.buildCandidateFromPendingRecommendation(replaceSlots.pendingTask, replaceSlots.selectedCandidateId, context)
+      : undefined
+    if (pendingCandidate && !context.programCandidates.some((candidate) => candidate.id === pendingCandidate.id)) {
+      context = {
+        ...context,
+        programCandidates: [pendingCandidate, ...context.programCandidates],
+      }
+    }
     const contextChangedResult = this.buildPendingContextChangedResultIfNeeded(input, runtime, replaceSlots.pendingTask, context)
     if (contextChangedResult) return contextChangedResult
     const missingScheduleSourceResult = this.buildScheduleSourceMissingResultIfNeeded(input, runtime, context, 'replace', replaceSlots.pendingTask)
@@ -2528,10 +2544,16 @@ export class AtomicCommandCapability implements AgentCapability {
     const invalidCandidateSelectionResult = this.buildInvalidPendingCandidateSelectionResultIfNeeded(input, runtime, pendingTask)
     if (invalidCandidateSelectionResult) return invalidCandidateSelectionResult
 
+    const explicitSelectedCandidateId = this.resolveSelectedCandidateId(input, pendingTask)
+    const isCandidateSelectionTurn = Boolean(explicitSelectedCandidateId) && this.isPendingCandidateSelectionOpen(pendingTask)
     const latestSlots = this.parseInsert(input)
-    const targetTime = latestSlots.targetTime ?? this.readStringSlot(pendingTask.collectedSlots.targetTime)
-    const programHint = latestSlots.programHint ?? this.readStringSlot(pendingTask.collectedSlots.programHint)
-    const selectedCandidateId = this.resolveSelectedCandidateId(input, pendingTask)
+    const targetTime = isCandidateSelectionTurn
+      ? this.readStringSlot(pendingTask.collectedSlots.targetTime) ?? latestSlots.targetTime
+      : latestSlots.targetTime ?? this.readStringSlot(pendingTask.collectedSlots.targetTime)
+    const programHint = isCandidateSelectionTurn
+      ? this.readStringSlot(pendingTask.collectedSlots.programHint) ?? latestSlots.programHint
+      : latestSlots.programHint ?? this.readStringSlot(pendingTask.collectedSlots.programHint)
+    const selectedCandidateId = explicitSelectedCandidateId
       ?? (this.isPendingCandidateSelectionOpen(pendingTask) ? undefined : latestSlots.selectedCandidateId)
       ?? this.readStringSlot(pendingTask.collectedSlots.candidateId)
     const missingSlots = [
@@ -2542,7 +2564,7 @@ export class AtomicCommandCapability implements AgentCapability {
       pendingTask,
       latestUserInput: input.userInput,
       slotPatch: {
-        ...(latestSlots.targetTime
+        ...(!isCandidateSelectionTurn && latestSlots.targetTime
           ? {
               targetTime: {
                 value: latestSlots.targetTime,
@@ -2552,7 +2574,7 @@ export class AtomicCommandCapability implements AgentCapability {
               },
             }
           : {}),
-        ...(latestSlots.programHint
+        ...(!isCandidateSelectionTurn && latestSlots.programHint
           ? {
               programHint: {
                 value: latestSlots.programHint,
@@ -2770,7 +2792,16 @@ export class AtomicCommandCapability implements AgentCapability {
       playlistId: input.playlistId,
       source: insertSlots.source,
     })
-    const context = await runtime.dataGateway.loadContext(input)
+    let context = await runtime.dataGateway.loadContext(input)
+    const pendingCandidate = insertSlots.selectedCandidateId
+      ? this.buildCandidateFromPendingRecommendation(insertSlots.pendingTask, insertSlots.selectedCandidateId, context)
+      : undefined
+    if (pendingCandidate && !context.programCandidates.some((candidate) => candidate.id === pendingCandidate.id)) {
+      context = {
+        ...context,
+        programCandidates: [pendingCandidate, ...context.programCandidates],
+      }
+    }
     const contextChangedResult = this.buildPendingContextChangedResultIfNeeded(input, runtime, insertSlots.pendingTask, context)
     if (contextChangedResult) return contextChangedResult
     const missingScheduleSourceResult = this.buildScheduleSourceMissingResultIfNeeded(input, runtime, context, 'insert', insertSlots.pendingTask)
@@ -4687,7 +4718,29 @@ export class AtomicCommandCapability implements AgentCapability {
       }
     }
 
-    const judgePool = this.prepareCandidateJudgePool(candidates, input, context, commandIntent, targetTime, replacementTarget)
+    const exactReplacementCandidates = commandIntent === 'replace'
+      ? this.filterExactReplacementHintCandidates(candidates, input)
+      : []
+    const judgeCandidates = exactReplacementCandidates.length > 0 ? exactReplacementCandidates : candidates
+    if (judgeCandidates.length > 1) {
+      runtime.trace.record('needs_selection', '候选判断前发现多个可用候选，等待编排人员选择。', {
+        commandIntent,
+        candidateCount: judgeCandidates.length,
+        candidateOptionIds: judgeCandidates.slice(0, 8).map((candidate) => candidate.id),
+      })
+      return {
+        candidate: null,
+        candidateOptions: judgeCandidates,
+        diagnostics: {
+          method: 'candidate_judge',
+          source: 'fallback',
+          candidateCount: judgeCandidates.length,
+          candidateOptionIds: judgeCandidates.slice(0, 8).map((candidate) => candidate.id),
+          reason: '候选库里有多个可用节目，不能替编排人员自动选择其中一个。',
+        },
+      }
+    }
+    const judgePool = this.prepareCandidateJudgePool(judgeCandidates, input, context, commandIntent, targetTime, replacementTarget)
     const candidate = await runtime.candidateJudge.selectBestCandidate({
       userInput: input.userInput,
       playlistType: context.playlistType,
@@ -4703,15 +4756,52 @@ export class AtomicCommandCapability implements AgentCapability {
         source: candidate ? 'fallback' : 'none',
         selectedCandidateId: candidate?.id,
         selectedProgramCode: candidate?.programCode,
-        candidateCount: candidates.length,
+        candidateCount: judgeCandidates.length,
         professionalAssessment: candidate
           ? judgePool.assessments[candidate.id] ?? this.buildProfessionalAssessment(candidate, input, context, commandIntent, targetTime, replacementTarget)
           : undefined,
         reason: candidate
-          ? '没有更强的顺播证据，因此由候选判断选择最贴合的内容。'
+          ? exactReplacementCandidates.length > 0
+            ? '替换命令存在精确节目名候选，因此只在精确候选内判断，避免自动改选相近节目。'
+            : '没有更强的顺播证据，因此由候选判断选择最贴合的内容。'
           : '顺播检查和候选判断后，仍没有匹配到可用候选。',
       },
     }
+  }
+
+  private filterExactReplacementHintCandidates(
+    candidates: AgentProgramCandidate[],
+    input: AgentSubmitInput,
+  ): AgentProgramCandidate[] {
+    const replacementHint = this.resolveExactReplacementHint(input)
+    if (!replacementHint) return []
+    const normalizedHint = this.normalizeSearchText(replacementHint)
+    if (!normalizedHint) return []
+    return candidates.filter((candidate) => (
+      this.normalizeSearchText(candidate.programName) === normalizedHint
+      || this.normalizeSearchText(candidate.instanceName) === normalizedHint
+    ))
+  }
+
+  private resolveExactReplacementHint(input: AgentSubmitInput): string | undefined {
+    const interpretedHint = this.cleanReplacementHint(input.interpretation?.slots?.replacementHint)
+    if (interpretedHint) return interpretedHint
+
+    const pendingHint = this.cleanReplacementHint(
+      this.readStringSlot(input.pendingTask?.collectedSlots.replacementHint),
+    )
+    if (pendingHint) return pendingHint
+
+    return this.cleanReplacementHint(this.extractReplaceProgramHint(input.userInput))
+  }
+
+  private cleanReplacementHint(value?: string): string | undefined {
+    const cleaned = value
+      ?.replace(/[《》"'“”]/gu, '')
+      .replace(/^(?:节目|栏目|内容|素材)[:：]/u, '')
+      .replace(/(?:节目|栏目|内容|素材)$/u, '')
+      .trim()
+    return cleaned || undefined
   }
 
   private findProfessionalHardBlockedCandidate(
@@ -4765,9 +4855,13 @@ export class AtomicCommandCapability implements AgentCapability {
       contextFingerprint: this.buildPendingContextFingerprint(options.context),
       contextSources: this.buildPendingContextSourceSnapshots(options.context),
     })
-    const message = options.intent === 'insert'
+    const sequenceMessage = options.intent === 'insert'
       ? '我找到了多个都符合顺播规则的候选节目，还需要你确认要插入哪一个。'
       : '我找到了多个都符合顺播规则的候选节目，还需要你确认要替换成哪一个。'
+    const genericMessage = options.intent === 'insert'
+      ? '我找到了多个可插入候选，还需要你确认要插入哪一个。'
+      : '我找到了多个可替换候选，还需要你确认要使用哪一个。'
+    const message = options.diagnostics.method === 'tv_sequence' ? sequenceMessage : genericMessage
 
     return {
       status: 'needs_selection',
@@ -4796,6 +4890,27 @@ export class AtomicCommandCapability implements AgentCapability {
       },
       explanation: message,
       trace: runtime.trace.getTrace(),
+    }
+  }
+
+  private buildCandidateFromPendingRecommendation(
+    pendingTask: AgentSubmitInput['pendingTask'] | undefined,
+    candidateId: string,
+    context: SchedulingContext,
+  ): AgentProgramCandidate | undefined {
+    const recommendation = pendingTask?.recommendations?.find((item) => item.candidateId === candidateId)
+    if (!recommendation) return undefined
+    return {
+      id: recommendation.candidateId,
+      programId: recommendation.candidateId,
+      programCode: recommendation.programCode,
+      programName: recommendation.programName,
+      instanceName: recommendation.programName,
+      channelId: context.channelId,
+      duration: recommendation.duration,
+      programType: recommendation.programType,
+      materialStatus: recommendation.blockingCodes?.includes('material_readiness') ? 'missing' : 'ready',
+      rightsStatus: recommendation.blockingCodes?.includes('rights_readiness') ? 'missing' : 'ready',
     }
   }
 
@@ -5960,7 +6075,7 @@ export class AtomicCommandCapability implements AgentCapability {
     const sourceChanges = this.describePendingContextSourceChanges(pendingTask.contextSources, currentSources)
     if (
       sourceChanges.length > 0
-      && sourceChanges.every((change) => !this.isRelevantPendingContextSourceChange(pendingTask.intent, change.sourceKey))
+      && sourceChanges.every((change) => !this.isRelevantPendingContextSourceChange(pendingTask, change.sourceKey))
     ) {
       runtime.trace.record('planning', 'Ignored pending context source changes that do not affect this atomic command.', {
         pendingTaskId: pendingTask.id,
@@ -6011,7 +6126,16 @@ export class AtomicCommandCapability implements AgentCapability {
     return buildAgentPendingContextSourceSnapshots(context)
   }
 
-  private isRelevantPendingContextSourceChange(intent: AtomicCommandIntent, sourceKey: string): boolean {
+  private isRelevantPendingContextSourceChange(pendingTask: AgentPendingTask, sourceKey: string): boolean {
+    if (
+      pendingTask.phase === 'needs_selection'
+      && sourceKey === 'candidates'
+      && (pendingTask.recommendations?.length ?? 0) > 0
+    ) {
+      return false
+    }
+
+    const intent = pendingTask.intent
     if (intent === 'insert' || intent === 'replace') {
       return ['today', 'candidates', 'readiness', 'history', 'constraints', 'policy'].includes(sourceKey)
     }

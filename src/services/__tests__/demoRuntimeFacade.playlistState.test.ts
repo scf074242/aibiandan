@@ -131,6 +131,10 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     })
     expect(result.feedback.details?.playlistState).toHaveProperty('playlistId')
     expect(result.feedback.content).toContain('电视播单')
+    expect(result.feedback.content).toContain('已同时加载当前频道和日期的版面草案')
+    expect(result.feedback.details?.layoutDraftStatus).toBe('loaded')
+    expect(result.feedback.details?.layoutDraftSource).toBe('channel_default')
+    expect(result.feedback.details?.layoutDraftSlotCount).toBeGreaterThan(0)
   })
 
   it('电视播单文件状态会保留创建时频道与日期快照', async () => {
@@ -172,6 +176,15 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     })
     expect(result.feedback.details?.playlistState).toHaveProperty('playlistId')
     expect(result.feedback.content).toContain('内容匹配优先')
+    expect(result.feedback.content).toContain('当前还不知道轮播要排多长')
+    expect(result.feedback.details?.layoutDraftStatus).toBe('missing')
+    expect(result.feedback.details?.needsStructuredBasis).toBe(true)
+    expect(result.feedback.details?.suggestedActions).toEqual([
+      '说明轮播总时长',
+      '说明主要内容',
+      '选择轮播策略',
+      '上传或生成轮播草案',
+    ])
   })
 
   it('创建轮播单带时长时按总时长和 0 点起算处理', async () => {
@@ -193,6 +206,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).toContain('0 点起算')
     expect(result.feedback.content).not.toContain('03:00:00')
     expect(result.feedback.content).toContain('不绑定具体日期和电视频道时段')
+    expect(result.feedback.content).toContain('继续补充主要内容')
+    expect(result.feedback.details?.needsStructuredBasis).toBe(false)
   })
 
   it('支持自然说法创建一份新媒体轮播单', async () => {
@@ -313,9 +328,11 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.statusHint).toBe('accepted')
     expect(result.feedback.content).toContain('不绑定具体日期和电视频道时段')
     expect(result.feedback.content).toContain('总时长 1小时')
-    expect(result.feedback.content).toContain('0 点起算')
+    expect(result.feedback.content).not.toContain('0 点起算')
     expect(result.feedback.content).not.toContain('14:00')
     expect(result.feedback.content).not.toContain('15:00')
+    expect(result.layoutDraft?.draftKind).toBe('duration_segments')
+    expect(result.layoutDraft?.targetDurationSeconds).toBe(60 * 60)
     expect(result.feedback.details?.playlistState).toMatchObject({
       playlistType: 'rotation',
       rotationStrategy: 'content_match',
@@ -357,7 +374,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).toContain('收视率优先')
   })
 
-  it('电视播单下明确插入命令可直接执行', async () => {
+  it('电视播单下明确插入命令存在多个候选时等待用户选择', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -378,9 +395,11 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('execute_command')
-    if (result.kind !== 'execute_command') throw new Error('expected execute_command')
-    expect(result.execution.command.action).toBe('insert')
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
+    expect(result.pendingAtomicContext.action).toBe('insert')
+    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
+    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(1)
   })
 
   it('轮播单下明确插入命令仍返回推荐列表等待用户选择', async () => {
@@ -468,7 +487,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(0)
   })
 
-  it('电视播单下可按节目名锚点后方直接插入节目', async () => {
+  it('电视播单下按节目名锚点后方插入节目存在多个候选时等待用户选择', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -483,12 +502,12 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('execute_command')
-    if (result.kind !== 'execute_command') throw new Error('expected execute_command')
-    expect(result.execution.command.action).toBe('insert')
-    expect(result.execution.command.data).toMatchObject({
-      insertTime: '10:00:00',
-    })
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
+    expect(result.pendingAtomicContext.action).toBe('insert')
+    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
+    expect(result.pendingAtomicContext.slots.targetTime).toBe('10:00:00')
+    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(1)
   })
 
   it('轮播单下按节目名锚点后方插入节目仍先返回候选推荐', async () => {
@@ -646,7 +665,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.execution.command.data.itemId).toBe(mockedItem.id)
   })
 
-  it('轮播单下明确替换命令会先给候选并在用户选择后执行', async () => {
+  it('轮播单下明确替换命令会先给候选并在用户选择后按队列压紧执行', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'replace',
       confidence: 0.96,
@@ -663,18 +682,32 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       matchedBy: ['time_window'],
       candidates: [{ ...mockedItem }],
     })
+    const nextItem = {
+      ...mockedItem,
+      id: 'item-1000',
+      programCode: 'P100002',
+      programName: '城市导视',
+      startTime: '10:00:00',
+      endTime: '10:30:00',
+      duration: 1800,
+    }
     await getAtomicCapabilities().appendItems([{
       ...mockedItem,
       startTime: '2026-03-25T09:00:00+08:00',
       endTime: '2026-03-25T10:00:00+08:00',
       sequence: 1,
+    }, {
+      ...nextItem,
+      startTime: '2026-03-25T10:00:00+08:00',
+      endTime: '2026-03-25T10:30:00+08:00',
+      sequence: 2,
     }], { skipValidation: true })
 
     const facade = new DemoRuntimeFacade()
     const first = await facade.submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'rotation', rotationStrategy: 'content_match', isEmpty: false, itemCount: 1 }),
       userInput: '把9点的节目替换成东方新闻',
-      currentSchedule: [mockedItem],
+      currentSchedule: [mockedItem, nextItem],
       history: [],
     })
 
@@ -688,15 +721,18 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     const second = await facade.submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'rotation', rotationStrategy: 'content_match', isEmpty: false, itemCount: 1 }),
       userInput: '第一个',
-      currentSchedule: [mockedItem],
+      currentSchedule: [mockedItem, nextItem],
       pendingAtomicContext: first.pendingAtomicContext,
       history: ['把9点的节目替换成东方新闻'],
     })
 
-    expect(second.kind).toBe('execute_command')
-    if (second.kind !== 'execute_command') throw new Error('expected execute_command')
-    expect(second.execution.command.action).toBe('replace')
-    expect(second.execution.command.data.itemId).toBe(mockedItem.id)
+    expect(second.kind).toBe('agent_execution')
+    if (second.kind !== 'agent_execution') throw new Error('expected agent_execution')
+    expect(second.feedback.content).toContain('队列自然串联')
+    const items = second.result.executionResult?.scheduleItems ?? []
+    expect(items[0]?.id).toBe(mockedItem.id)
+    expect(items[1]?.id).toBe(nextItem.id)
+    expect(items[1]?.startTime).toBe(items[0]?.endTime)
   })
 
   it('轮播单下换播类替换命令仍然先给候选推荐', async () => {
@@ -1267,7 +1303,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).not.toContain('\u79fb\u52a8\u5e45\u5ea6')
   })
 
-  it('tv playlist inserts the top high-match candidate directly when explicit title has similar candidates', async () => {
+  it('tv playlist asks the user to choose when explicit title has similar candidates', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -1288,14 +1324,12 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('execute_command')
-    if (result.kind !== 'execute_command') throw new Error('expected execute_command')
-    expect(result.execution.command.action).toBe('insert')
-    expect(result.execution.command.data).toMatchObject({
-      insertTime: '09:00:00',
-    })
-    expect(result.execution.details?.candidateCount).toBeGreaterThan(1)
-    expect(result.execution.details?.playlistState).toMatchObject({ playlistType: 'tv' })
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
+    expect(result.pendingAtomicContext.action).toBe('insert')
+    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
+    expect(result.pendingAtomicContext.slots.targetTime).toBe('09:00:00')
+    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(1)
   })
 
   it('explicit insert title with no hard keyword match is blocked instead of falling back to unrelated candidates', async () => {
@@ -1326,7 +1360,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).toContain('\u751f\u547d\u6811\u7535\u89c6\u5267')
   })
 
-  it('tv playlist directly inserts the top semantic live-guide candidate', async () => {
+  it('tv playlist asks before inserting a semantic live-guide candidate when multiple candidates remain', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -1346,15 +1380,12 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('execute_command')
-    if (result.kind !== 'execute_command') throw new Error('expected execute_command')
-    expect(result.execution.command.action).toBe('insert')
-    expect(result.execution.command.data).toMatchObject({
-      insertTime: '14:00:00',
-    })
-    const selectedCandidateName = String(result.execution.details?.selectedCandidateName ?? '')
-    expect(selectedCandidateName).toMatch(/\u9759\u5b89\u5bfa|\u5916\u573a|\u76f4\u64ad|\u5bfc\u89c6/)
-    expect(result.execution.details?.playlistState).toMatchObject({ playlistType: 'tv' })
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
+    expect(result.pendingAtomicContext.action).toBe('insert')
+    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
+    expect(result.pendingAtomicContext.slots.targetTime).toBe('14:00:00')
+    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(1)
   })
 
   it('tv playlist does not directly execute vague low-match semantic insert intent', async () => {
@@ -1484,13 +1515,13 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       latestUserInput: '',
       pendingContext: {
         intent: 'insert',
-        phase: 'needs_confirmation',
-        missingSlots: ['confirmation'],
+        phase: 'needs_selection',
+        missingSlots: ['candidateId'],
       },
     })
   })
 
-  it('Agent Core pending confirmation can be cancelled with a clear no-write reply', async () => {
+  it('Agent Core pending candidate selection can be cancelled with a clear no-write reply', async () => {
     const facade = new DemoRuntimeFacade()
     const scheduleState = createScheduleState({
       playlistType: 'rotation',
@@ -1518,8 +1549,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       agentCoreEnabled: true,
     })
     expect(confirmation.kind).toBe('pending_atomic_context')
-    if (confirmation.kind !== 'pending_atomic_context') throw new Error('expected pending confirmation')
-    expect(confirmation.pendingAtomicContext.agentPendingTask?.phase).toBe('needs_confirmation')
+    if (confirmation.kind !== 'pending_atomic_context') throw new Error('expected pending selection')
+    expect(confirmation.pendingAtomicContext.agentPendingTask?.phase).toBe('needs_selection')
 
     const cancelled = await facade.submitInstruction({
       scheduleState,
@@ -1554,6 +1585,28 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).toContain('看东方')
     expect(result.feedback.details?.queryResult).toMatchObject({
       kind: 'time_lookup',
+      totalCount: 1,
+    })
+    expect(result.feedback.details?.affectedItemIds).toBeUndefined()
+  })
+
+  it('queries the current playlist as an overview instead of treating playlist as a programme name', async () => {
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({ playlistType: 'rotation', isEmpty: false, itemCount: 1 }),
+      userInput: '查询当前播单',
+      currentSchedule: [mockedItem],
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: false,
+    })
+
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected message')
+    expect(result.statusHint).toBe('completed')
+    expect(result.feedback.content).toContain('当前轮播单共有 1 条节目')
+    expect(result.feedback.content).not.toContain('和“播单”匹配')
+    expect(result.feedback.details?.queryResult).toMatchObject({
+      kind: 'schedule_overview',
       totalCount: 1,
     })
     expect(result.feedback.details?.affectedItemIds).toBeUndefined()
@@ -1597,7 +1650,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.details?.affectedItemIds).toBeUndefined()
   })
 
-  it('Agent Core candidate misses show a brief searchable retry trace in the user-facing reply', async () => {
+  it('Agent Core candidate misses keep search evidence out of the main assistant reply', async () => {
     const facade = new DemoRuntimeFacade()
     const scheduleState = createScheduleState({
       playlistType: 'tv',
@@ -1617,11 +1670,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
     expect(result.feedback.content).toContain('我先按')
     expect(result.feedback.content).toContain('查了当前候选库')
-    expect(result.feedback.content).toContain('简要检索结果')
-    expect(result.feedback.content).toContain('模型先抓取关键词')
-    expect(result.feedback.content).toContain('候选源')
-    expect(result.feedback.content).toContain('相近关键词')
-    expect(result.feedback.content).toContain('继续保留这个任务')
+    expect(result.feedback.content).toContain('你可以补充栏目名、节目标题或更具体的内容线索')
+    expect(result.feedback.content).not.toMatch(/简要检索结果|模型先抓取关键词|候选源|结构化|上下文/u)
     expect(result.feedback.details?.constraintReport).toMatchObject({
       issues: [
         expect.objectContaining({
@@ -1634,7 +1684,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     })
   })
 
-  it('Agent Core rotation short-clip confirmation shows candidate search in the main reply', async () => {
+  it('Agent Core rotation short-clip confirmation separates the assistant reply from process evidence', async () => {
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({
         playlistType: 'rotation',
@@ -1652,9 +1702,10 @@ describe('DemoRuntimeFacade playlist state policy', () => {
 
     expect(result.kind).toBe('pending_atomic_context')
     if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.feedback.content).toContain('检索结果')
-    expect(result.feedback.content).toContain('城市形象春日花路短片')
-    expect(result.feedback.content).toContain('候选源返回')
+    expect(result.feedback.content).toContain('城市微短片：春日花路 30秒')
+    expect(result.feedback.content).toContain('需要确认')
+    expect(result.feedback.content).not.toMatch(/检索结果|候选源返回|候选源|结构化|上下文|runtime|接口/u)
+    expect(result.feedback.details?.assistantProcessSummary).toContain('已找到 1 个可参考候选。')
     expect(result.pendingAtomicContext.agentPendingTask?.phase).toBe('needs_confirmation')
     expect(result.feedback.details?.auditSummary).toMatchObject({
       contextSources: {

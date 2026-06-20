@@ -43,6 +43,7 @@ export type PlaylistType = 'none' | 'tv' | 'rotation'
 export type RotationPlaylistStrategy = 'content_match' | 'rating' | 'trending'
 
 export interface ScheduleState {
+  playlistId?: string
   channelId: string
   channelName: string
   date: string
@@ -670,6 +671,7 @@ export interface ColumnDefinition {
   defaultProgramType: string
   isSequential?: boolean
   semanticLabel?: string
+  draftConstraintKind?: 'column' | 'program' | 'unspecified'
   queryHints?: string[]
   selectionPolicy?: DraftSegmentSelectionPolicy
   source?: 'generated' | 'imported' | 'default'
@@ -697,6 +699,7 @@ export interface LayoutDraftSpecSegment {
   startTime: string
   endTime: string
   programType: string
+  constraintKind?: 'column' | 'program' | 'unspecified'
   queryHints?: string[]
   sequential?: boolean
   selectionPolicy?: DraftSegmentSelectionPolicy
@@ -726,9 +729,15 @@ export interface LayoutDraft {
   id: string
   channelId: string
   date: string
+  effectiveFrom?: string
+  effectiveTo?: string
   version: number
   source: 'generated' | 'uploaded' | 'channel_default'
   userIntent: string
+  draftKind?: 'time_slots' | 'duration_segments'
+  purpose?: string
+  targetDurationSeconds?: number
+  durationSegments?: LayoutDraftDurationSegment[]
   strategyProfile?: LayoutDraftStrategyProfile
   coverage: {
     start: string
@@ -737,6 +746,16 @@ export interface LayoutDraft {
   layoutReference: LayoutReference
   columns: GeneratedColumnDefinition[]
   warnings?: string[]
+}
+
+export interface LayoutDraftDurationSegment {
+  id: string
+  label: string
+  contentHint: string
+  targetDurationSeconds: number
+  selectionPriority: DraftSelectionPriority
+  repeatPolicy?: 'avoid_repeat' | 'allow_repeat_when_needed'
+  fallbackPolicy?: 'ask_user' | 'leave_short' | 'use_fallback_strategy'
 }
 
 export type LayoutDraftStrategyKind = 'tv_channel' | 'carousel'

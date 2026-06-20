@@ -9,6 +9,7 @@ export interface InsertParams {
   rawProgramText?: string
   semanticLabel?: string
   programTypeHint?: string
+  expectedDurationSeconds?: number
 }
 
 export interface MoveParams {
@@ -40,14 +41,14 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime，以及可选的 programName、rawProgramText、semanticLabel、programTypeHint，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。',
+              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime，以及可选的 programName、rawProgramText、semanticLabel、programTypeHint、expectedDurationSeconds，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。用户明确说30分钟、半小时、1小时等时长时，expectedDurationSeconds 必须换算为秒。',
           },
           {
             role: 'user',
             content:
               `用户指令: ${context.userInput}\n` +
               this.buildContextPrompt(context) +
-              '输出格式: {"targetTime":"09:00:00","programName":"看东方","rawProgramText":"看东方","semanticLabel":"新闻资讯","programTypeHint":"news_magazine"}',
+              '输出格式: {"targetTime":"09:00:00","programName":"看东方","rawProgramText":"看东方","semanticLabel":"新闻资讯","programTypeHint":"news_magazine","expectedDurationSeconds":1800}',
           },
         ],
         { temperature: 0, maxTokens: 120, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_insert_params' },
@@ -66,6 +67,9 @@ export class ParamExtractor {
         rawProgramText: parsed.rawProgramText,
         semanticLabel: parsed.semanticLabel,
         programTypeHint: parsed.programTypeHint,
+        expectedDurationSeconds: typeof parsed.expectedDurationSeconds === 'number'
+          ? parsed.expectedDurationSeconds
+          : this.extractInsertDurationSeconds(context.userInput) ?? undefined,
       })
     } catch {
       return ruleBased ?? null
@@ -215,6 +219,7 @@ export class ParamExtractor {
     return this.normalizeInsertParams({
       targetTime: normalizedTargetTime,
       rawProgramText: programMatch?.[1],
+      expectedDurationSeconds: this.extractInsertDurationSeconds(userInput) ?? undefined,
     })
   }
 
@@ -373,6 +378,9 @@ export class ParamExtractor {
     const programTypeHint = this.normalizeProgramTypeHint(
       params.programTypeHint ?? this.inferProgramTypeHint(rawProgramText ?? inferredProgramName),
     )
+    const expectedDurationSeconds = typeof params.expectedDurationSeconds === 'number' && params.expectedDurationSeconds > 0
+      ? Math.round(params.expectedDurationSeconds)
+      : undefined
     const semanticLabel = this.normalizeSemanticLabel(
       params.semanticLabel ?? this.inferSemanticLabel(rawProgramText ?? inferredProgramName, programTypeHint),
     )
@@ -384,6 +392,7 @@ export class ParamExtractor {
         rawProgramText: rawProgramText ?? inferredProgramName,
         semanticLabel,
         programTypeHint,
+        expectedDurationSeconds,
       }
     }
 
@@ -394,6 +403,7 @@ export class ParamExtractor {
         rawProgramText,
         semanticLabel,
         programTypeHint,
+        expectedDurationSeconds,
       }
     }
 
@@ -402,7 +412,61 @@ export class ParamExtractor {
       rawProgramText,
       semanticLabel,
       programTypeHint,
+      expectedDurationSeconds,
     }
+  }
+
+  private extractInsertDurationSeconds(userInput: string): number | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const durationToken = '(?:一刻钟|三刻钟|半个?小时|(?:(?:\\d+(?:\\.\\d+)?)|[零〇一二两三四五六七八九十]{1,3})(?:个)?小时|(?:(?:\\d+)|[零〇一二两三四五六七八九十]{1,3})(?:分钟|分))'
+    const match = new RegExp(durationToken, 'u').exec(normalized)
+    if (!match?.[0]) return null
+    return this.parseDurationSeconds(match[0])
+  }
+
+  private parseDurationSeconds(value: string): number | null {
+    if (/^一刻钟$/.test(value)) return 15 * 60
+    if (/^三刻钟$/.test(value)) return 45 * 60
+    if (/^半个?小时$/.test(value)) return 30 * 60
+
+    const hourMatch = value.match(/^(\d+(?:\.\d+)?|[零〇一二两三四五六七八九十]{1,3})(?:个)?小时$/)
+    if (hourMatch?.[1]) {
+      const hours = this.parseChineseNumber(hourMatch[1])
+      return hours === null ? null : Math.round(hours * 3600)
+    }
+
+    const minuteMatch = value.match(/^(\d+|[零〇一二两三四五六七八九十]{1,3})(?:分钟|分)$/)
+    if (minuteMatch?.[1]) {
+      const minutes = this.parseChineseNumber(minuteMatch[1])
+      return minutes === null ? null : Math.round(minutes * 60)
+    }
+
+    return null
+  }
+
+  private parseChineseNumber(value: string): number | null {
+    if (/^\d+(?:\.\d+)?$/.test(value)) return Number(value)
+    const digitMap: Record<string, number> = {
+      零: 0,
+      〇: 0,
+      一: 1,
+      二: 2,
+      两: 2,
+      三: 3,
+      四: 4,
+      五: 5,
+      六: 6,
+      七: 7,
+      八: 8,
+      九: 9,
+    }
+    if (Object.prototype.hasOwnProperty.call(digitMap, value)) return digitMap[value]!
+    if (value === '十') return 10
+    const teen = value.match(/^十([一二两三四五六七八九])$/)
+    if (teen?.[1]) return 10 + digitMap[teen[1]]!
+    const tens = value.match(/^([一二两三四五六七八九])十([一二两三四五六七八九])?$/)
+    if (tens?.[1]) return digitMap[tens[1]]! * 10 + (tens[2] ? digitMap[tens[2]]! : 0)
+    return null
   }
 
   private normalizeProgramName(value?: string): string | undefined {
@@ -421,6 +485,7 @@ export class ParamExtractor {
     if (!value) return undefined
     const normalized = value
       .replace(/^(一档|一个|一条|一期|一部|个|条|档|期|部)/, '')
+      .replace(/^(?:\d+分钟|\d+分|\d+小时|半小时|半个小时|一刻钟|三刻钟)/u, '')
       .replace(/^(适合的|合适的|当前的)/, '')
       .replace(/^(节目名|节目|栏目|我要|我想要|想要|我想看|想看|要看|来个|来一条|来一档|放个|上个|推荐|找|查|有没有适合的?|有没有可用的?|有没有候选的?)\s*/, '')
       .replace(/(?:候选节目|候选|可选节目|可用节目)$/u, '')

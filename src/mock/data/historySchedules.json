@@ -1,0 +1,38 @@
+[
+  {
+    "date": "2026-03-24",
+    "itemCount": 26,
+    "programTypes": {
+      "news": 6,
+      "news_magazine": 4,
+      "drama": 6,
+      "health": 2,
+      "commentary": 3
+    },
+    "avgRating": 8.6,
+    "items": [
+      {
+        "id": "history-dragon-20260324-112-004",
+        "programCode": "881120030004",
+        "programName": "品质剧场：纵有疾风起 第4集",
+        "startTime": "2026-03-24T09:30:00+08:00",
+        "endTime": "2026-03-24T10:15:00+08:00",
+        "duration": 2700,
+        "programType": "drama",
+        "sequence": 1
+      }
+    ]
+  },
+  {
+    "date": "2026-03-23",
+    "itemCount": 27,
+    "programTypes": {
+      "news": 6,
+      "news_magazine": 4,
+      "drama": 6,
+      "health": 2,
+      "commentary": 3
+    },
+    "avgRating": 8.5
+  }
+]

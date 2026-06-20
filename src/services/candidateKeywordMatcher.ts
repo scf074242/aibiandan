@@ -260,11 +260,11 @@ export const normalizeCandidateKeyword = (value: string): string =>
     .trim()
     .toLowerCase()
     .replace(/\s+/g, '')
-    .replace(/[《》“”"'【】（）()。，、；;：:·\-—_/\\|~～]+/g, '')
+    .replace(/[《》“”"'【】（）()。，、；;：:=＝·\-—_/\\|~～]+/g, '')
 
 const splitKeywordParts = (keyword: string): string[] =>
   keyword
-    .split(/[《》“”"'【】（）()。，、；;：:·\-—_/\\|~～\s]+/u)
+    .split(/[《》“”"'【】（）()。，、；;：:=＝·\-—_/\\|~～\s]+/u)
     .map((part) => part.trim())
     .filter(Boolean)
 
@@ -460,6 +460,7 @@ const isStrategyNoise = (value: string): boolean =>
 const resolveEditorialKind = (cue: string): EditorialKeywordRequirement['kind'] => {
   if (cue.includes('栏目')) return 'column'
   if (cue.includes('标题')) return 'title'
+  if (cue.includes('节目') && !cue.includes('内容')) return 'title'
   return 'content'
 }
 
@@ -467,14 +468,14 @@ const cleanEditorialRawValue = (rawValue: string): string => {
   const controlPattern = /(的)?(?:轮播单|直播单|播单|内容匹配优先|匹配优先|收视率优先|收视优先|高收视率|高收视|热播优先|高热度|热度优先|话题优先|话题热度|舆论热度|热播|热搜|保留已有节目|保留现有节目|保留原有节目|只填空缺|只填剩余空窗|补齐空窗|确认后编排)/u
   return rawValue
     .split(controlPattern)[0]
-    ?.replace(/^[:：，,、\s]+/u, '')
+    ?.replace(/^[:：=＝，,、\s]+/u, '')
     .replace(/[。；;，,、的]+$/u, '')
     .trim() ?? ''
 }
 
 export const extractEditorialKeywordRequirements = (keywords: string[] = []): EditorialKeywordRequirement[] => {
   const requirements = new Map<string, EditorialKeywordRequirement>()
-  const cuePattern = /(?:所属|属于)?栏目(?:名称|名)?|(?:节目)?标题|(?:节目)?内容/gu
+  const cuePattern = /(?:所属|属于)?栏目(?:名称|名)?|(?:节目)?标题|(?:节目)?内容|(?:具体)?节目(?:名称|名)?/gu
 
   const pushRequirement = (kind: EditorialKeywordRequirement['kind'], rawValue: string) => {
     const raw = cleanEditorialRawValue(rawValue)

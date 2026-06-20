@@ -7,12 +7,14 @@ import type {
 } from '@/types/orchestration'
 import type { ChatMessage } from '@/types/llm'
 import { looksLikeProgramSchedulingRequest, parseSchedulingTimeRange } from '@/services/schedulingIntentHeuristics'
+import type { ForegroundAgentContextPackage } from '@/services/runtime/foregroundAgentContextPackage'
 import { LLMClient } from './llmClient'
 
 export interface TaskClassifierInput {
   scheduleState: ScheduleState
   userInput: string
   history?: string[]
+  contextPackage?: ForegroundAgentContextPackage
 }
 
 export interface TaskClassifierConfig {
@@ -170,12 +172,17 @@ export class TaskClassifier {
     }
 
     if (this.shouldStartOrchestrationFromLayout(normalized, scheduleState)) {
+      const mode: TaskMode = this.hasStrongFillIntent(normalized)
+        ? 'partial_generate'
+        : scheduleState.isEmpty || scheduleState.itemCount === 0
+          ? 'full_generate'
+          : 'full_generate'
       return {
-        mode: 'layout_prepare',
+        mode,
         confidence: 0.92,
-        reasoning: '用户正在发起编排或补排流程，按产品规则应先生成待确认的版面草案。',
+        reasoning: '用户正在发起正式编排或补排流程，应直接进入当前播单编排链路。',
         suggestedParams: {
-          userIntent: userInput.trim() || '生成版面草案',
+          userIntent: userInput.trim() || '正式编排',
           targetTimeRange: targetTimeRange ?? (scheduleState.isEmpty ? { start: '06:00:00', end: '23:59:59' } : undefined),
         },
       }
@@ -307,9 +314,9 @@ export class TaskClassifier {
 
     if (scheduleState.gapCount > 0 && this.hasStrongFillIntent(normalized)) {
       return {
-        mode: 'layout_prepare',
+        mode: 'partial_generate',
         confidence: 0.9,
-        reasoning: '用户明确要求补齐当前空窗，按产品流程应先生成待确认的版面草案。',
+        reasoning: '用户明确要求补齐当前空窗，应直接进入当前播单的正式局部补排链路。',
         suggestedParams: {
           userIntent: userInput.trim() || '补齐当前空窗',
         },
@@ -364,12 +371,14 @@ export class TaskClassifier {
 2. layout_refine：微调当前版面草案
 3. layout_commit：用户确认当前版面草案，可以开始编排
 4. layout_analysis：分析当前实际编排并输出业务报告
-5. validate_only：仅做校验或问题分析
-6. clarify：信息不足，需要追问
+5. full_generate：对当前播单执行全天正式编排
+6. partial_generate：对当前播单执行空窗补排
+7. validate_only：仅做校验或问题分析
+8. clarify：信息不足，需要追问
 
 识别原则：
 - 原子节目单命令（插入、删除、移动、替换）已经在上游处理，这里不要再返回 micro_edit。
-- 用户提到“全天编排”“补齐空窗”“填充节目单”这类启动编排的话术时，也要先返回 layout_prepare，而不是直接执行编排。
+- 用户提到“全天编排”“补齐空窗”“填充节目单”这类正式编排话术时，返回 full_generate 或 partial_generate；只有用户明确说“参考草案/按版面/用草案”时，才会把草案带入编排。
 - 如果用户在描述“某个时段按某类内容铺排版面”，优先判断为 layout_prepare 或 layout_refine。
 - 如果用户说“准备一个/制作一份/生成一份”某个时长的轮播单、直播轮播单、户外直播轮播单，轮播单只表示总时长，不绑定具体日期和频道时间段；例如“14:00到15:00的静安寺户外直播轮播单”应理解为总时长 1 小时，从 0 点起算。
 - 对地点、活动、户外直播等开放业务短语，不要要求用户改成固定节目类型；可把 suggestedParams.userIntent 保留为原始业务意图。电视播单可给 targetTimeRange；轮播单不要给 targetTimeRange，应给 rotationDurationSeconds。
@@ -880,15 +889,6 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
   }
 
   private normalizeLegacyLlmClassification(result: TaskClassification): TaskClassification {
-    if (result.mode === 'full_generate' || result.mode === 'partial_generate') {
-      return {
-        mode: 'layout_prepare',
-        confidence: result.confidence,
-        reasoning: `${result.reasoning || 'LLM 判断为直接编排'}；按当前产品流程已转成先准备版面草案。`,
-        suggestedParams: result.suggestedParams,
-      }
-    }
-
     if (result.mode === 'repair_only') {
       return {
         mode: 'validate_only',

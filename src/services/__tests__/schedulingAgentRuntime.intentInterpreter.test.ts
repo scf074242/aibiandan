@@ -982,6 +982,66 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     })
   })
 
+  it('parses taskPlanDraft from the same LLM interpretation call without treating it as execution', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        intent: 'batch_delete',
+        confidence: 0.92,
+        slots: {
+          targetProgramName: '看东方',
+        },
+        missing: [],
+        riskHints: ['批量删除需要确认后写入'],
+        assistantReplyDraft: '我找到了多条看东方，会先拆成批量删除任务，确认后再写入播单。',
+        taskPlanDraft: {
+          isComposite: true,
+          goal: '删除全部看东方',
+          stages: [
+            {
+              type: 'batch_atomic',
+              summary: '删除当前播单里的看东方',
+              action: 'delete',
+              requiresConfirmation: true,
+            },
+            {
+              type: 'verify',
+              summary: '检查当前播单里是否还剩看东方',
+              requiresConfirmation: false,
+            },
+          ],
+        },
+      }),
+    }))
+    const interpreter = new LlmAgentIntentInterpreter({ chat })
+
+    const result = await interpreter.interpret({
+      userInput: '把全部看东方节目删除掉',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(chat).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({
+      intent: 'batch_delete',
+      assistantFeedback: '我找到了多条看东方，会先拆成批量删除任务，确认后再写入播单。',
+      taskPlanDraft: {
+        isComposite: true,
+        goal: '删除全部看东方',
+        stages: [
+          expect.objectContaining({
+            type: 'batch_atomic',
+            action: 'delete',
+            requiresConfirmation: true,
+          }),
+          expect.objectContaining({
+            type: 'verify',
+            requiresConfirmation: false,
+          }),
+        ],
+      },
+    })
+  })
+
   it('passes a compact current evidence package to real LLM intent interpretation', async () => {
     let serializedUserPayload: Record<string, unknown> | undefined
     const chat = vi.fn(async (messages) => {
@@ -1111,6 +1171,8 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     expect(systemPrompt).toContain('do not infer auto-shift, auto-replace, or auto-reorder')
     expect(systemPrompt).toContain('assistantFeedback')
     expect(systemPrompt).toContain('one short Chinese sentence addressed to the scheduling editor')
+    expect(systemPrompt).toContain('Write like a scheduling colleague, not like a system log')
+    expect(systemPrompt).toContain('why I cannot continue yet, what is missing, and what the editor can say next')
     expect(systemPrompt).toContain('searchAlternatives')
   })
 
@@ -1147,6 +1209,34 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
         targetTime: '10:00:00',
         programHint: '上海景点视频',
       },
+    })
+  })
+
+  it('cleans technical words from assistant feedback before showing it to editors', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        intent: 'insert',
+        confidence: 0.92,
+        slots: {
+          targetTime: '10:00:00',
+          programHint: '上海景点视频',
+        },
+        assistantReplyDraft: 'taskPlan stage 已生成，runtime 会按置信度和匹配度写入。请确认后我再改当前播单。',
+        reasoning: 'technical wording should stay out of the main reply',
+      }),
+    }))
+    const interpreter = new LlmAgentIntentInterpreter({ chat })
+
+    const result = await interpreter.interpret({
+      userInput: '10点插入上海景点的视频',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(result?.assistantFeedback).toBe('请确认后我再改当前播单。')
+    expect(result?.slots).toMatchObject({
+      targetTime: '10:00:00',
+      programHint: '上海景点视频',
     })
   })
 

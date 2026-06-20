@@ -27,7 +27,7 @@ describe('InsertCandidateResolver', () => {
     await getAtomicCapabilities().clearAll()
   })
 
-  it('明确节目名且高置信时会直接选中候选', async () => {
+  it('明确节目名且高置信时会给出可确认的首选候选', async () => {
     const candidateService = getCandidateService()
     const candidates = await candidateService.searchPrograms({
       channelId: 'dragon',
@@ -52,11 +52,12 @@ describe('InsertCandidateResolver', () => {
       searchMode: 'explicit_name',
     })
 
-    expect(result.status).toBe('resolved')
-    if (result.status !== 'resolved') {
-      throw new Error('expected resolved result')
+    expect(result.status).toBe('needs_recommendation')
+    if (result.status !== 'needs_recommendation') {
+      throw new Error('expected recommendation result')
     }
-    expect(result.selectedCandidate.programName).toContain('东方新闻')
+    expect(result.candidates[0]?.candidate.programName).toContain('东方新闻')
+    expect(result.confidence).toBeGreaterThanOrEqual(0.75)
   })
 
   it('模糊节目名会进入推荐确认态', async () => {

@@ -777,6 +777,68 @@ describe('CandidateService', () => {
     expect(result.diagnostics?.keywordMatchedCount).toBeGreaterThan(0)
   })
 
+  it('电视草案检索约束会区分栏目、节目和裸名称', async () => {
+    const service = getCandidateService()
+    const gap = createGap({
+      startTime: iso('09:00:00'),
+      endTime: iso('10:00:00'),
+      duration: 3600,
+    })
+    const baseCriteria = {
+      targetTimeRange: { start: iso('09:00:00'), end: iso('10:00:00') },
+      expectedDuration: { min: 1800, max: 3600 },
+      channelId: 'dragon',
+      columnId: '',
+      programTypePreference: ['news_magazine', 'news'],
+      excludeUsed: false,
+      selectionPolicy: {
+        primary: 'content_match' as const,
+        fallback: ['rating' as const],
+      },
+    }
+
+    const columnResult = await service.queryCandidates(gap, {
+      ...baseCriteria,
+      searchKeywords: ['栏目=看东方'],
+    })
+    const programResult = await service.queryCandidates(gap, {
+      ...baseCriteria,
+      searchKeywords: ['节目=看东方111期新春特别行动'],
+    })
+    const bareResult = await service.queryCandidates(gap, {
+      ...baseCriteria,
+      searchKeywords: ['看东方111期新春特别行动'],
+    })
+
+    expect(columnResult.candidates.length).toBeGreaterThan(0)
+    expect(columnResult.candidates.every((candidate) => candidate.columnName === '看东方')).toBe(true)
+    expect(programResult.candidates.map((candidate) => candidate.programName)).toContain('看东方111期新春特别行动')
+    expect(bareResult.candidates.map((candidate) => candidate.programName)).toContain('看东方111期新春特别行动')
+  })
+
+  it('正式编排内容目标会在不依赖当前版面栏目时命中目标栏目', async () => {
+    const service = getCandidateService()
+    const gap = createGap({
+      startTime: iso('09:30:00'),
+      endTime: iso('12:00:00'),
+      duration: 9000,
+    })
+
+    const result = await service.queryCandidates(gap, {
+      targetTimeRange: { start: iso('09:30:00'), end: iso('12:00:00') },
+      expectedDuration: { min: 60, max: 9000 },
+      channelId: 'dragon',
+      columnId: '',
+      programTypePreference: ['drama'],
+      searchKeywords: ['栏目=东方剧场'],
+      excludeUsed: false,
+    })
+
+    expect(result.candidates.length).toBeGreaterThan(0)
+    expect(result.candidates.every((candidate) => candidate.columnName === '东方剧场')).toBe(true)
+    expect(result.diagnostics?.keywordMatchedCount).toBeGreaterThan(0)
+  })
+
   it('功能型意图会用导视、预热、集锦等软约束筛选候选', async () => {
     const service = getCandidateService()
     const result = await service.queryCandidates(
@@ -998,6 +1060,26 @@ describe('CandidateService', () => {
     expect(result.map((candidate) => candidate.id)).toEqual(['column-and-content'])
   })
 
+  it('searchPrograms 按栏目名、期号和主题命中周播节目，编号只作为核验字段', async () => {
+    resetCandidateService()
+    const service = getCandidateService()
+
+    const result = await service.searchPrograms({
+      channelId: 'dragon',
+      columnId: '101',
+      programName: '看东方111期新春特别行动',
+      programTypes: ['news_magazine'],
+      limit: 5,
+    })
+
+    expect(result[0]).toMatchObject({
+      programName: '看东方111期新春特别行动',
+      issueNo: '0111',
+      programCode: '002601010111',
+    })
+    expect(result.filter((candidate) => candidate.programName === '看东方111期新春特别行动')).toHaveLength(1)
+  })
+
   it('轮播单策略不会用昨日历史记录排除候选节目', async () => {
     const service = getCandidateService()
     const baseCriteria = {
@@ -1086,8 +1168,8 @@ describe('CandidateService', () => {
     const atomicCapabilities = getAtomicCapabilities()
     await atomicCapabilities.replaceAllItems([
       createScheduledItem({
-        programCode: '002601010001',
-        programName: '看东方 早高峰版',
+        programCode: '002601010111',
+        programName: '看东方111期新春特别行动',
         startTime: iso('07:00:00'),
         endTime: iso('08:00:00'),
         duration: 3600,
@@ -1104,7 +1186,7 @@ describe('CandidateService', () => {
     })
 
     expect(result.every((candidate) => candidate.programName.includes('看东方'))).toBe(true)
-    expect(result.some((candidate) => candidate.programCode === '002601010001')).toBe(false)
+    expect(result.some((candidate) => candidate.programCode === '002601010111')).toBe(false)
   })
 
   it('searchPrograms 对明确节目标题无命中时不会退化为类型候选', async () => {

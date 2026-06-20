@@ -3,6 +3,7 @@ import type { LayoutDraft, LayoutIntentSegment, ScheduleState } from '@/types/or
 import { parseAtomicClockExpression } from './atomicTimeParser'
 import { looksLikeProgramSchedulingRequest, parseSchedulingTimeRange, stripProtectedSchedulingClauses } from './schedulingIntentHeuristics'
 import type { LLMClient } from './llm/llmClient'
+import { cleanLayoutDraftSemanticLabel, stripRestartSemanticDaypart } from './layoutDraftSemanticCleaner'
 
 export type LayoutIntentMode = 'layout_prepare' | 'layout_refine' | 'layout_commit' | 'layout_analysis' | 'atomic_fallback' | 'clarify'
 
@@ -54,6 +55,8 @@ const looksLikeDirectOrchestrationIntent = (input: string): boolean => {
 }
 
 const normalizeInput = (value: string) => value.trim().toLowerCase().replace(/\s+/g, '')
+
+const cleanRecognizedSemanticLabel = cleanLayoutDraftSemanticLabel
 
 const extractTimeRange = (input: string): { start: string; end: string } | undefined => {
   return parseSchedulingTimeRange(input)
@@ -112,7 +115,7 @@ const extractRestartAfterDiscard = (input: string): string | null => {
   for (const pattern of patterns) {
     const raw = input.match(pattern)?.[1]?.trim()
     const cleaned = raw
-      ?.replace(/^(?:，|,|。|、|吧|先|再|重新|重做|再来|再做|改做|换成|改成|做成|来一版|做一版|排一版)+/u, '')
+      ?.replace(/^(?:，|,|。|、|吧|先|再|重新做|重新|重做|再来|再做|改做|换成|改成|做成|来一版|做一版|排一版|做)+/u, '')
       .replace(/^(?:一版|一个|一份|一条|一点|一些)+/u, '')
       .replace(/(?:吧|了)$/u, '')
       .trim()
@@ -190,7 +193,7 @@ const extractSemanticLabel = (input: string): string | undefined => {
       && looksLikeProgramSchedulingRequest(normalized)
       && /(直播|户外|现场|外场|活动|会场|商圈|发布会|展会|赛事|节庆|预热|预告|导视|垫片|暖场|串场|过渡|集锦|精编|精选|回看|短片|片花|花絮|宣推|互动|轻松|开播|开场|赛前|赛后|会前|会后|收尾|特别报道|主题|服务|提醒|文旅|交通|天气|社区|公益|消费|庆典|静安寺|外滩)/u.test(openLabel)
     ) {
-      return openLabel
+      return cleanRecognizedSemanticLabel(openLabel)
     }
     return undefined
   }
@@ -200,7 +203,7 @@ const extractSemanticLabel = (input: string): string | undefined => {
     .replace(/(?:节目|版面|内容)+$/u, '')
     .trim()
 
-  return cleaned || undefined
+  return cleanRecognizedSemanticLabel(cleaned)
 }
 
 const stripContextualRefineNoise = (input: string): string => input
@@ -219,7 +222,7 @@ const cleanContextualSemanticLabel = (input: string | undefined): string | undef
     .replace(/(?:一点|一些|点|为主)+$/u, '')
     .trim()
 
-  return cleaned || undefined
+  return cleanRecognizedSemanticLabel(cleaned)
 }
 
 const extractContextualSemanticLabel = (input: string): string | undefined => {
@@ -264,7 +267,7 @@ const extractSegmentSemanticLabel = (input: string): string | undefined => {
   const fromVerb = extractSemanticLabel(input)
   if (fromVerb) return fromVerb
   const cleaned = stripLayoutPrefix(input)
-  return cleaned || undefined
+  return cleanRecognizedSemanticLabel(cleaned)
 }
 
 const extractProgramTypeHint = (semanticLabel: string | undefined, input: string): string | undefined => {
@@ -363,7 +366,7 @@ const cleanSequentialSegmentLabel = (input: string): string | undefined => {
     .replace(/^(?:来|来一段|做|做一段|安排|排|垫|垫一段|加|加一段|补|补一段)+/u, '')
     .replace(/^(?:的|个|一段|一条)+/u, '')
     .trim()
-  return cleaned || undefined
+  return cleanRecognizedSemanticLabel(cleaned)
 }
 
 const extractSequentialDurationSegments = (input: string): LayoutIntentSegment[] | undefined => {
@@ -535,7 +538,10 @@ export class LayoutIntentRecognizer {
     const contextualSemanticLabel = (input.currentLayoutDraft || normalized.includes('版面'))
       ? extractContextualSemanticLabel(actionableInput)
       : undefined
-    const semanticLabel = extractSemanticLabel(actionableInput) ?? contextualSemanticLabel
+    const rawSemanticLabel = extractSemanticLabel(actionableInput) ?? contextualSemanticLabel
+    const semanticLabel = restartInstruction
+      ? cleanRecognizedSemanticLabel(stripRestartSemanticDaypart(rawSemanticLabel)) ?? rawSemanticLabel
+      : rawSemanticLabel
     const programTypeHint = extractProgramTypeHint(semanticLabel, actionableInput)
     const ignoreExistingLayout = matchesIgnoreExistingLayout(normalized)
     const hasScope = Boolean(targetTimeRange)
@@ -608,14 +614,13 @@ export class LayoutIntentRecognizer {
 
     if (looksLikeDirectOrchestrationIntent(normalized)) {
       return {
-        mode: 'layout_prepare',
-        confidence: 0.92,
-        reasoning: '检测到用户正在发起编排或补排流程，按产品规则应先生成可确认的版面草案。',
+        mode: 'clarify',
+        confidence: 0.2,
+        reasoning: '检测到用户正在发起正式编排或补排流程，不应作为版面草案生成或微调处理。',
         ignoreExistingLayout,
-        targetTimeRange: targetTimeRange ?? (input.scheduleState.isEmpty ? { start: '06:00:00', end: '23:59:59' } : undefined),
+        targetTimeRange,
         semanticLabel,
         programTypeHint,
-        segments: structuredSegments,
       }
     }
 
@@ -758,10 +763,15 @@ export class LayoutIntentRecognizer {
         reasoning: parsed.reasoning || '',
         ignoreExistingLayout: parsed.ignoreExistingLayout === true,
         targetTimeRange: parsed.targetTimeRange,
-        semanticLabel: parsed.semanticLabel,
+        semanticLabel: cleanRecognizedSemanticLabel(parsed.semanticLabel),
         programTypeHint: parsed.programTypeHint,
         segments: Array.isArray((parsed as { segments?: unknown[] }).segments)
-          ? ((parsed as { segments?: LayoutIntentSegment[] }).segments?.filter((segment) => segment?.start && segment?.end) ?? [])
+          ? ((parsed as { segments?: LayoutIntentSegment[] }).segments
+              ?.filter((segment) => segment?.start && segment?.end)
+              .map((segment) => ({
+                ...segment,
+                semanticLabel: cleanRecognizedSemanticLabel(segment.semanticLabel),
+              })) ?? [])
           : undefined,
       }
     } catch {

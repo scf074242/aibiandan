@@ -59,8 +59,8 @@ const tvEpisode3: RuntimeScheduleItem = {
 
 const tvMorningNews: RuntimeScheduleItem = {
   id: 'tv-news-0900',
-  programCode: '002601010001',
-  programName: '\u770b\u4e1c\u65b9 \u65e9\u9ad8\u5cf0\u7248',
+  programCode: '002601010111',
+  programName: '\u770b\u4e1c\u65b9111\u671f\u65b0\u6625\u7279\u522b\u884c\u52a8',
   startTime: '09:00:00',
   endTime: '10:00:00',
   duration: 3600,
@@ -70,7 +70,7 @@ const tvMorningNews: RuntimeScheduleItem = {
 const tvNoonNews: RuntimeScheduleItem = {
   id: 'tv-news-1000',
   programCode: '002601030001',
-  programName: '\u4e1c\u65b9\u65b0\u95fb',
+  programName: '\u4e1c\u65b9\u65b0\u95fb001\u671f\u665a\u95f4\u8981\u95fb',
   startTime: '10:00:00',
   endTime: '10:30:00',
   duration: 1800,
@@ -219,7 +219,67 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
     expect(first.kind).toBe('pending_atomic_context')
     if (first.kind !== 'pending_atomic_context') throw new Error('expected pending context')
     expect(first.pendingAtomicContext.agentPendingTask?.phase).toBe('needs_confirmation')
+    expect(first.feedback.content).not.toContain('检索结果')
+    expect(first.feedback.content).not.toContain('候选源')
+    expect(first.feedback.content).not.toContain('拆成')
+    expect(first.feedback.details?.assistantProcessSummary).toContain('已找到 1 个可参考候选。')
     expect(getAtomicCapabilities().getAllItems()).toEqual([])
+
+    const confirmed = await facade.submitInstruction({
+      scheduleState,
+      userInput: '确认',
+      currentSchedule: [],
+      history: ['0点插入城市形象春日花路短片'],
+      pendingAtomicContext: first.pendingAtomicContext,
+      agentCoreEnabled: true,
+      layoutDraftEnabled: false,
+    })
+
+    if (confirmed.kind !== 'agent_execution') {
+      throw new Error(`unexpected confirmed decision: ${JSON.stringify(confirmed)}`)
+    }
+    expect(confirmed.kind).toBe('agent_execution')
+    expect(confirmed.result.status).toBe('executed')
+    expect(confirmed.result.executionResult?.committed).toBe(true)
+    expect(
+      confirmed.result.trace.some((step) => step.detail?.llmCall?.stage === 'intent_interpreter'),
+    ).toBe(false)
+
+    const emittedItems = resolveScheduleItemsLikeChatPanel(confirmed.result.executionResult, [])
+    const pageItems = applyRuntimeScheduleItemsLikeBroadcastPlan(emittedItems)
+
+    expect(pageItems).toHaveLength(1)
+    expect(pageItems[0]).toMatchObject({
+      startTime: '00:00:00',
+      programType: 'short_clip',
+    })
+    expect(pageItems[0]?.programName).toContain('春日花路')
+    expect(pageItems[0]?.programCode).toBe('')
+    expect(pageItems[0]?.code18).toBe('')
+    expect(pageItems[0]?.materialName).toBe('')
+  })
+
+  it('commits an explicit rotation short-clip insert even before total duration is set', async () => {
+    const facade = new DemoRuntimeFacade()
+    const scheduleState = createScheduleState({
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: undefined,
+      isEmpty: true,
+      itemCount: 0,
+    })
+
+    const first = await facade.submitInstruction({
+      scheduleState,
+      userInput: '0点插入城市形象春日花路短片',
+      currentSchedule: [],
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: false,
+    })
+
+    expect(first.kind).toBe('pending_atomic_context')
+    if (first.kind !== 'pending_atomic_context') throw new Error('expected pending context')
 
     const confirmed = await facade.submitInstruction({
       scheduleState,
@@ -234,20 +294,13 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
     expect(confirmed.kind).toBe('agent_execution')
     if (confirmed.kind !== 'agent_execution') throw new Error('expected execution')
     expect(confirmed.result.status).toBe('executed')
-    expect(confirmed.result.executionResult?.committed).toBe(true)
 
     const emittedItems = resolveScheduleItemsLikeChatPanel(confirmed.result.executionResult, [])
     const pageItems = applyRuntimeScheduleItemsLikeBroadcastPlan(emittedItems)
 
     expect(pageItems).toHaveLength(1)
-    expect(pageItems[0]).toMatchObject({
-      startTime: '00:00:00',
-      programType: 'short_clip',
-    })
+    expect(pageItems[0]?.startTime).toBe('00:00:00')
     expect(pageItems[0]?.programName).toContain('春日花路')
-    expect(pageItems[0]?.programCode).toBe('')
-    expect(pageItems[0]?.code18).toBe('')
-    expect(pageItems[0]?.materialName).toBe('')
   })
 
   it('does not emit a foreground schedule write when the pending Agent task is cancelled', async () => {
@@ -515,12 +568,27 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
       layoutDraftEnabled: false,
     })
 
-    expect(result.kind).toBe('agent_execution')
-    if (result.kind !== 'agent_execution') throw new Error('expected execution')
-    expect(result.result.status).toBe('executed')
-    expect(result.result.executionResult?.committed).toBe(true)
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending candidate selection')
+    expect(result.pendingAtomicContext.agentPendingTask?.phase).toBe('needs_selection')
+    expect(result.pendingAtomicContext.insertRecommendations.length).toBeGreaterThan(1)
 
-    const emittedItems = resolveScheduleItemsLikeChatPanel(result.result.executionResult, currentSchedule)
+    const confirmed = await facade.submitInstruction({
+      scheduleState,
+      userInput: '第一个',
+      currentSchedule,
+      history: ['在9点插入东方新闻'],
+      pendingAtomicContext: result.pendingAtomicContext,
+      agentCoreEnabled: true,
+      layoutDraftEnabled: false,
+    })
+
+    expect(confirmed.kind).toBe('agent_execution')
+    if (confirmed.kind !== 'agent_execution') throw new Error('expected execution')
+    expect(confirmed.result.status).toBe('executed')
+    expect(confirmed.result.executionResult?.committed).toBe(true)
+
+    const emittedItems = resolveScheduleItemsLikeChatPanel(confirmed.result.executionResult, currentSchedule)
     const pageItems = applyRuntimeScheduleItemsLikeBroadcastPlan(emittedItems)
 
     expect(pageItems).toHaveLength(1)
@@ -557,7 +625,7 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
       phase: 'needs_clarification',
       missingSlots: ['targetTime'],
     })
-    expect(first.pendingAtomicContext.slots.programName).toBe(tvNoonNews.programName)
+    expect(first.pendingAtomicContext.slots.programName).toBe('\u4e1c\u65b9\u65b0\u95fb')
     expect(getAtomicCapabilities().getAllItems()).toEqual([])
 
     const second = await facade.submitInstruction({
@@ -570,25 +638,40 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
       layoutDraftEnabled: false,
     })
 
-    expect(second.kind).toBe('agent_execution')
-    if (second.kind !== 'agent_execution') throw new Error('expected execution')
-    expect(second.result.status).toBe('executed')
-    expect(second.result.decision.pendingTask).toMatchObject({
+    expect(second.kind).toBe('pending_atomic_context')
+    if (second.kind !== 'pending_atomic_context') throw new Error('expected pending candidate selection')
+    expect(second.pendingAtomicContext.agentPendingTask).toMatchObject({
       intent: 'insert',
-      phase: 'needs_clarification',
+      phase: 'needs_selection',
       collectedSlots: expect.objectContaining({
         targetTime: expect.objectContaining({
           value: '09:00:00',
         }),
         programHint: expect.objectContaining({
-          value: tvNoonNews.programName,
+          value: '\u4e1c\u65b9\u65b0\u95fb',
         }),
       }),
-      missingSlots: [],
+      missingSlots: ['candidateId'],
     })
-    expect(second.result.executionResult?.committed).toBe(true)
 
-    const emittedItems = resolveScheduleItemsLikeChatPanel(second.result.executionResult, currentSchedule)
+    const confirmed = await facade.submitInstruction({
+      scheduleState,
+      userInput: '第一个',
+      currentSchedule,
+      history: ['插入东方新闻', '9点'],
+      pendingAtomicContext: second.pendingAtomicContext,
+      agentCoreEnabled: true,
+      layoutDraftEnabled: false,
+    })
+
+    if (confirmed.kind !== 'agent_execution') {
+      throw new Error(`unexpected confirmed decision: ${JSON.stringify(confirmed)}`)
+    }
+    expect(confirmed.kind).toBe('agent_execution')
+    expect(confirmed.result.status).toBe('executed')
+    expect(confirmed.result.executionResult?.committed).toBe(true)
+
+    const emittedItems = resolveScheduleItemsLikeChatPanel(confirmed.result.executionResult, currentSchedule)
     const pageItems = applyRuntimeScheduleItemsLikeBroadcastPlan(emittedItems)
 
     expect(pageItems).toHaveLength(1)
@@ -598,7 +681,7 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
       programName: tvNoonNews.programName,
       programCode: tvNoonNews.programCode,
     })
-    expect(applyDecisionLikeChatPanel(second, first.pendingAtomicContext)).toBeNull()
+    expect(applyDecisionLikeChatPanel(second, first.pendingAtomicContext)?.agentPendingTask?.phase).toBe('needs_selection')
   })
 
   it('maps Agent candidate selection pending tasks to foreground recommendation context', () => {
@@ -841,12 +924,27 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
       layoutDraftEnabled: false,
     })
 
-    expect(result.kind).toBe('agent_execution')
-    if (result.kind !== 'agent_execution') throw new Error('expected execution')
-    expect(result.result.status).toBe('executed')
-    expect(result.result.executionResult?.committed).toBe(true)
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending candidate selection')
+    expect(result.pendingAtomicContext.agentPendingTask?.phase).toBe('needs_selection')
+    expect(result.pendingAtomicContext.insertRecommendations.length).toBeGreaterThan(1)
 
-    const emittedItems = resolveScheduleItemsLikeChatPanel(result.result.executionResult, currentSchedule)
+    const confirmed = await facade.submitInstruction({
+      scheduleState,
+      userInput: '第一个',
+      currentSchedule,
+      history: ['把9点的节目替换成东方新闻'],
+      pendingAtomicContext: result.pendingAtomicContext,
+      agentCoreEnabled: true,
+      layoutDraftEnabled: false,
+    })
+
+    expect(confirmed.kind).toBe('agent_execution')
+    if (confirmed.kind !== 'agent_execution') throw new Error('expected execution')
+    expect(confirmed.result.status).toBe('executed')
+    expect(confirmed.result.executionResult?.committed).toBe(true)
+
+    const emittedItems = resolveScheduleItemsLikeChatPanel(confirmed.result.executionResult, currentSchedule)
     const pageItems = applyRuntimeScheduleItemsLikeBroadcastPlan(emittedItems)
 
     expect(pageItems).toHaveLength(1)
@@ -886,7 +984,7 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
 
     const result = await facade.submitInstruction({
       scheduleState,
-      userInput: '\u628a9\u70b9\u7684\u8282\u76ee\u66ff\u6362\u6210\u770b\u4e1c\u65b9 \u65e9\u9ad8\u5cf0\u7248',
+      userInput: '\u628a9\u70b9\u7684\u8282\u76ee\u66ff\u6362\u6210\u770b\u4e1c\u65b9111\u671f\u65b0\u6625\u7279\u522b\u884c\u52a8',
       currentSchedule,
       history: [],
       agentCoreEnabled: true,
@@ -953,6 +1051,9 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
     if (confirmed.kind !== 'agent_execution') throw new Error('expected execution')
     expect(confirmed.result.status).toBe('executed')
     expect(confirmed.result.executionResult?.committed).toBe(true)
+    expect(
+      confirmed.result.trace.some((step) => step.detail?.llmCall?.stage === 'intent_interpreter'),
+    ).toBe(false)
 
     const emittedItems = resolveScheduleItemsLikeChatPanel(confirmed.result.executionResult, currentSchedule)
     const pageItems = applyRuntimeScheduleItemsLikeBroadcastPlan(emittedItems)

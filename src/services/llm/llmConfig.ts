@@ -1,10 +1,6 @@
-/**
- * LLM 配置管理
- */
 import type { LLMConfig } from '@/types/llm'
 import { isPlaceholderApiKey } from './localDemoLlm'
 
-// 默认配置
 const DEFAULT_CONFIG: LLMConfig = {
   baseURL: 'https://api.siliconflow.cn/v1',
   apiKey: '',
@@ -14,8 +10,8 @@ const DEFAULT_CONFIG: LLMConfig = {
   timeout: 15000,
 }
 
-// 本地存储键名
 const STORAGE_KEY = 'llm_config'
+const SHARED_COOKIE_KEY = 'llm_config_shared'
 const DEFAULT_MODEL = DEFAULT_CONFIG.model
 const DEPRECATED_AUTO_UPGRADE_MODELS = new Set([
   'deepseek-ai/DeepSeek-V3.2',
@@ -32,67 +28,116 @@ const migrateDeprecatedModel = (config: Partial<LLMConfig>): Partial<LLMConfig> 
   return config
 }
 
-/**
- * 加载配置
- * 优先级：环境变量 > 本地存储 > 默认配置
- */
+const hasConfigValue = (config: Partial<LLMConfig>): boolean => Object.keys(config).length > 0
+
+const mergeStoredConfig = (
+  sharedConfig: Partial<LLMConfig>,
+  localConfig: Partial<LLMConfig>,
+): Partial<LLMConfig> => {
+  const merged = {
+    ...sharedConfig,
+    ...localConfig,
+  }
+  if (
+    isPlaceholderApiKey(localConfig.apiKey)
+    && !isPlaceholderApiKey(sharedConfig.apiKey)
+  ) {
+    merged.apiKey = sharedConfig.apiKey
+  }
+  return merged
+}
+
+const readLocalConfig = (): Partial<LLMConfig> => {
+  const stored = localStorage.getItem(STORAGE_KEY)
+  return stored ? JSON.parse(stored) as Partial<LLMConfig> : {}
+}
+
+const writeLocalConfig = (config: Partial<LLMConfig>): void => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
+}
+
+const readSharedConfig = (): Partial<LLMConfig> => {
+  if (typeof document === 'undefined') return {}
+  const cookie = document.cookie
+    .split(';')
+    .map((item) => item.trim())
+    .find((item) => item.startsWith(`${SHARED_COOKIE_KEY}=`))
+  if (!cookie) return {}
+  return JSON.parse(decodeURIComponent(cookie.slice(SHARED_COOKIE_KEY.length + 1))) as Partial<LLMConfig>
+}
+
+const writeSharedConfig = (config: Partial<LLMConfig>): void => {
+  if (typeof document === 'undefined') return
+  const value = encodeURIComponent(JSON.stringify(config))
+  const maxAge = 60 * 60 * 24 * 365
+  document.cookie = `${SHARED_COOKIE_KEY}=${value}; path=/; max-age=${maxAge}; SameSite=Lax`
+}
+
+const clearSharedConfig = (): void => {
+  if (typeof document === 'undefined') return
+  document.cookie = `${SHARED_COOKIE_KEY}=; path=/; max-age=0; SameSite=Lax`
+}
+
+const resolveStoredConfig = (): Partial<LLMConfig> => {
+  const localConfig = readLocalConfig()
+  const sharedConfig = readSharedConfig()
+  const sourceConfig = mergeStoredConfig(sharedConfig, localConfig)
+  const migrated = migrateDeprecatedModel(sourceConfig)
+
+  if (hasConfigValue(migrated)) {
+    writeLocalConfig(migrated)
+    writeSharedConfig(migrated)
+  }
+
+  return migrated
+}
+
 export function loadLLMConfig(): LLMConfig {
-  // 从环境变量读取
   const envConfig: Partial<LLMConfig> = {
     baseURL: import.meta.env.VITE_CODE_PLAN_LLM_BASE_URL,
     apiKey: import.meta.env.VITE_CODE_PLAN_LLM_API_KEY,
     model: import.meta.env.VITE_CODE_PLAN_LLM_MODEL,
   }
 
-  // 从本地存储读取
-  let localConfig: Partial<LLMConfig> = {}
+  let storedConfig: Partial<LLMConfig> = {}
   try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    if (stored) {
-      const parsed = JSON.parse(stored) as Partial<LLMConfig>
-      localConfig = migrateDeprecatedModel(parsed)
-      if (localConfig.model !== parsed.model) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(localConfig))
-      }
-    }
-  } catch (e) {
-    console.warn('Failed to load LLM config from localStorage:', e)
+    storedConfig = resolveStoredConfig()
+  } catch (error) {
+    console.warn('Failed to load LLM config from local storage:', error)
   }
 
-  // 合并配置（环境变量优先级最高）
   return migrateDeprecatedModel({
     ...DEFAULT_CONFIG,
-    ...localConfig,
+    ...storedConfig,
     ...Object.fromEntries(
-      Object.entries(envConfig).filter(([key, v]) => {
-        if (v === undefined || v === '') {
-          return false
-        }
-        if (key === 'apiKey' && isPlaceholderApiKey(String(v))) {
-          return false
-        }
+      Object.entries(envConfig).filter(([key, value]) => {
+        if (value === undefined || value === '') return false
+        if (key === 'apiKey' && isPlaceholderApiKey(String(value))) return false
         return true
       }),
     ),
   }) as LLMConfig
 }
 
-/**
- * 保存配置到本地存储
- */
 export function saveLLMConfig(config: Partial<LLMConfig>): void {
   try {
     const current = loadLLMConfig()
-    const newConfig = migrateDeprecatedModel({ ...current, ...config })
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(newConfig))
-  } catch (e) {
-    console.error('Failed to save LLM config:', e)
+    const nextConfig = { ...config }
+    if (
+      Object.prototype.hasOwnProperty.call(nextConfig, 'apiKey')
+      && isPlaceholderApiKey(nextConfig.apiKey)
+      && !isPlaceholderApiKey(current.apiKey)
+    ) {
+      delete nextConfig.apiKey
+    }
+    const newConfig = migrateDeprecatedModel({ ...current, ...nextConfig })
+    writeLocalConfig(newConfig)
+    writeSharedConfig(newConfig)
+  } catch (error) {
+    console.error('Failed to save LLM config:', error)
   }
 }
 
-/**
- * 验证配置是否有效
- */
 export function validateLLMConfig(config: LLMConfig): { valid: boolean; errors: string[] } {
   const errors: string[] = []
 
@@ -122,20 +167,15 @@ export function validateLLMConfig(config: LLMConfig): { valid: boolean; errors: 
   }
 }
 
-/**
- * 获取默认配置
- */
 export function getDefaultConfig(): LLMConfig {
   return { ...DEFAULT_CONFIG }
 }
 
-/**
- * 清除本地存储的配置
- */
 export function clearLLMConfig(): void {
   try {
     localStorage.removeItem(STORAGE_KEY)
-  } catch (e) {
-    console.error('Failed to clear LLM config:', e)
+    clearSharedConfig()
+  } catch (error) {
+    console.error('Failed to clear LLM config:', error)
   }
 }

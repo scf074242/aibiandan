@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-06-16T00:03:19.233Z",
+  "generatedAt": "2026-06-19T13:04:23.608Z",
   "status": "skipped",
   "config": {
-    "runRequested": true,
+    "runRequested": false,
     "strict": false,
-    "apiKeyPresent": true,
+    "apiKeyPresent": false,
     "apiKeyUsable": false,
-    "model": "deepseek-ai/DeepSeek-V3.2",
+    "model": "deepseek-ai/DeepSeek-V4-Flash",
     "baseURL": "https://api.siliconflow.cn/v1",
-    "skipReason": "The configured API key is empty or a placeholder value."
+    "skipReason": "RUN_AGENT_REAL_LLM_EVAL is not set to 1."
   },
   "acceptanceCoverage": [
     {
@@ -68,7 +68,7 @@
       "total": 0,
       "passed": 0,
       "failed": 0,
-      "skippedReason": "The configured API key is empty or a placeholder value.",
+      "skippedReason": "RUN_AGENT_REAL_LLM_EVAL is not set to 1.",
       "tagCoverage": [],
       "failures": []
     },
@@ -79,7 +79,7 @@
       "total": 0,
       "passed": 0,
       "failed": 0,
-      "skippedReason": "The configured API key is empty or a placeholder value.",
+      "skippedReason": "RUN_AGENT_REAL_LLM_EVAL is not set to 1.",
       "tagCoverage": [],
       "failures": []
     },
@@ -90,7 +90,7 @@
       "total": 0,
       "passed": 0,
       "failed": 0,
-      "skippedReason": "The configured API key is empty or a placeholder value.",
+      "skippedReason": "RUN_AGENT_REAL_LLM_EVAL is not set to 1.",
       "tagCoverage": [],
       "failures": []
     }

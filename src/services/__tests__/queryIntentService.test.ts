@@ -250,4 +250,104 @@ describe('QueryIntentService', () => {
     expect(criteria.selectionPolicy?.primary).toBe('sequence')
     expect(criteria.historyReference).toBe(historyReference)
   })
+
+  it('generates scoped search keywords from layout draft constraint kind', async () => {
+    const cases = [
+      { kind: 'column' as const, expected: '栏目=看东方' },
+      { kind: 'program' as const, expected: '节目=看东方' },
+      { kind: 'unspecified' as const, expected: '看东方' },
+    ]
+    const service = new QueryIntentService({} as LLMClient)
+
+    for (const item of cases) {
+      setRuntimeLayout({
+        sourceFileName: 'AI layout draft',
+        channelId: 'dragon',
+        date,
+        warnings: [],
+        layoutReference: {
+          id: `layout-runtime-${item.kind}`,
+          name: 'Scoped draft',
+          slots: [
+            {
+              id: `slot-${item.kind}`,
+              channelId: 'dragon',
+              columnId: `runtime-column:${item.kind}`,
+              startTime: iso('14:00:00'),
+              endTime: iso('15:00:00'),
+            },
+          ],
+        },
+        columns: [
+          {
+            columnId: `runtime-column:${item.kind}`,
+            columnName: '看东方',
+            channelId: 'dragon',
+            defaultProgramType: 'news_magazine',
+            semanticLabel: '看东方',
+            draftConstraintKind: item.kind,
+            source: 'generated',
+          },
+        ],
+      })
+
+      const context: GenerationContext = {
+        channel: {
+          channelId: 'dragon',
+          channelName: 'Dragon TV',
+          date,
+          timeZone: 'Asia/Shanghai',
+          broadcastRules: {
+            defaultStartTime: '06:00:00',
+            defaultEndTime: '23:59:59',
+            minProgramDuration: 60,
+            maxProgramDuration: 7200,
+            allowedTransitions: {},
+          },
+        },
+        date,
+        layoutReference: {
+          id: `layout-runtime-${item.kind}`,
+          name: 'Scoped draft',
+          slots: [
+            {
+              id: `slot-${item.kind}`,
+              channelId: 'dragon',
+              columnId: `runtime-column:${item.kind}`,
+              startTime: iso('14:00:00'),
+              endTime: iso('15:00:00'),
+            },
+          ],
+        },
+        constraints: {
+          fixedItems: [],
+          lockedItems: [],
+          blockedTimeRanges: [],
+          mandatoryPrograms: [],
+        },
+      }
+
+      const criteria = await service.generateCriteria(
+        createGap(),
+        {
+          summary: '按版面检索',
+          targetProgramTypes: [],
+          durationPreference: { min: 1200, max: 3600 },
+          searchKeywords: ['用户补充'],
+          allowFiller: false,
+          sequentialPreference: false,
+        },
+        context,
+        {
+          target: 'test',
+          referencePriority: ['layout', 'history', 'library'],
+          allowFiller: true,
+          sequentialPreference: false,
+          riskPreference: 'balanced',
+        },
+      )
+
+      expect(criteria.searchKeywords).toEqual([item.expected, '用户补充'])
+    }
+  })
 })

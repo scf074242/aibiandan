@@ -64,6 +64,7 @@ export interface AgentIntentInterpretation {
   confidence: number
   source: 'llm' | 'deterministic' | 'test'
   slots?: AgentIntentSlots
+  taskPlanDraft?: AgentTaskPlanDraft
   queryKind?: QueryCommandPlan['queryKind']
   keyword?: string
   searchAlternatives?: string[]
@@ -71,6 +72,35 @@ export interface AgentIntentInterpretation {
   assistantFeedback?: string
   streamingHint?: 'none' | 'thinking' | 'final'
   rawText?: string
+}
+
+export type AgentTaskPlanStageDraftType = 'atomic' | 'batch_atomic' | 'draft_refill' | 'verify' | 'ask_user'
+
+export interface AgentTaskPlanStageDraft {
+  type: AgentTaskPlanStageDraftType
+  action?: AtomicCommandIntent
+  target?: {
+    programName?: string
+    replacementHint?: string
+    candidateId?: string
+    candidateCode?: string
+    programType?: string
+    durationSeconds?: number
+    targetTime?: string
+    rangeStart?: string
+    rangeEnd?: string
+    scope?: 'current_playlist' | 'current_gaps' | 'time_range'
+  }
+  layoutDraftReferenced?: boolean
+  requiresLayoutDraft?: boolean
+  requiresConfirmation?: boolean
+  summary?: string
+}
+
+export interface AgentTaskPlanDraft {
+  isComposite: boolean
+  goal: string
+  stages: AgentTaskPlanStageDraft[]
 }
 
 export interface AgentIntentInterpreter {

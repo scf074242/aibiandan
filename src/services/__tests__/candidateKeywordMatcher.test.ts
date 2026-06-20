@@ -117,10 +117,14 @@ describe('candidateKeywordMatcher', () => {
   it('treats column, title, and content cue phrases as required editorial dimensions', () => {
     expect(extractEditorialKeywordRequirements([
       '所属栏目看东方',
+      '栏目=东方快报',
+      '节目=看东方111期新春特别行动',
       '节目内容静安寺',
       '节目标题发布会预热导视',
     ])).toEqual([
       { kind: 'column', raw: '看东方', keyword: '看东方' },
+      { kind: 'column', raw: '东方快报', keyword: '东方快报' },
+      { kind: 'title', raw: '看东方111期新春特别行动', keyword: '看东方111期新春特别行动' },
       { kind: 'content', raw: '静安寺', keyword: '静安寺' },
       { kind: 'title', raw: '发布会预热导视', keyword: '发布会预热导视' },
     ])

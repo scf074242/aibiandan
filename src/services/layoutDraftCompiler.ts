@@ -45,6 +45,7 @@ export class LayoutDraftCompiler {
       defaultProgramType: segment.programType,
       isSequential: segment.sequential,
       semanticLabel: segment.label,
+      draftConstraintKind: segment.constraintKind,
       queryHints: segment.queryHints,
       selectionPolicy: segment.selectionPolicy,
       source: columnSource,

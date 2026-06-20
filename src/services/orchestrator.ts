@@ -74,6 +74,15 @@ interface ExecutedGapPlanResult {
   insertedItems: ScheduleItemSnapshot[]
 }
 
+interface PartialGenerationTarget {
+  targetGapIds?: string[]
+  targetTimeRange?: {
+    start: string
+    end: string
+  }
+  searchKeywords?: string[]
+}
+
 class EventEmitter {
   private listeners = new Map<keyof EventPayloadMap, Array<(payload: EventPayloadMap[keyof EventPayloadMap]) => void>>()
 
@@ -279,12 +288,15 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
-  async startPartialGeneration(channelId: string, date: string, targetGapIds?: string[]): Promise<void> {
+  async startPartialGeneration(channelId: string, date: string, target?: string[] | PartialGenerationTarget): Promise<void> {
     if (this.isRunning) throw new Error('Orchestrator is already running')
     this.isRunning = true
     this.isCancelled = false
     this.repairRound = 0
     this.lastValidationReport = null
+    const targetGapIds = Array.isArray(target) ? target : target?.targetGapIds
+    const targetTimeRange = Array.isArray(target) ? undefined : target?.targetTimeRange
+    const targetSearchKeywords = Array.isArray(target) ? undefined : target?.searchKeywords
 
     try {
       this.createSession(channelId, date, { target: 'partial_fill' })
@@ -313,7 +325,11 @@ export class Orchestrator extends EventEmitter {
       this.gapManager!.alignGapsToLayoutBands(typedLayoutSlots)
 
       const gaps = this.gapManager!.queryRemainingGaps()
-      this.session!.gaps.pending = targetGapIds?.length ? gaps.filter((gap) => targetGapIds.includes(gap.id)) : gaps
+      const gapsById = targetGapIds?.length ? gaps.filter((gap) => targetGapIds.includes(gap.id)) : gaps
+      this.session!.gaps.pending = targetTimeRange
+        ? this.filterGapsByTargetTimeRange(gapsById, date, targetTimeRange)
+        : gapsById
+      const partialTargetGapIds = new Set(this.session!.gaps.pending.map((gap) => gap.id))
       const partialTargetSlotIds = this.resolveRelevantLayoutSlotIds(
         this.session!.gaps.pending,
         context.layoutReference,
@@ -321,16 +337,23 @@ export class Orchestrator extends EventEmitter {
       this.log('info', 'planning', '局部补排已锁定版面范围，后续广告补位仅作用于相关版面时段', {
         pendingGapCount: this.session!.gaps.pending.length,
         targetGapIds: this.session!.gaps.pending.map((gap) => gap.id),
+        targetTimeRange,
+        searchKeywords: targetSearchKeywords,
         targetSlotIds: partialTargetSlotIds,
         layoutSource: context.layoutReference?.name,
       })
 
-      await this.phase2Filling({ allowAdFill: true, targetSlotIds: partialTargetSlotIds })
+      await this.phase2Filling({
+        allowAdFill: true,
+        targetGapIds: partialTargetGapIds,
+        targetSlotIds: partialTargetSlotIds,
+        searchKeywords: targetSearchKeywords,
+      })
       if (this.isCancelled) return
       await this.phase3Repair()
 
       if (!this.isCancelled) {
-        this.updateStatus(this.resolveTerminalStatus())
+        this.updateStatus(this.resolveTerminalStatus(partialTargetGapIds))
         this.emit('complete', { session: this.session! })
       }
     } catch (error) {
@@ -339,6 +362,22 @@ export class Orchestrator extends EventEmitter {
     } finally {
       this.isRunning = false
     }
+  }
+
+  private filterGapsByTargetTimeRange(
+    gaps: GapInfo[],
+    date: string,
+    targetTimeRange: { start: string; end: string },
+  ): GapInfo[] {
+    const targetStart = new Date(this.combineDateTime(date, targetTimeRange.start)).getTime()
+    const targetEnd = new Date(this.combineDateTime(date, targetTimeRange.end)).getTime()
+    if (!Number.isFinite(targetStart) || !Number.isFinite(targetEnd) || targetEnd <= targetStart) return gaps
+
+    return gaps.filter((gap) => {
+      const gapStart = new Date(gap.startTime).getTime()
+      const gapEnd = new Date(gap.endTime).getTime()
+      return gapStart < targetEnd && gapEnd > targetStart
+    })
   }
 
   async executeCommand(command: OrchestrationCommand): Promise<boolean> {
@@ -414,8 +453,8 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
-  private resolveTerminalStatus(): PlanningSessionStatus {
-    if (this.gapManager?.hasRemainingGaps()) {
+  private resolveTerminalStatus(targetGapIds?: Set<string>): PlanningSessionStatus {
+    if (this.getRelevantRemainingGaps(targetGapIds).length > 0) {
       return 'manual_review'
     }
     if ((this.session?.execution.failedCommands ?? 0) > 0 || (this.session?.gaps.failed.length ?? 0) > 0) {
@@ -427,14 +466,15 @@ export class Orchestrator extends EventEmitter {
     return 'completed'
   }
 
-  private async phase2Filling(options?: { allowAdFill?: boolean; targetSlotIds?: string[] }): Promise<void> {
+  private async phase2Filling(options?: { allowAdFill?: boolean; targetGapIds?: Set<string>; targetSlotIds?: string[]; searchKeywords?: string[] }): Promise<void> {
     this.updateStatus('filling')
     let processed = 0
     const generationContext = await this.dataService.getGenerationContext(this.session!.channelId, this.session!.date)
     const allowAdFill = options?.allowAdFill ?? true
+    const targetGapIds = options?.targetGapIds
 
     while (!this.isCancelled && this.gapManager?.hasRemainingGaps()) {
-      const batch = this.collectPlanningBatch()
+      const batch = this.collectPlanningBatch(targetGapIds)
       if (batch.length === 0) break
 
       this.log('info', 'planning', `已启动 ${batch.length} 个空窗的并行规划任务`, {
@@ -448,10 +488,11 @@ export class Orchestrator extends EventEmitter {
         })),
       })
 
-      const preparedPlans = await this.prepareBatchPlans(batch)
+      const preparedPlans = await this.prepareBatchPlans(batch, options?.searchKeywords)
       if (preparedPlans.length === 0) {
-        this.session!.gaps.pending = this.gapManager.queryRemainingGaps()
-        break
+        this.session!.gaps.pending = this.getRelevantRemainingGaps(targetGapIds)
+        if (this.session!.gaps.pending.length === 0) break
+        continue
       }
 
       for (const plan of preparedPlans) {
@@ -494,7 +535,12 @@ export class Orchestrator extends EventEmitter {
     }
 
     if (!this.isCancelled && this.gapManager?.hasRemainingGaps()) {
-      const remainingGaps = this.gapManager.queryRemainingGaps()
+      const remainingGaps = this.getRelevantRemainingGaps(targetGapIds)
+      if (remainingGaps.length === 0) {
+        this.session!.gaps.pending = []
+        this.currentGap = null
+        return
+      }
       this.log('warn', 'planning', '自动编排已结束，但仍有未完成空窗待人工确认', {
         remainingGapCount: remainingGaps.length,
         remainingGaps: remainingGaps.slice(0, 10).map((gap) => ({
@@ -510,6 +556,11 @@ export class Orchestrator extends EventEmitter {
     }
 
     this.currentGap = null
+  }
+
+  private getRelevantRemainingGaps(targetGapIds?: Set<string>): GapInfo[] {
+    const remainingGaps = this.gapManager?.queryRemainingGaps() ?? []
+    return targetGapIds ? remainingGaps.filter((gap) => targetGapIds.has(gap.id)) : remainingGaps
   }
 
   private async phase3Repair(): Promise<void> {
@@ -550,6 +601,7 @@ export class Orchestrator extends EventEmitter {
 
   private async generateQueryCandidatesCommand(
     gap: GapInfo,
+    targetSearchKeywords?: string[],
   ): Promise<{ command: QueryCandidatesCommand; thought?: GapPlanningThought }> {
     const generationContext = await this.dataService.getGenerationContext(this.session!.channelId, this.session!.date)
     const defaultCommand: QueryCandidatesCommand = {
@@ -594,6 +646,7 @@ export class Orchestrator extends EventEmitter {
       generationContext,
       this.session!.strategy,
     )
+    const scopedCriteria = this.applyTargetSearchKeywords(criteria, gap, targetSearchKeywords)
 
     return {
       command: {
@@ -601,11 +654,54 @@ export class Orchestrator extends EventEmitter {
         reasoning: thought.summary,
         data: {
           gapId: gap.id,
-          criteria,
+          criteria: scopedCriteria,
         },
       },
-      thought,
+      thought: targetSearchKeywords?.length
+        ? { ...thought, searchKeywords: this.mergeSearchKeywords(thought.searchKeywords, targetSearchKeywords) }
+        : thought,
     }
+  }
+
+  private applyTargetSearchKeywords(
+    criteria: QueryCandidatesCommand['data']['criteria'],
+    gap: GapInfo,
+    targetSearchKeywords?: string[],
+  ): QueryCandidatesCommand['data']['criteria'] {
+    const keywords = this.normalizeSearchKeywords(targetSearchKeywords)
+    if (keywords.length === 0) return criteria
+
+    return {
+      ...criteria,
+      columnId: '',
+      expectedDuration: {
+        min: 60,
+        max: gap.duration,
+      },
+      programTypePreference: this.inferProgramTypesFromTargetKeywords(keywords),
+      searchKeywords: keywords,
+      selectionPolicy: undefined,
+      historyReference: undefined,
+    }
+  }
+
+  private inferProgramTypesFromTargetKeywords(keywords: string[]): string[] | undefined {
+    const text = keywords.join(' ')
+    if (/(剧场|电视剧|连续剧|大剧|短剧|drama)/i.test(text)) return ['drama']
+    if (/(新闻|资讯|快报|看东方|news)/i.test(text)) return ['news_magazine', 'news', 'current_affairs']
+    if (/(少儿|儿童|动画|kids|cartoon)/i.test(text)) return ['kids']
+    if (/(综艺|娱乐|晚会|variety)/i.test(text)) return ['variety']
+    if (/(专题|纪录|纪实|documentary)/i.test(text)) return ['documentary']
+    if (/(广告|ad)/i.test(text)) return ['ad']
+    return undefined
+  }
+
+  private mergeSearchKeywords(left: string[] = [], right: string[] = []): string[] {
+    return this.normalizeSearchKeywords([...left, ...right])
+  }
+
+  private normalizeSearchKeywords(values?: string[]): string[] {
+    return Array.from(new Set((values ?? []).map((value) => value.trim()).filter(Boolean)))
   }
 
   private async generateFillItemCommand(
@@ -659,13 +755,16 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
-  private collectPlanningBatch(): GapInfo[] {
+  private collectPlanningBatch(targetGapIds?: Set<string>): GapInfo[] {
     const batchSize = this.getEffectivePlanningConcurrency()
     const batch: GapInfo[] = []
+    const remainingGaps = this.gapManager?.queryRemainingGaps() ?? []
+    const candidates = targetGapIds
+      ? remainingGaps.filter((gap) => targetGapIds.has(gap.id))
+      : remainingGaps
 
-    while (batch.length < batchSize) {
-      const gap = this.gapManager?.getNextGap()
-      if (!gap) break
+    for (const gap of candidates) {
+      if (batch.length >= batchSize) break
       this.gapManager?.startProcessing(gap.id)
       batch.push(gap)
       this.emit('gap-start', { gap })
@@ -679,11 +778,11 @@ export class Orchestrator extends EventEmitter {
     return this.session?.strategy.sequentialPreference ? 1 : configuredConcurrency
   }
 
-  private async prepareBatchPlans(gaps: GapInfo[]): Promise<PreparedGapPlan[]> {
+  private async prepareBatchPlans(gaps: GapInfo[], targetSearchKeywords?: string[]): Promise<PreparedGapPlan[]> {
     const results = await Promise.all(
       gaps.map(async (gap) => {
         try {
-          const plan = await this.prepareGapPlan(gap)
+          const plan = await this.prepareGapPlan(gap, targetSearchKeywords)
           return { ok: true as const, plan }
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error'
@@ -708,8 +807,8 @@ export class Orchestrator extends EventEmitter {
       .sort((left, right) => new Date(left.gap.startTime).getTime() - new Date(right.gap.startTime).getTime())
   }
 
-  private async prepareGapPlan(gap: GapInfo): Promise<PreparedGapPlan> {
-    const { command: queryCommand, thought } = await this.generateQueryCandidatesCommand(gap)
+  private async prepareGapPlan(gap: GapInfo, targetSearchKeywords?: string[]): Promise<PreparedGapPlan> {
+    const { command: queryCommand, thought } = await this.generateQueryCandidatesCommand(gap, targetSearchKeywords)
     this.log('info', 'query', `空窗 ${gap.id} 已生成接口查询参数`, {
       gapId: gap.id,
       startTime: gap.startTime,
@@ -916,7 +1015,7 @@ export class Orchestrator extends EventEmitter {
 
     const sequenceError = this.detectAppendSequenceOrderViolation(materialized.items, existingItems)
     if (sequenceError) {
-      this.log('warn', 'execution', `空窗 ${plan.gap.id} 命中顺播上下文冲突，已阻止写入`, {
+      this.log('warn', 'execution', `空窗 ${plan.gap.id} 命中连续剧顺序冲突，已阻止写入`, {
         gapId: plan.gap.id,
         startTime: plan.gap.startTime,
         endTime: plan.gap.endTime,

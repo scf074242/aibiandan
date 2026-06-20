@@ -10,7 +10,7 @@ const broadcastPlanSource = readFileSync(resolve(currentDir, '../../../views/bro
 const orchestrationHookSource = readFileSync(resolve(currentDir, '../../../views/broadcast-plan/useBroadcastPlanOrchestration.ts'), 'utf-8')
 
 describe('ChatPanel quick actions', () => {
-  it('does not expose long-flow scheduling as atomic quick actions', () => {
+  it('exposes long-flow scheduling as explicit non-atomic quick actions', () => {
     const quickActionsBlock = chatPanelSource.match(/const quickActions[\s\S]*?= \[[\s\S]*?\n\]/)?.[0] ?? ''
 
     expect(quickActionsBlock).toContain('新建电视播单')
@@ -18,7 +18,7 @@ describe('ChatPanel quick actions', () => {
     expect(quickActionsBlock).toContain('内容匹配优先')
     expect(quickActionsBlock).toContain('收视率优先')
     expect(quickActionsBlock).toContain('热播优先')
-    expect(quickActionsBlock).toContain('顺播上下文')
+    expect(quickActionsBlock).toContain('连续剧检查')
     expect(quickActionsBlock).toContain('SEED_TV_SEQUENCE_CONTEXT_PROMPT')
     expect(quickActionsBlock).toContain('顺播倒序')
     expect(quickActionsBlock).toContain('08:00 插入纵有疾风起第2集')
@@ -38,8 +38,10 @@ describe('ChatPanel quick actions', () => {
     expect(quickActionsBlock).toContain('把9点的节目向后移动1小时')
     expect(quickActionsBlock).toContain('把10点的节目向前移动1小时')
     expect(quickActionsBlock).not.toContain('把22点的节目向后移动1小时')
-    expect(quickActionsBlock).not.toContain('全天编排')
-    expect(quickActionsBlock).not.toContain('补齐空窗')
+    expect(quickActionsBlock).toContain('全天编排')
+    expect(quickActionsBlock).toContain('帮我全天编排')
+    expect(quickActionsBlock).toContain('补齐空窗')
+    expect(quickActionsBlock).toContain('补齐当前所有空窗')
     expect(quickActionsBlock).not.toContain('缺时间插入')
     expect(quickActionsBlock).not.toContain("prompt: '插入看东方'")
     expect(chatPanelSource).toContain('const visibleQuickActions = computed')
@@ -102,7 +104,8 @@ describe('ChatPanel quick actions', () => {
     expect(broadcastPlanSource).toContain('<div class="content-wrapper with-ai-sidebar">')
     expect(broadcastPlanSource).toContain('<div class="ai-sidebar">')
     expect(broadcastPlanSource).not.toContain('aiSidebarVisible = false')
-    expect(broadcastPlanSource).not.toContain('<Close')
+    expect(broadcastPlanSource).not.toContain('class="ai-sidebar-close"')
+    expect(broadcastPlanSource).toContain('class="assistant-workspace-close"')
   })
 
   it('keeps layout draft viewing out of the foreground conversation and playlist workspace', () => {
@@ -111,7 +114,7 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('const containsForegroundDraftPayload')
     expect(chatPanelSource).toContain('hiddenFromThread?: boolean')
     expect(chatPanelSource).toContain('const hiddenFromThread = input.hiddenFromThread')
-    expect(chatPanelSource).toContain('|| (!foregroundLayoutDraftEnabled && containsForegroundDraftPayload(input))')
+    expect(chatPanelSource).toContain('|| (!foregroundLayoutDraftEnabled && containsForegroundDraftPayload(input) && !shouldKeepDraftBlockingInputVisible(input))')
     expect(chatPanelSource).toContain('messages.value.filter((message) => !message.hiddenFromThread && !isForegroundLayoutDraftMessage(message))')
     expect(chatPanelSource).toContain('const sanitizeForegroundDraftText')
     expect(chatPanelSource).toContain('const sanitizeForegroundDraftPayload')
@@ -136,7 +139,10 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).not.toContain("if (foregroundLayoutDraftEnabled || message.role === 'user') return false")
     expect(chatPanelSource).not.toContain('当前版面参考</span>')
     expect(broadcastPlanSource).not.toContain('const foregroundLayoutDraftWorkspaceEnabled = false')
-    expect(broadcastPlanSource).toContain('const showLayoutDraftWorkspace = computed(() => playlistType.value === \'tv\')')
+    expect(broadcastPlanSource).toContain('const showLayoutDraftWorkspace = computed(() => (')
+    expect(broadcastPlanSource).toContain('playlistType.value === \'tv\'')
+    expect(broadcastPlanSource).toContain('playlistType.value === \'rotation\' && Boolean(currentLayoutDraft.value)')
+    expect(broadcastPlanSource).toContain('const showLayoutDraftTab = computed(() => showLayoutDraftWorkspace.value)')
     expect(broadcastPlanSource).toContain('const currentPlaylistWorkspaceKicker = computed(() => {')
     expect(broadcastPlanSource).toContain('class="playlist-workspace-tabs" :class="{ \'is-disabled\': playlistType === \'none\' }"')
     expect(broadcastPlanSource.indexOf('class="playlist-workspace-tabs"')).toBeLessThan(
@@ -146,12 +152,25 @@ describe('ChatPanel quick actions', () => {
     expect(broadcastPlanSource).toContain('text-align: right;')
     expect(broadcastPlanSource).not.toContain('const showPlaylistWorkspaceTabs = computed(() => playlistType.value !== \'none\')')
     expect(broadcastPlanSource).not.toContain('v-if="showPlaylistWorkspaceTabs" class="playlist-workspace-tabs"')
-    expect(broadcastPlanSource).toContain('v-if="playlistType === \'tv\'"')
+    expect(broadcastPlanSource).toContain('v-if="showLayoutDraftTab"')
     expect(broadcastPlanSource).toContain(':disabled="!showLayoutDraftWorkspace"')
     expect(broadcastPlanSource).toContain('v-else-if="showLayoutDraftWorkspace && currentLayoutDraft" class="layout-draft-workspace"')
     expect(broadcastPlanSource).toContain('v-else-if="showLayoutDraftWorkspace" class="layout-draft-workspace is-empty"')
-    expect(broadcastPlanSource).toContain('if (playlistType.value === \'rotation\')')
     expect(broadcastPlanSource).toContain('class="layout-draft-workspace"')
+    expect(broadcastPlanSource).toContain('v-if="currentLayoutDraftFeasibility"\n                type="primary"')
+    expect(broadcastPlanSource).not.toContain("currentLayoutDraftFeasibility.ok ? 'success' : 'primary'")
+    expect(broadcastPlanSource).not.toContain('class="layout-draft-keyword-row"')
+    expect(broadcastPlanSource).toContain("matchedCount > 0")
+    expect(broadcastPlanSource).toContain("statusText")
+    expect(broadcastPlanSource).toContain('v-if="segment.intent"')
+    expect(broadcastPlanSource).toContain('formatLayoutDraftSegmentLabel(column')
+    expect(broadcastPlanSource).not.toContain('return `栏目=${label}`')
+    expect(broadcastPlanSource).not.toContain('return `节目=${label}`')
+    expect(broadcastPlanSource).not.toContain('行内只展示可由草案提供的时段与栏目/节目名称')
+    expect(broadcastPlanSource).not.toContain('正式编排时按栏目或同名节目匹配节目库')
+    expect(broadcastPlanSource).not.toContain('正式编排时按历史进度续播')
+    expect(broadcastPlanSource).not.toContain('正式编排时从同栏目候选中选取可用节目')
+    expect(broadcastPlanSource).not.toContain("'参考'")
     expect(broadcastPlanSource).not.toContain('class="layout-draft-empty"')
     expect(broadcastPlanSource).not.toContain('还没有版面草案')
   })
@@ -167,8 +186,22 @@ describe('ChatPanel quick actions', () => {
     expect(broadcastPlanSource).toContain("() => playlistType.value === 'rotation'")
     expect(broadcastPlanSource).toContain('? rotationDurationScopeText.value')
     expect(broadcastPlanSource).not.toContain('00:00:00 至 ${secondsToClockText(rotationTargetDurationSeconds.value)}')
-    expect(broadcastPlanSource).toContain('layoutDraft: playlistType.value === \'tv\' ? currentLayoutDraft.value : null')
-    expect(broadcastPlanSource).toContain('currentLayoutDraft.value = document.playlistType === \'tv\' ? document.layoutDraft : null')
+    expect(broadcastPlanSource).toContain('layoutDraft: currentLayoutDraft.value')
+    expect(broadcastPlanSource).toContain('document.layoutDraft ?? resolveCurrentTvLayoutDraft()')
+    expect(broadcastPlanSource).toContain(': document.layoutDraft ?? null')
+  })
+
+  it('shows the active playlist as a compact assistant workspace instead of helper copy', () => {
+    expect(broadcastPlanSource).toContain('class="assistant-workspace-chip"')
+    expect(broadcastPlanSource).toContain('正在与${label}交互')
+    expect(broadcastPlanSource).toContain('handleCloseAssistantWorkspace')
+    expect(broadcastPlanSource).toContain('退出当前工作区后')
+    expect(broadcastPlanSource).toContain(':workspace-closed-notice="assistantWorkspaceClosedNotice"')
+    expect(chatPanelSource).toContain('workspaceClosedNotice?: string')
+    expect(chatPanelSource).toContain("processTypeLabel: '工作区'")
+    expect(broadcastPlanSource).not.toContain('aiSidebarSubtitle')
+    expect(broadcastPlanSource).not.toContain('class="ai-sidebar-subtitle"')
+    expect(broadcastPlanSource).not.toContain('var(--el-color-success)')
   })
 
   it('formats rotation ranges as duration and relative position in the foreground chat', () => {
@@ -183,19 +216,123 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('const decision = await runtimeFacade.submitInstruction')
     expect(chatPanelSource).toContain('agentCoreEnabled: true')
     expect(chatPanelSource).toContain('const foregroundLayoutDraftEnabled = false')
-    expect(chatPanelSource).toContain('layoutDraftEnabled: foregroundLayoutDraftEnabled')
-    expect(chatPanelSource).toContain('currentLayoutDraft: foregroundLayoutDraftEnabled ? pendingLayoutDraft.value : null')
+    expect(chatPanelSource).toContain('layoutDraftEnabled: foregroundLayoutDraftRuntimeEnabled')
+    expect(chatPanelSource).toContain('const currentLayoutDraft = foregroundLayoutDraftRuntimeEnabled')
+    expect(chatPanelSource).toContain('const pendingReviewLifecycle = resolvePendingReviewLifecycle')
+    expect(chatPanelSource).toContain('const foregroundContextPackage = buildForegroundAgentContextPackage')
+    expect(chatPanelSource).toContain('foregroundContextPackage,')
     expect(chatPanelSource).toContain('runtimeFacade.executePendingCommand')
     expect(chatPanelSource).toContain('runtimeFacade.resolvePendingTargetSelection')
     expect(chatPanelSource).toContain('runtimeFacade.resolvePendingInsertRecommendation')
     expect(chatPanelSource).not.toContain('openClawBridge.submitInstruction')
     expect(chatPanelSource).not.toContain('getOpenClawBridge')
+    expect(orchestrationHookSource).toContain('targetTimeRange?: { start: string; end: string }')
+    expect(orchestrationHookSource).toContain('searchKeywords?: string[]')
+    expect(orchestrationHookSource).toContain("import { resolveFormalOrchestrationSearchKeywords } from '@/services/retrievalConstraintCompiler'")
+    expect(orchestrationHookSource).toContain('resolveFormalOrchestrationSearchKeywords(payload.userInput)')
+    expect(orchestrationHookSource).toContain('...(searchKeywords?.length ? { searchKeywords } : {})')
+  })
+
+  it('switches back to the schedule workspace when formal orchestration starts', () => {
+    expect(broadcastPlanSource).toContain('activateScheduleWorkspace: () => {')
+    expect(broadcastPlanSource).toContain("activeWorkspaceTab.value = 'schedule'")
+    expect(orchestrationHookSource).toContain('activateScheduleWorkspace?: () => void')
+    expect(orchestrationHookSource).toContain('options.activateScheduleWorkspace?.()')
+    expect(orchestrationHookSource.indexOf('options.activateScheduleWorkspace?.()')).toBeLessThan(
+      orchestrationHookSource.indexOf('await startOrchestrationRuntime('),
+    )
+  })
+
+  it('passes the foreground layout draft from the playlist workspace into runtime context', () => {
+    expect(broadcastPlanSource).toContain(':current-layout-draft="currentLayoutDraft"')
+    expect(chatPanelSource).toContain('currentLayoutDraft?: LayoutDraft | null')
+    expect(chatPanelSource).toContain('const foregroundLayoutDraftRuntimeEnabled = true')
+    expect(chatPanelSource).toContain('props.currentLayoutDraft ?? pendingLayoutDraft.value')
+    expect(chatPanelSource).toContain('layoutDraftEnabled: foregroundLayoutDraftRuntimeEnabled')
+    expect(chatPanelSource).toContain('appendLayoutDraftWorkspaceFeedback')
+    expect(chatPanelSource).not.toContain('layoutDraftEnabled: foregroundLayoutDraftEnabled')
+  })
+
+  it('surfaces blocked draft-commit feedback instead of always saying the draft was updated', () => {
+    expect(chatPanelSource).toContain("decision.feedback.processTypeLabel === '版面草案待调整'")
+    expect(chatPanelSource).toContain('? decision.feedback.content')
+    expect(chatPanelSource).toContain('const isVisibleLayoutDraftBlockingFeedback = (message: Message): boolean =>')
+    expect(chatPanelSource).toContain("message.content.includes('不会进入正式编排')")
+    expect(chatPanelSource).toContain('if (isVisibleLayoutDraftBlockingFeedback(message)) return false')
+    expect(chatPanelSource).toContain('const shouldKeepDraftBlockingInputVisible = (input: Omit<Message, \'role\'>): boolean =>')
+    expect(chatPanelSource).toContain('&& !shouldKeepDraftBlockingInputVisible(input)')
+    expect(chatPanelSource).toContain('左侧版面已更新，可以继续微调或确认进入编排。')
+  })
+
+  it('keeps layout draft upload visible and syncs uploaded drafts into the playlist workspace', () => {
+    const draftUpdatedBlock = broadcastPlanSource.match(/const handleChatLayoutDraftUpdated = \([\s\S]*?\nconst handleCreatePlaylist/)?.[0] ?? ''
+
+    expect(chatPanelSource).toContain('ref="layoutFileInput"')
+    expect(chatPanelSource).not.toContain('v-if="false"\n        ref="layoutFileInput"')
+    expect(chatPanelSource).toContain('title="上传版面草案"')
+    expect(chatPanelSource).toContain('class="input-shell"')
+    expect(chatPanelSource).toContain('class="input-icon-button"')
+    expect(chatPanelSource).toContain('class="send-action-button"')
+    expect(chatPanelSource).toContain('resolveForegroundLayoutDraft')
+    expect(chatPanelSource).toContain('const uploadedDraft = resolveForegroundLayoutDraft')
+    expect(chatPanelSource).toContain("if (activePlaylistType.value === 'none')")
+    expect(chatPanelSource).toContain('playlistType: activePlaylistType.value')
+    expect(chatPanelSource).toContain("emit('layoutDraftUpdated', {")
+    expect(chatPanelSource).toContain('draft: uploadedDraft')
+    expect(chatPanelSource).not.toContain('class="layout-upload-button"')
+    expect(draftUpdatedBlock).toContain('persistCurrentPlaylistDocument()')
+    expect(broadcastPlanSource).toContain('const isSwitchingPlaylistType = payload.playlistType !== playlistType.value')
+    expect(broadcastPlanSource).toContain("payload.playlistType === 'rotation' && (isNewPlaylistDocument || isSwitchingPlaylistType)")
+    expect(broadcastPlanSource).not.toContain("if (payload.playlistType === 'rotation') {\n    currentLayoutDraft.value = null")
+  })
+
+  it('renders assistant process feedback separately from the main reply', () => {
+    expect(chatPanelSource).toContain('getAssistantProcessLines(message).length > 0')
+    expect(chatPanelSource).toContain('class="system-process-strip"')
+    expect(chatPanelSource).toContain('assistantProcessSummary')
+    expect(chatPanelSource).toContain('已检查当前播单：暂无草案。')
+    expect(chatPanelSource).not.toContain('已根据当前时段、节目匹配度和风险提示完成这次处理。')
+    expect(chatPanelSource).not.toContain('已结合当前空窗、候选匹配度和约束条件做出选择。')
+    expect(chatPanelSource).toContain('已根据当前时段、节目线索和风险提示完成这次处理。')
+    expect(chatPanelSource).toContain('已结合当前空窗、可用候选和约束条件做出选择。')
+  })
+
+  it('keeps natural-language draft switch feedback visible in the foreground chat', () => {
+    expect(chatPanelSource).toContain('const visibleContent = /切换|上传版面|默认版面|频道版面/.test(feedback.content)')
+    expect(chatPanelSource).toContain('content: visibleContent')
+    expect(chatPanelSource).toContain("if (message.processTypeLabel === '版面更新') return false")
+    expect(chatPanelSource).toContain("if (/^已切换到.+频道版面/.test(message.content)")
+  })
+
+  it('keeps rotation playlist creation independent from TV layout drafts', () => {
+    const createPlaylistBlock = broadcastPlanSource.match(/const handleCreatePlaylist = \(type: Exclude<PlaylistType, 'none'>\) => \{[\s\S]*?\n\}/)?.[0] ?? ''
+    const playlistStateChangedBlock = broadcastPlanSource.match(/const handlePlaylistStateChanged = \(payload: \{[\s\S]*?\nconst handlePlaylistFileOpenRequested/)?.[0] ?? ''
+
+    expect(createPlaylistBlock).toContain("currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : null")
+    expect(createPlaylistBlock).toContain("activeWorkspaceTab.value = 'schedule'")
+    expect(playlistStateChangedBlock).toContain("payload.playlistType === 'rotation' && (isNewPlaylistDocument || isSwitchingPlaylistType)")
+    expect(playlistStateChangedBlock).toContain('currentLayoutDraft.value = null')
+    expect(playlistStateChangedBlock).toContain('currentLayoutDraftFeasibility.value = null')
+    expect(playlistStateChangedBlock).toContain("activeWorkspaceTab.value = 'schedule'")
+    expect(broadcastPlanSource).toContain("playlistType.value === 'rotation' && Boolean(currentLayoutDraft.value)")
+    expect(chatPanelSource).toContain('clearPendingRuntimeTaskState({ clearLayoutDraft: playlistContextTransition.clearLayoutDraft })')
+    expect(chatPanelSource).toContain('const clearPendingRuntimeTaskState = (options: { clearLayoutDraft?: boolean } = {}) =>')
+    expect(chatPanelSource).toContain('if (options.clearLayoutDraft) {\n    clearPendingLayoutDraftState()')
   })
 
   it('keeps the broadcast-plan foreground page off the OpenClaw host bridge', () => {
     expect(broadcastPlanSource).not.toContain('getOpenClawHostAdapter')
     expect(broadcastPlanSource).not.toContain('openClawHostAdapter')
     expect(broadcastPlanSource).not.toContain('bigbiandan.openclaw')
+  })
+
+  it('shows a plain-language TV layout draft strategy without per-row technical notes', () => {
+    expect(broadcastPlanSource).toContain("label: '电视播单'")
+    expect(broadcastPlanSource).toContain('按草案里的栏目名找栏目或节目')
+    expect(broadcastPlanSource).toContain('连续剧按播出顺序接着排')
+    expect(broadcastPlanSource).toContain('找不到合适节目时留空，留给人工确认，不阻断编排')
+    expect(broadcastPlanSource).toContain("const intent = playlistType.value === 'tv'")
+    expect(broadcastPlanSource).toContain("? ''")
   })
 
   it('syncs successful runtime execution back from runtime or atomic state', () => {
@@ -237,7 +374,7 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('interface AgentSearchSummaryCard')
     expect(chatPanelSource).toContain('const getAgentSearchSummaryCards')
     expect(chatPanelSource).toContain('class="agent-search-panel"')
-    expect(chatPanelSource).toContain('检索与上下文')
+    expect(chatPanelSource).toContain('查找记录')
     expect(chatPanelSource).not.toContain('class="agent-search-panel is-inline"')
     expect(chatPanelSource).toContain('class="agent-search-card"')
     expect(chatPanelSource).toContain('candidateSource?.query')
@@ -245,7 +382,7 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('candidateSource?.recordCount')
     expect(chatPanelSource).toContain('details.agentEvidenceBudget')
     expect(chatPanelSource).toContain('getBudgetLine(\'候选证据\'')
-    expect(chatPanelSource).toContain('已按上下文预算裁剪')
+    expect(chatPanelSource).toContain('已精简显示')
   })
 
   it('surfaces Agent Core pending LLM context inside pending atomic panels', () => {
@@ -260,9 +397,86 @@ describe('ChatPanel quick actions', () => {
   it('builds runtime history from visible conversation only', () => {
     expect(chatPanelSource).toContain('const buildVisibleRuntimeHistory')
     expect(chatPanelSource).toContain('visibleMessages.value')
-    expect(chatPanelSource).toContain("message.role === 'user' ? '用户' : '助手'")
+    expect(chatPanelSource).toContain('const currentWorkspaceKey = resolveCurrentPendingWorkspaceKey()')
+    expect(chatPanelSource).toContain('buildWorkspaceScopedRuntimeHistory(visibleMessages.value')
+    expect(chatPanelSource).toContain('const buildUserMessage = (content: string): Message =>')
+    expect(chatPanelSource).toContain('workspaceKey: resolveCurrentMessageWorkspaceKey()')
     expect(chatPanelSource).toContain('history: buildVisibleRuntimeHistory(content)')
     expect(chatPanelSource).not.toContain('history: messages.value.slice(-6).map((message) => message.content)')
+  })
+
+  it('expires pending review state before routing an unrelated foreground message', () => {
+    expect(chatPanelSource).toContain('resolvePendingReviewLifecycle')
+    expect(chatPanelSource).toContain('const currentWorkspaceKey = resolveCurrentPendingWorkspaceKey()')
+    expect(chatPanelSource).toContain('const pendingReviewLifecycle = resolvePendingReviewLifecycle')
+    expect(chatPanelSource).toContain('pendingWorkspaceKey: pendingReviewWorkspaceKey.value')
+    expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null')
+    expect(chatPanelSource).toContain('if (pendingReviewLifecycle.shouldExpire)')
+    expect(chatPanelSource).toContain('pendingCommand.value = null')
+    expect(chatPanelSource).toContain('pendingAtomicContext.value = null')
+    expect(chatPanelSource).toContain('pendingReviewWorkspaceKey.value = null')
+    expect(chatPanelSource).toContain('pendingCommand: usablePendingCommand')
+    expect(chatPanelSource).toContain('pendingAtomicContext: usablePendingAtomicContext')
+  })
+
+  it('routes the next user turn as layout draft continuation after a partial draft prompt', () => {
+    expect(chatPanelSource).toContain('const preferLayoutDraftContinuation = ref(false)')
+    expect(chatPanelSource).toContain('const rememberLayoutDraftContinuationIfNeeded = (feedback: RuntimeFeedback) =>')
+    expect(chatPanelSource).toContain("feedback.processTypeLabel !== '还要补草案'")
+    expect(chatPanelSource).toContain("draftCompleteness?.status !== 'partial'")
+    expect(chatPanelSource).toContain('preferLayoutDraftContinuation.value = true')
+    expect(chatPanelSource).toContain('const preferLayoutDraftRefine = foregroundLayoutDraftRuntimeEnabled')
+    expect(chatPanelSource).toContain('&& preferLayoutDraftContinuation.value')
+    expect(chatPanelSource).toContain('preferLayoutDraftContinuation.value = false')
+    expect(chatPanelSource).toContain('preferLayoutDraftRefine,')
+  })
+
+  it('interrupts stale pending review state before sending a new foreground message to runtime', () => {
+    const sendMessageBlock = chatPanelSource.match(/const sendMessage = async \(\) => \{[\s\S]*?\n\}/)?.[0] ?? ''
+    const interruptIndex = sendMessageBlock.indexOf('interruptPendingReviewForNewInput(content)')
+    const userMessageIndex = sendMessageBlock.indexOf('messages.value.push(buildUserMessage(content))')
+    const processIndex = sendMessageBlock.indexOf('await processMessage(content)')
+
+    expect(sendMessageBlock).toContain('interruptPendingReviewForNewInput(content)')
+    expect(interruptIndex).toBeGreaterThanOrEqual(0)
+    expect(userMessageIndex).toBeGreaterThan(interruptIndex)
+    expect(processIndex).toBeGreaterThan(userMessageIndex)
+    expect(chatPanelSource).toContain("pendingReviewInterruptedNotice.value = resolvePendingReviewExpiredNotice('next_non_answer')")
+    expect(chatPanelSource).toContain('const pendingReviewExpiredNotice = interruptedPendingReviewNotice ?? (pendingReviewLifecycle.shouldExpire')
+    expect(chatPanelSource).toContain('await applyRuntimeDecision(decision, pendingReviewExpiredNotice)')
+  })
+
+  it('binds foreground pending review actions to the active playlist workspace', () => {
+    expect(chatPanelSource).toContain('const pendingReviewWorkspaceKey = ref<string | null>(null)')
+    expect(chatPanelSource).toContain('const resolveCurrentPendingWorkspaceKey = () => resolveForegroundWorkspaceKey')
+    expect(chatPanelSource).toContain('const bindPendingReviewToCurrentWorkspace = () =>')
+    expect(chatPanelSource).toContain('const isPendingReviewWorkspaceCurrent = () =>')
+    expect(chatPanelSource).toContain('const expirePendingReviewForWorkspaceChange = (message: string) =>')
+    expect(chatPanelSource).toContain('bindPendingReviewToCurrentWorkspace()')
+    expect(chatPanelSource).toContain('if (!isPendingReviewWorkspaceCurrent())')
+    expect(chatPanelSource).toContain('当前待确认操作不属于这个工作区，已失效')
+    expect(chatPanelSource).toContain('pendingReviewWorkspaceKey.value = null')
+  })
+
+  it('interrupts a running orchestration and routes the typed message as the next foreground task', () => {
+    const primaryActionBlock = chatPanelSource.match(/const handlePrimaryAction = async \(\) => \{[\s\S]*?\n\}/)?.[0] ?? ''
+    const orchestrationWatchBlock = chatPanelSource.match(/watch\(\n  \(\) => \(\{\n    isOrchestrating:[\s\S]*?\{ immediate: true \},\n\)/)?.[0] ?? ''
+
+    expect(chatPanelSource).toContain('const interruptedCommandAfterCancel = ref<string | null>(null)')
+    expect(chatPanelSource).toContain('const terminalOrchestrationStatuses = new Set')
+    expect(chatPanelSource).toContain('const isForegroundOrchestrationRunning = computed')
+    expect(chatPanelSource).toContain("&& !isTerminalOrchestrationStatus(props.orchestrationSession?.status)")
+    expect(chatPanelSource).toContain(":class=\"{ 'is-stop': isForegroundOrchestrationRunning }\"")
+    expect(chatPanelSource).toContain("v-if=\"isForegroundOrchestrationRunning\"")
+    expect(primaryActionBlock).toContain('if (isForegroundOrchestrationRunning.value)')
+    expect(primaryActionBlock).toContain('const content = inputMessage.value.trim()')
+    expect(primaryActionBlock).toContain('interruptedCommandAfterCancel.value = content')
+    expect(primaryActionBlock).toContain('messages.value.push(buildUserMessage(content))')
+    expect(primaryActionBlock).toContain("emit('cancelRequested')")
+    expect(orchestrationWatchBlock).toContain('isOrchestrating: isForegroundOrchestrationRunning.value')
+    expect(orchestrationWatchBlock).toContain('!isOrchestrating && interruptedCommandAfterCancel.value && !loading.value')
+    expect(orchestrationWatchBlock).toContain("void processMessage(nextContent, '重新判断中')")
+    expect(orchestrationWatchBlock).not.toContain('isOrchestrating ||\n      !sessionId')
   })
 
   it('renders foreground confirmation controls for Agent Core pending writes', () => {
@@ -292,16 +506,16 @@ describe('ChatPanel quick actions', () => {
 
     expect(targetSelectionBlock).toContain('pendingAtomicContext.value.agentPendingTask')
     expect(targetSelectionBlock).toContain("slot: 'targetItemId'")
-    expect(targetSelectionBlock).toContain("await continuePendingAgentTask('确认')")
-    expect(targetSelectionBlock.indexOf("await continuePendingAgentTask('确认')")).toBeLessThan(
+    expect(targetSelectionBlock).toContain("await continuePendingAgentTask('确认', '确认目标中')")
+    expect(targetSelectionBlock.indexOf("await continuePendingAgentTask('确认', '确认目标中')")).toBeLessThan(
       targetSelectionBlock.indexOf('rehydratePendingTargetSelectionFromAtomicContext'),
     )
     expect(targetSelectionBlock).toContain('runtimeFacade.resolvePendingTargetSelection')
 
     expect(insertRecommendationBlock).toContain('pendingAtomicContext.value.agentPendingTask')
     expect(insertRecommendationBlock).toContain("slot: 'candidateId'")
-    expect(insertRecommendationBlock).toContain("await continuePendingAgentTask('确认')")
-    expect(insertRecommendationBlock.indexOf("await continuePendingAgentTask('确认')")).toBeLessThan(
+    expect(insertRecommendationBlock).toContain("await continuePendingAgentTask('确认', `确认${actionLabel}中`)")
+    expect(insertRecommendationBlock.indexOf("await continuePendingAgentTask('确认', `确认${actionLabel}中`)")).toBeLessThan(
       insertRecommendationBlock.indexOf('rehydratePendingInsertRecommendationFromAtomicContext'),
     )
     expect(insertRecommendationBlock).toContain('runtimeFacade.resolvePendingInsertRecommendation')
@@ -338,10 +552,23 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain(':disabled="loading || !pendingAtomicInsertSelectedCandidateId"')
   })
 
+  it('keeps pending task and recommendation panels in editor-facing language', () => {
+    expect(chatPanelSource).toContain('formatCompositeTaskSummary(context.compositeTaskRun)')
+    expect(chatPanelSource).toContain('const formatCompositeTaskConfirmationNote')
+    expect(chatPanelSource).toContain('formatRecommendationStrengthLabel(index)')
+    expect(chatPanelSource).toContain('我按节目线索和当前播单排好了候选')
+    expect(chatPanelSource).toContain('选好后我会先预演插入，确认没有问题再写入。')
+    expect(chatPanelSource).not.toContain('置信度 {{ Math.round(candidate.confidence * 100) }}%')
+    expect(chatPanelSource).not.toContain('相似候选已经按匹配度排序')
+    expect(chatPanelSource).not.toContain('待确认任务：${context.compositeTaskRun.goal}')
+    expect(chatPanelSource).not.toContain('我会按步骤处理：${stageText}')
+    expect(chatPanelSource).not.toContain('匹配度 ${confidenceText}')
+  })
+
   it('clears stale pending Agent context when a new foreground runtime message resolves', () => {
     const messageDecisionBlock = chatPanelSource.match(/case 'message':[\s\S]*?return/)?.[0] ?? ''
 
-    expect(messageDecisionBlock).toContain('appendRuntimeFeedback(decision.feedback)')
+    expect(messageDecisionBlock).toContain('appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))')
     expect(messageDecisionBlock).toContain('pendingAtomicContext.value = decision.pendingAtomicClarification')
     expect(messageDecisionBlock).toContain(': null')
   })
@@ -350,10 +577,29 @@ describe('ChatPanel quick actions', () => {
     expect(broadcastPlanSource).toContain(':playlist-id="currentPlaylistId"')
     expect(chatPanelSource).toContain('playlistId?: string | null')
     expect(chatPanelSource).toContain('watch(() => props.playlistId')
-    expect(chatPanelSource).toContain('clearPendingRuntimeTaskState({ clearLayoutDraft: activePlaylistType.value === \'rotation\' })')
+    expect(chatPanelSource).toContain('resolveForegroundWorkspaceTransition')
+    expect(chatPanelSource).toContain('playlistContextTransition.clearLayoutDraft')
     expect(chatPanelSource).toContain('const clearPendingRuntimeTaskState')
     expect(chatPanelSource).toContain('pendingCommand.value = null')
     expect(chatPanelSource).toContain('pendingAtomicContext.value = null')
-    expect(chatPanelSource).toContain('playlistContextChanged')
+    expect(chatPanelSource).toContain('transition.changed')
+  })
+
+  it('treats pending review like a one-turn Codex review gate in the foreground input path', () => {
+    expect(chatPanelSource).toContain('const pendingReviewLifecycle = resolvePendingReviewLifecycle')
+    expect(chatPanelSource).toContain('const usablePendingCommand = pendingReviewLifecycle.canUsePendingReview ? pendingCommand.value : null')
+    expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null')
+    expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewCancelText(content))')
+    expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewConfirmText(content))')
+    expect(chatPanelSource).toContain('runtimeFacade.executePendingCommand({')
+    expect(chatPanelSource).toContain('const pendingReviewInterruptedNotice = ref<string | null>(null)')
+    expect(chatPanelSource).toContain('const interruptPendingReviewForNewInput = (content: string): boolean =>')
+    expect(chatPanelSource).toContain('interruptPendingReviewForNewInput(content)')
+    expect(chatPanelSource).toContain('const interruptedPendingReviewNotice = pendingReviewInterruptedNotice.value')
+    expect(chatPanelSource).toContain('const pendingReviewExpiredNotice = interruptedPendingReviewNotice ?? (pendingReviewLifecycle.shouldExpire')
+    expect(chatPanelSource).toContain('resolvePendingReviewExpiredNotice(pendingReviewLifecycle.expireReason)')
+    expect(chatPanelSource).toContain('withRuntimeFeedbackNotice(decision.feedback, leadingNotice)')
+    expect(chatPanelSource).toContain('await applyRuntimeDecision(decision, pendingReviewExpiredNotice)')
+    expect(chatPanelSource).not.toContain('pushPendingReviewExpiredMessage(pendingReviewLifecycle.expireReason)')
   })
 })

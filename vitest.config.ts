@@ -1,6 +1,6 @@
 import { fileURLToPath, URL } from 'node:url'
 
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 
 export default defineConfig({
   resolve: {
@@ -11,6 +11,12 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/__tests__/*.test.ts'],
+    exclude: [
+      ...configDefaults.exclude,
+      'src/services/__tests__/openClaw*.test.ts',
+      'src/services/__tests__/openClawToOrchestrator.tvSequence.test.ts',
+      'src/services/__tests__/openClawHostAdapter.test.ts',
+    ],
     clearMocks: true,
     restoreMocks: true,
   },

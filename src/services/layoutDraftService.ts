@@ -1,6 +1,7 @@
 import type { ChatMessage } from '@/types/llm'
 import type { LayoutDraft, LayoutDraftSpec, LayoutDraftSpecSegment, LayoutIntentSegment } from '@/types/orchestration'
 import type { LLMClient } from '@/services/llm/llmClient'
+import { cleanLayoutDraftActionNoise, cleanLayoutDraftSemanticLabel } from '@/services/layoutDraftSemanticCleaner'
 
 export interface LayoutDraftGenerationInput {
   channelId: string
@@ -52,15 +53,13 @@ const extractFreeformLayoutLabel = (input: string): string | null => {
   const normalized = input
     .replace(/^(?:不参考当前版面参考|不要参考当前版面参考|不参考当前版面|不要参考当前版面|忽略当前版面参考)[,，、]*/u, '')
     .trim()
-  const verbMatch = normalized.match(/(?:排入|编入|改成|换成|替换成|替换为|调整为|改为|统一成|变成)(.+)$/u)
+  const actionCleaned = cleanLayoutDraftActionNoise(normalized, { stripLeadingPoliteCue: true })
+  const verbMatch = actionCleaned.match(/(?:排入|编入|改成|换成|替换成|替换为|调整为|改为|统一成|变成|安排|编排|排|继续播|接着播|续播|顺播)(.+)$/u)
   if (!verbMatch && !/(电视剧|剧场|新闻|资讯|评论|健康|娱乐|综艺|少儿|纪录|电影|栏目)/u.test(normalized)) {
     return null
   }
-  const rawLabel = verbMatch?.[1] ?? normalized
-  const cleaned = rawLabel
-    .replace(/^(?:全部|都|统一|整体)+/u, '')
-    .replace(/(?:节目|栏目|版面|内容)+$/u, '')
-    .trim()
+  const rawLabel = verbMatch?.[1] ?? actionCleaned
+  const cleaned = cleanLayoutDraftSemanticLabel(rawLabel, { stripLeadingPoliteCue: true })
   return cleaned || null
 }
 
@@ -138,18 +137,19 @@ const buildGuessFromStructuredIntent = (
   semanticLabel?: string,
   programTypeHint?: string,
 ): ProgramTypeGuess | null => {
-  if (!semanticLabel && !programTypeHint) {
+  const label = cleanLayoutDraftSemanticLabel(semanticLabel, { stripLeadingPoliteCue: true })
+  if (!label && !programTypeHint) {
     return null
   }
 
-  const label = semanticLabel?.trim() || (programTypeHint ? DEFAULT_LABEL_BY_PROGRAM_TYPE[programTypeHint] : undefined) || '自定义版面'
-  const queryHints = buildStructuredQueryHints(label, programTypeHint)
+  const resolvedLabel = label || (programTypeHint ? DEFAULT_LABEL_BY_PROGRAM_TYPE[programTypeHint] : undefined) || '自定义版面'
+  const queryHints = buildStructuredQueryHints(resolvedLabel, programTypeHint)
 
   return {
-    label,
-    programType: normalizeStructuredProgramType(label, programTypeHint),
+    label: resolvedLabel,
+    programType: normalizeStructuredProgramType(resolvedLabel, programTypeHint),
     queryHints,
-    sequential: programTypeHint === 'drama' || /剧场|电视剧|连续剧/u.test(label) || hasDramaEpisodeCue(label),
+    sequential: programTypeHint === 'drama' || /剧场|电视剧|连续剧/u.test(resolvedLabel) || hasDramaEpisodeCue(resolvedLabel),
   }
 }
 
@@ -273,6 +273,20 @@ const resolveProgramGuess = (
   input: string,
   overrides?: { semanticLabel?: string; programTypeHint?: string },
 ): ProgramTypeGuess => {
+  const freeformLabel = extractFreeformLayoutLabel(input)
+  const cleanedOverrideLabel = cleanLayoutDraftSemanticLabel(overrides?.semanticLabel, { stripLeadingPoliteCue: true })
+  const defaultProgramLabel = overrides?.programTypeHint ? DEFAULT_LABEL_BY_PROGRAM_TYPE[overrides.programTypeHint] : undefined
+  const freeformIsOnlyDaypartWithDefaultType = Boolean(
+    freeformLabel
+    && defaultProgramLabel
+    && freeformLabel !== defaultProgramLabel
+    && freeformLabel.endsWith(defaultProgramLabel)
+    && /^(?:上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全天|整天|全日)/u.test(freeformLabel),
+  )
+  if (freeformLabel && !cleanedOverrideLabel && !freeformIsOnlyDaypartWithDefaultType) {
+    return buildGuessFromFreeformLabel(freeformLabel)
+  }
+
   const structuredGuess = buildGuessFromStructuredIntent(
     overrides?.semanticLabel,
     overrides?.programTypeHint,
@@ -281,7 +295,6 @@ const resolveProgramGuess = (
     return structuredGuess
   }
 
-  const freeformLabel = extractFreeformLayoutLabel(input)
   if (freeformLabel) {
     return buildGuessFromFreeformLabel(freeformLabel)
   }
@@ -958,15 +971,36 @@ ${input.programTypeHint ? `LLM 识别出的类型提示：${input.programTypeHin
           start: normalizeClock(parsed.coverage.start),
           end: normalizeClock(parsed.coverage.end),
         },
-        segments: parsed.segments.map((segment, index) => ({
-          id: segment.id ?? `draft-segment-${index + 1}`,
-          label: segment.label,
-          startTime: normalizeClock(segment.startTime),
-          endTime: normalizeClock(segment.endTime),
-          programType: normalizeStructuredProgramType(segment.label, segment.programType),
-          queryHints: mergeStructuredQueryHints(segment.queryHints, segment.label, segment.programType),
-          sequential: segment.sequential,
-        })),
+        segments: parsed.segments.map((segment, index) => {
+          const fallbackSegment = fallback.segments[index]
+          const parsedLabel = cleanLayoutDraftSemanticLabel(segment.label, { stripLeadingPoliteCue: true })
+          const fallbackLabel = fallbackSegment?.label
+          const label = parsedLabel
+            && fallbackLabel
+            && parsedLabel !== fallbackLabel
+            && parsedLabel.endsWith(fallbackLabel)
+            && /^(?:上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全天|整天|全日)/u.test(parsedLabel)
+            ? fallbackLabel
+            : parsedLabel
+              ?? fallbackLabel
+            ?? DEFAULT_LABEL_BY_PROGRAM_TYPE[segment.programType]
+            ?? '自定义版面'
+          const programType = normalizeStructuredProgramType(label, segment.programType ?? fallbackSegment?.programType)
+          const queryHints = (segment.queryHints ?? [])
+            .map((hint) => cleanLayoutDraftSemanticLabel(hint, { stripLeadingPoliteCue: true }))
+            .filter((hint): hint is string => Boolean(hint))
+          const fallbackHints = fallbackSegment?.queryHints ?? []
+
+          return {
+            id: segment.id ?? `draft-segment-${index + 1}`,
+            label,
+            startTime: normalizeClock(segment.startTime),
+            endTime: normalizeClock(segment.endTime),
+            programType,
+            queryHints: mergeStructuredQueryHints(queryHints.length > 0 ? queryHints : fallbackHints, label, programType),
+            sequential: segment.sequential,
+          }
+        }),
       }
     } catch {
       return fallback

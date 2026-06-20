@@ -1,22 +1,21 @@
-// Xnews 现代化设计系统变量
-// 采用橙色主题风格：深橙 + 亮橙组合
+// Xnews design tokens aligned with the Vite blue accent.
 
 :root {
   // ============================================
-  // 主色调 - 橙色主题系（深橙 + 亮橙）
+  // Primary palette - Vite blue accent
   // ============================================
-  --xnews-color-primary: #F97316;
-  --xnews-color-primary-light: #FB923C;
-  --xnews-color-primary-dark: #EA580C;
-  --xnews-color-primary-gradient: linear-gradient(135deg, #F97316 0%, #FB923C 100%);
+  --xnews-color-primary: #646CFF;
+  --xnews-color-primary-light: #747BFF;
+  --xnews-color-primary-dark: #535BF2;
+  --xnews-color-primary-gradient: linear-gradient(135deg, #646CFF 0%, #747BFF 100%);
   
   // 功能色
-  --xnews-color-success: #10B981;
-  --xnews-color-success-light: #34D399;
-  --xnews-color-success-dark: #059669;
-  --xnews-color-warning: #F59E0B;
-  --xnews-color-warning-light: #FBBF24;
-  --xnews-color-warning-dark: #D97706;
+  --xnews-color-success: #646CFF;
+  --xnews-color-success-light: #747BFF;
+  --xnews-color-success-dark: #535BF2;
+  --xnews-color-warning: #646CFF;
+  --xnews-color-warning-light: #747BFF;
+  --xnews-color-warning-dark: #535BF2;
   --xnews-color-danger: #EF4444;
   --xnews-color-danger-light: #F87171;
   --xnews-color-danger-dark: #DC2626;
@@ -27,16 +26,16 @@
   // ============================================
   // 中性色 - 精致灰阶
   // ============================================
-  --xnews-gray-50: #FFF7ED;
-  --xnews-gray-100: #FFEDD5;
-  --xnews-gray-200: #FED7AA;
-  --xnews-gray-300: #FDBA74;
-  --xnews-gray-400: #FB923C;
-  --xnews-gray-500: #F97316;
-  --xnews-gray-600: #EA580C;
-  --xnews-gray-700: #C2410C;
-  --xnews-gray-800: #9A3412;
-  --xnews-gray-900: #7C2D12;
+  --xnews-gray-50: #F8F9FF;
+  --xnews-gray-100: #EEF2FF;
+  --xnews-gray-200: #DDE3FF;
+  --xnews-gray-300: #C7D2FE;
+  --xnews-gray-400: #A5B4FC;
+  --xnews-gray-500: #646CFF;
+  --xnews-gray-600: #535BF2;
+  --xnews-gray-700: #3F46D8;
+  --xnews-gray-800: #3036B8;
+  --xnews-gray-900: #1E1B4B;
   
   // 文字颜色
   --xnews-text-primary: #1F2937;
@@ -49,11 +48,11 @@
   // ============================================
   // 背景色
   // ============================================
-  --xnews-bg-color: #FFF7ED;
+  --xnews-bg-color: #F8F9FF;
   --xnews-bg-white: #FFFFFF;
   --xnews-bg-elevated: #FFFFFF;
   --xnews-bg-overlay: rgba(255, 255, 255, 0.95);
-  --xnews-bg-sidebar: linear-gradient(180deg, #FFF7ED 0%, #FFEDD5 100%);
+  --xnews-bg-sidebar: linear-gradient(180deg, #FFFFFF 0%, #EEF2FF 100%);
   
   // ============================================
   // 字体系统 - 现代无衬线
@@ -114,26 +113,26 @@
   // ============================================
   // 阴影系统 - 柔和层级
   // ============================================
-  --xnews-shadow-xs: 0 1px 2px 0 rgba(249, 115, 22, 0.05);
-  --xnews-shadow-sm: 0 1px 3px 0 rgba(249, 115, 22, 0.08), 0 1px 2px -1px rgba(249, 115, 22, 0.05);
-  --xnews-shadow-md: 0 4px 6px -1px rgba(249, 115, 22, 0.08), 0 2px 4px -2px rgba(249, 115, 22, 0.05);
-  --xnews-shadow-lg: 0 10px 15px -3px rgba(249, 115, 22, 0.08), 0 4px 6px -4px rgba(249, 115, 22, 0.05);
-  --xnews-shadow-xl: 0 20px 25px -5px rgba(249, 115, 22, 0.08), 0 8px 10px -6px rgba(249, 115, 22, 0.05);
-  --xnews-shadow-2xl: 0 25px 50px -12px rgba(249, 115, 22, 0.15);
-  --xnews-shadow-inner: inset 0 2px 4px 0 rgba(249, 115, 22, 0.03);
+  --xnews-shadow-xs: 0 1px 2px 0 rgba(83, 91, 242, 0.05);
+  --xnews-shadow-sm: 0 1px 3px 0 rgba(83, 91, 242, 0.08), 0 1px 2px -1px rgba(83, 91, 242, 0.05);
+  --xnews-shadow-md: 0 4px 6px -1px rgba(83, 91, 242, 0.08), 0 2px 4px -2px rgba(83, 91, 242, 0.05);
+  --xnews-shadow-lg: 0 10px 15px -3px rgba(83, 91, 242, 0.08), 0 4px 6px -4px rgba(83, 91, 242, 0.05);
+  --xnews-shadow-xl: 0 20px 25px -5px rgba(83, 91, 242, 0.08), 0 8px 10px -6px rgba(83, 91, 242, 0.05);
+  --xnews-shadow-2xl: 0 25px 50px -12px rgba(83, 91, 242, 0.15);
+  --xnews-shadow-inner: inset 0 2px 4px 0 rgba(83, 91, 242, 0.03);
   
   // 彩色阴影
-  --xnews-shadow-primary: 0 4px 14px 0 rgba(249, 115, 22, 0.35);
-  --xnews-shadow-success: 0 4px 14px 0 rgba(16, 185, 129, 0.35);
-  --xnews-shadow-warning: 0 4px 14px 0 rgba(245, 158, 11, 0.35);
+  --xnews-shadow-primary: 0 4px 14px 0 rgba(100, 108, 255, 0.35);
+  --xnews-shadow-success: 0 4px 14px 0 rgba(100, 108, 255, 0.28);
+  --xnews-shadow-warning: 0 4px 14px 0 rgba(100, 108, 255, 0.28);
   --xnews-shadow-danger: 0 4px 14px 0 rgba(239, 68, 68, 0.35);
   
   // ============================================
   // 边框
   // ============================================
-  --xnews-border-color: #FED7AA;
-  --xnews-border-color-light: #FFEDD5;
-  --xnews-border-color-dark: #FDBA74;
+  --xnews-border-color: #DDE3FF;
+  --xnews-border-color-light: #EEF2FF;
+  --xnews-border-color-dark: #C7D2FE;
   --xnews-border-width: 1px;
   --xnews-border-style: solid;
   

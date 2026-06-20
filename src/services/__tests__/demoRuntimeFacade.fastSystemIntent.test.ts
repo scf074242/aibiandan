@@ -181,7 +181,7 @@ describe('DemoRuntimeFacade fast system intent', () => {
   it.each([
     '补齐当前空窗',
     '请把当前空窗补掉',
-  ])('补排命令“%s”不会被快速校验通道抢走', async (userInput) => {
+  ])('补排命令“%s”不会被快速校验通道抢走，会直接进入正式补排', async (userInput) => {
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -191,12 +191,14 @@ describe('DemoRuntimeFacade fast system intent', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('message')
-    if (result.kind !== 'message') {
-      throw new Error('expected message decision')
+    expect(result.kind).toBe('orchestration')
+    if (result.kind !== 'orchestration') {
+      throw new Error('expected orchestration decision')
     }
-    expect(result.feedback.processType).not.toBe('validation')
-    expect(mockLayoutRecognize).toHaveBeenCalled()
+    expect(result.orchestrationRequest.mode).toBe('partial_generate')
+    expect(result.feedback.processType).toBe('planning')
+    expect(mockLayoutRecognize).not.toHaveBeenCalled()
+    expect(mockTaskClassify).not.toHaveBeenCalled()
   })
 
   it('明确编排分析诉求会快速进入 layout_analysis，不调用版面识别和任务分类 LLM', async () => {

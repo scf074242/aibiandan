@@ -131,7 +131,7 @@ const EDITORIAL_DIMENSION_LABELS: Record<string, string> = {
   trend: '热度',
   sequence: '顺播',
   type_fit: '类型',
-  schedule_context: '上下文',
+  schedule_context: '当前播单',
 }
 
 const getEditorialDecision = (details?: DetailMap): DetailMap | undefined => {
@@ -342,16 +342,16 @@ const STATUS_LABELS: Record<string, string> = {
 const SAFETY_GATE_LABELS: Record<string, string> = {
   playlist_policy: '播单策略',
   source_coverage: '数据完整性',
-  pending_lifecycle: '多轮上下文',
-  context_fingerprint: '上下文变更校验',
+  pending_lifecycle: '多轮处理',
+  context_fingerprint: '播单变更校验',
   commit_fingerprint: '提交前复核',
   tv_sequence_selector: '电视顺播判断',
-  llm_intent_contract: 'LLM结构化意图',
-  pending_llm_context: '待办上下文合并',
-  llm_usage_audit: 'LLM调用留痕',
-  candidate_query_facets: '关键词拆分检索',
-  professional_slot_policy: '专业时段规则',
-  evidence_audit_chain: '取证链路',
+  llm_intent_contract: '理解用户要求',
+  pending_llm_context: '合并待办信息',
+  llm_usage_audit: '思考记录',
+  candidate_query_facets: '拆开线索查找',
+  professional_slot_policy: '时段规则',
+  evidence_audit_chain: '查找过程',
 }
 
 const PROFESSIONAL_RULE_LABELS: Record<string, string> = {
@@ -424,7 +424,7 @@ const formatAgentPendingLlmContextText = (details?: DetailMap): string => {
     collectedSlotKeys.length > 0 ? `已收集：${formatMappedList(collectedSlotKeys, SLOT_LABELS)}` : '',
     recommendations.length > 0 ? `候选 ${recommendations.length} 个` : '',
     targetOptions.length > 0 ? `目标 ${targetOptions.length} 个` : '',
-    sourceKeys.length > 0 ? `上下文：${formatMappedList(sourceKeys, SOURCE_LABELS)}` : '',
+    sourceKeys.length > 0 ? `参考：${formatMappedList(sourceKeys, SOURCE_LABELS)}` : '',
     evidenceText,
     allowedActions.length > 0 ? `可选：${formatMappedList(allowedActions, ACTION_LABELS)}` : '',
     latestUserInput,
@@ -1073,10 +1073,10 @@ export const buildDetailsSummary = (
   pushItem('专业结论', formatAgentAuditStringField(details, 'professionalConclusion'))
   pushItem('提交状态', formatAgentOperationText(details))
   pushItem('编排依据', formatAgentAuditBasisText(details))
-  pushItem('上下文状态', formatAgentPendingTaskText(details))
-  pushItem('上下文变化', formatAgentContextConflictText(details))
+  pushItem('待处理状态', formatAgentPendingTaskText(details))
+  pushItem('播单变化', formatAgentContextConflictText(details))
   pushItem('占用检查', formatAgentTimeOverlapText(details, deps.formatDisplayTimeRange))
-  pushItem('LLM上下文', formatAgentPendingLlmContextText(details))
+  pushItem('参考信息', formatAgentPendingLlmContextText(details))
   pushItem('约束处置', formatAgentConstraintHandlingText(details))
   pushItem('检索动作', formatAgentCandidateSearchText(details))
   pushItem('继续检索', formatAgentCandidateRetryText(details))

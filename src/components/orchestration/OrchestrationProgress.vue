@@ -130,8 +130,8 @@ const formatLogTime = (time: string) =>
 .progress-hero {
   padding: 16px 18px;
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 247, 237, 0.92));
-  border: 1px solid rgba(251, 146, 60, 0.12);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(238, 242, 255, 0.92));
+  border: 1px solid var(--app-line);
 }
 
 .progress-header {
@@ -159,8 +159,8 @@ const formatLogTime = (time: string) =>
   min-height: 30px;
   padding: 0 12px;
   border-radius: 999px;
-  background: rgba(249, 115, 22, 0.12);
-  color: #9a3412;
+  background: rgba(100, 108, 255, 0.12);
+  color: var(--app-accent-deep);
   font-size: 12px;
   font-weight: 700;
 }
@@ -174,7 +174,7 @@ const formatLogTime = (time: string) =>
 
 .progress-subtitle {
   margin: 0;
-  color: #57534e;
+  color: var(--app-text-soft);
   line-height: 1.6;
 }
 
@@ -192,7 +192,7 @@ const formatLogTime = (time: string) =>
   padding: 0 14px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.94);
-  border: 1px solid rgba(251, 146, 60, 0.12);
+  border: 1px solid var(--app-line);
 }
 
 .stat-pill strong {
@@ -201,14 +201,14 @@ const formatLogTime = (time: string) =>
 }
 
 .stat-label {
-  color: #78716c;
+  color: var(--app-text-muted);
   font-size: 12px;
   font-weight: 600;
 }
 
 .stat-pill.is-success {
-  background: rgba(236, 253, 243, 0.96);
-  border-color: rgba(34, 197, 94, 0.16);
+  background: rgba(238, 242, 255, 0.96);
+  border-color: rgba(100, 108, 255, 0.18);
 }
 
 .stat-pill.is-danger {
@@ -221,7 +221,7 @@ const formatLogTime = (time: string) =>
   padding: 14px 16px;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.8);
-  border: 1px solid rgba(251, 146, 60, 0.1);
+  border: 1px solid var(--app-line);
 }
 
 .current-gap {
@@ -232,7 +232,7 @@ const formatLogTime = (time: string) =>
 }
 
 .current-gap-label {
-  color: #78716c;
+  color: var(--app-text-muted);
   font-size: 12px;
   font-weight: 700;
 }
@@ -240,18 +240,18 @@ const formatLogTime = (time: string) =>
 .current-gap-range {
   font-size: 18px;
   font-weight: 700;
-  color: #9a3412;
+  color: var(--app-accent-deep);
 }
 
 .current-gap-action {
-  color: #57534e;
+  color: var(--app-text-soft);
 }
 
 .section-title {
   margin-bottom: 10px;
   font-size: 13px;
   font-weight: 700;
-  color: #7c2d12;
+  color: var(--app-accent-deep);
 }
 
 .logs-container {
@@ -270,11 +270,11 @@ const formatLogTime = (time: string) =>
   line-height: 1.6;
   padding: 10px 12px;
   border-radius: 12px;
-  background: rgba(255, 250, 245, 0.92);
+  background: rgba(248, 249, 255, 0.92);
 }
 
 .log-time {
-  color: #78716c;
+  color: var(--app-text-muted);
   font-variant-numeric: tabular-nums;
 }
 
@@ -292,11 +292,11 @@ const formatLogTime = (time: string) =>
 }
 
 .log-item.level-warn {
-  background: rgba(255, 251, 235, 0.96);
+  background: rgba(238, 242, 255, 0.96);
 }
 
 .log-item.level-warn .log-message {
-  color: #b45309;
+  color: var(--app-accent-deep);
 }
 
 .logs-empty {

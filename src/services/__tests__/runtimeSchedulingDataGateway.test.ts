@@ -619,6 +619,55 @@ describe('RuntimeSchedulingDataGateway', () => {
     )
   })
 
+  it('derives Chinese content facets instead of forwarding short natural phrases as one opaque query', async () => {
+    const gateway = new RuntimeSchedulingDataGateway({
+      scheduleState: buildScheduleState({ playlistType: 'rotation' }),
+      reader: {
+        getScheduleItems: () => [],
+        getProgramCandidates: () => [buildCandidate({
+          id: 'asset-short-city-flower',
+          programCode: '',
+          programName: '城市微短片：春日花路 30秒',
+          instanceName: '城市微短片：春日花路 30秒',
+          columnName: '城市形象',
+          programType: 'short_clip',
+          contentTags: ['城市形象', '春日花路', '短片', '轮播'],
+        })],
+      },
+    })
+    const runtime = new SchedulingAgentRuntime({ dataGateway: gateway })
+
+    const result = await runtime.submit({
+      userInput: '0点插入城市形象春日花路短片',
+      channelId: 'rotation-demo',
+      date,
+      interpretation: {
+        intent: 'insert',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetTime: '00:00:00',
+          programHint: '城市形象春日花路短片',
+        },
+      },
+    })
+
+    expect(result.status).toBe('needs_confirmation')
+    expect(result.decision.auditSummary?.contextSources?.candidates).toMatchObject({
+      source: 'program_candidate_reader',
+      recordCount: 1,
+      query: {
+        keyword: '城市形象春日花路短片',
+        facets: ['城市形象', '春日花路', '短片'],
+      },
+    })
+    expect(result.decision.auditSummary?.keyPoints).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('facets=城市形象|春日花路|短片'),
+      ]),
+    )
+  })
+
   it('turns candidate source read failures into auditable source-missing blockers', async () => {
     const gateway = new RuntimeSchedulingDataGateway({
       scheduleState: buildScheduleState({ playlistType: 'tv' }),

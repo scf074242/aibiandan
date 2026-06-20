@@ -685,6 +685,30 @@ describe('Orchestrator', () => {
     expect(items[0]?.id).toBe('existing-0900-episode-1')
   })
 
+  it('局部正式编排带内容目标时会覆盖原版面栏目和类型约束', async () => {
+    const orchestrator = createOrchestrator()
+    const logs: PlanningLogEntry[] = []
+    orchestrator.on('log', ({ entry }) => logs.push(entry))
+
+    await orchestrator.startPartialGeneration('dragon', date, {
+      targetTimeRange: { start: '09:00:00', end: '12:00:00' },
+      searchKeywords: ['栏目=东方剧场'],
+    })
+
+    const queryLogs = logs.filter((entry) => entry.phase === 'query' && entry.message.includes('已生成接口查询参数'))
+    expect(queryLogs.length).toBeGreaterThan(0)
+    expect(queryLogs.every((entry) => {
+      const criteria = (entry.details as { criteria?: { columnId?: string; searchKeywords?: string[]; programTypePreference?: string[] } } | undefined)?.criteria
+      return criteria?.columnId === ''
+        && criteria.searchKeywords?.includes('栏目=东方剧场')
+        && criteria.programTypePreference?.includes('drama')
+    })).toBe(true)
+
+    const items = getAtomicCapabilities().getAllItems()
+    expect(items.some((item) => item.programName?.includes('东方剧场'))).toBe(true)
+    expect(items.some((item) => item.programName?.includes('潮童天下'))).toBe(false)
+  }, 15_000)
+
   it('执行层在写入前会再次阻止未命中明确关键词的计划', async () => {
     resetCandidateService()
     const candidate = getCandidateService().getCandidateById('881120030002') as ProgramCandidate | undefined

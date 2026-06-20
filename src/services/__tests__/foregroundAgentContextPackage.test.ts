@@ -1,0 +1,701 @@
+import { describe, expect, it } from 'vitest'
+
+import type { LayoutDraft, ScheduleState } from '@/types/orchestration'
+import type { RuntimePendingCommand, RuntimeScheduleItem } from '@/services/runtime/demoRuntimeFacade'
+import {
+  buildForegroundAgentContextPackage,
+  formatForegroundAgentContextForPrompt,
+  resolvePendingReviewLifecycle,
+} from '@/services/runtime/foregroundAgentContextPackage'
+
+const scheduleState: ScheduleState = {
+  channelId: 'dragon',
+  channelName: '东方卫视',
+  date: '2026-03-25',
+  isEmpty: false,
+  itemCount: 14,
+  gapCount: 2,
+  hasSelectedTimeRange: false,
+  playlistType: 'tv',
+}
+
+const scheduleItems: RuntimeScheduleItem[] = Array.from({ length: 14 }, (_, index) => ({
+  id: `item-${index + 1}`,
+  programName: `节目${index + 1}`,
+  startTime: `${String(9 + index).padStart(2, '0')}:00:00`,
+  endTime: `${String(10 + index).padStart(2, '0')}:00:00`,
+  programType: index % 2 === 0 ? 'news' : 'series',
+}))
+
+const layoutDraft: LayoutDraft = {
+  id: 'draft-tv-default',
+  channelId: 'dragon',
+  date: '2026-03-25',
+  effectiveFrom: '2026-03-01',
+  effectiveTo: '2026-06-30',
+  version: 3,
+  source: 'channel_default',
+  userIntent: '频道默认版面',
+  coverage: { start: '09:00:00', end: '23:00:00' },
+  layoutReference: {
+    id: 'layout-ref',
+    name: '东方卫视日常版面',
+    channelId: 'dragon',
+    slots: [
+      { id: 'slot-1', columnId: 'news', startTime: '09:00:00', endTime: '10:00:00' },
+      { id: 'slot-2', columnId: 'series', startTime: '10:00:00', endTime: '11:00:00' },
+    ],
+  },
+  columns: [
+    { columnId: 'news', columnName: '新闻', defaultProgramType: 'news', source: 'default', draftConstraintKind: 'column' },
+    { columnId: 'series', columnName: '电视剧', defaultProgramType: 'series', source: 'default', draftConstraintKind: 'program' },
+  ],
+}
+
+describe('foreground agent context package', () => {
+  it('keeps atomic commands compact and does not inject layout segments', () => {
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '删除9点的节目',
+      scheduleState: {
+        ...scheduleState,
+        playlistId: 'playlist-tv-1',
+      },
+      currentSchedule: scheduleItems,
+      currentLayoutDraft: layoutDraft,
+    })
+
+    expect(context.scenario).toBe('atomic')
+    expect(context.workspace.workspaceKey).toBe('tv:playlist-tv-1')
+    expect(context.workspace.playlistId).toBe('playlist-tv-1')
+    expect(context.workspace.scheduleSummary).toHaveLength(8)
+    expect(context.layoutDraft.available).toBe(true)
+    expect(context.layoutDraft.segments).toBeUndefined()
+    expect(context.injectionProfile.includeLayoutSegments).toBe(false)
+    expect(context.injectionProfile).toMatchObject({
+      scheduleItemLimit: 8,
+      layoutSegmentLimit: 0,
+      maxPromptChars: 6000,
+    })
+    expect(context.budget).toMatchObject({
+      maxPromptChars: 6000,
+      omittedScheduleItems: 6,
+      omittedLayoutSegments: 2,
+      truncated: true,
+    })
+    expect(context.budget.omissions).toEqual(['schedule_summary'])
+  })
+
+  it('injects layout structure when the user explicitly references the draft', () => {
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '参考草案全天编排',
+      scheduleState,
+      currentSchedule: scheduleItems,
+      currentLayoutDraft: layoutDraft,
+    })
+
+    expect(context.scenario).toBe('layout_reference')
+    expect(context.layoutDraft.referencedByCurrentTask).toBe(true)
+    expect(context.layoutDraft.source).toBe('channel_default')
+    expect(context.layoutDraft.effectiveFrom).toBe('2026-03-01')
+    expect(context.layoutDraft.effectiveTo).toBe('2026-06-30')
+    expect(context.layoutDraft.segments).toEqual([
+      { id: 'slot-1', startTime: '09:00:00', endTime: '10:00:00', label: '新闻', constraintKind: 'column' },
+      { id: 'slot-2', startTime: '10:00:00', endTime: '11:00:00', label: '电视剧', constraintKind: 'program' },
+    ])
+    expect(context.injectionProfile).toMatchObject({
+      scheduleItemLimit: 12,
+      layoutSegmentLimit: 12,
+      maxPromptChars: 12000,
+    })
+  })
+
+  it.each([
+    '按草案',
+    '按这个版面开始编排',
+    '参考当前版面补齐当前所有空窗',
+  ])('keeps explicit draft reference wording as a layout reference: %s', (latestUserInput) => {
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput,
+      scheduleState,
+      currentSchedule: scheduleItems,
+      currentLayoutDraft: layoutDraft,
+    })
+
+    expect(context.scenario).toBe('layout_reference')
+    expect(context.layoutDraft.referencedByCurrentTask).toBe(true)
+    expect(context.layoutDraft.segments).toEqual([
+      { id: 'slot-1', startTime: '09:00:00', endTime: '10:00:00', label: '新闻', constraintKind: 'column' },
+      { id: 'slot-2', startTime: '10:00:00', endTime: '11:00:00', label: '电视剧', constraintKind: 'program' },
+    ])
+    expect(context.allowedActions).toContain('prepare_layout')
+  })
+
+  it.each([
+    '切回频道默认版面草案',
+    '切换到上传版面草案',
+    '使用上传版面草案',
+  ])('recognizes natural-language draft switching without treating it as formal reference: %s', (latestUserInput) => {
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput,
+      scheduleState,
+      currentSchedule: scheduleItems,
+      currentLayoutDraft: layoutDraft,
+    })
+
+    expect(context.scenario).toBe('layout_draft_switch')
+    expect(context.layoutDraft.referencedByCurrentTask).toBe(true)
+    expect(context.allowedActions).toEqual(['switch_layout_draft', 'generate_layout_draft', 'upload_layout_draft', 'cancel'])
+  })
+
+  it('aligns rotation layout draft visibility with the foreground workspace', () => {
+    const rotationState: ScheduleState = {
+      ...scheduleState,
+      playlistType: 'rotation',
+      playlistId: 'playlist-rotation-1',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: 3 * 60 * 60,
+    }
+    const rotationDraft: LayoutDraft = {
+      ...layoutDraft,
+      id: 'draft-rotation-uploaded',
+      source: 'uploaded',
+      userIntent: '上传轮播版面草案',
+    }
+
+    const withoutDraft = buildForegroundAgentContextPackage({
+      latestUserInput: '查询当前已排节目',
+      scheduleState: rotationState,
+      currentSchedule: [],
+    })
+    const withDraft = buildForegroundAgentContextPackage({
+      latestUserInput: '查询当前已排节目',
+      scheduleState: rotationState,
+      currentSchedule: [],
+      currentLayoutDraft: rotationDraft,
+    })
+
+    expect(withoutDraft.layoutDraft.visible).toBe(false)
+    expect(withoutDraft.layoutDraft.available).toBe(false)
+    expect(withDraft.layoutDraft.visible).toBe(true)
+    expect(withDraft.layoutDraft.available).toBe(true)
+    expect(withDraft.layoutDraft.source).toBe('uploaded')
+    expect(withDraft.layoutDraft.segments).toBeUndefined()
+  })
+
+  it('carries rotation strategy and duration in the foreground workspace context', () => {
+    const rotationState: ScheduleState = {
+      ...scheduleState,
+      playlistType: 'rotation',
+      playlistId: 'playlist-rotation-3h',
+      rotationStrategy: 'rating',
+      rotationDurationSeconds: 3 * 60 * 60,
+    }
+
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '补齐当前所有空窗',
+      scheduleState: rotationState,
+      currentSchedule: [],
+    })
+    const promptBlock = formatForegroundAgentContextForPrompt(context)
+
+    expect(context.workspace).toMatchObject({
+      workspaceKey: 'rotation:playlist-rotation-3h',
+      playlistType: 'rotation',
+      rotationStrategy: 'rating',
+      rotationDurationSeconds: 10800,
+    })
+    expect(promptBlock).toContain('"rotationStrategy": "rating"')
+    expect(promptBlock).toContain('"rotationDurationSeconds": 10800')
+  })
+
+  it('uses draft completeness to choose formal-generation next actions', () => {
+    const tvFullContext = buildForegroundAgentContextPackage({
+      latestUserInput: '帮我全天编排',
+      scheduleState: {
+        ...scheduleState,
+        playlistType: 'tv',
+        playlistId: 'playlist-tv-full-generate',
+      },
+      currentSchedule: [],
+      currentLayoutDraft: layoutDraft,
+    })
+    const tvPartialContext = buildForegroundAgentContextPackage({
+      latestUserInput: '补齐当前所有空窗',
+      scheduleState: {
+        ...scheduleState,
+        playlistType: 'tv',
+        playlistId: 'playlist-tv-partial-generate',
+      },
+      currentSchedule: [],
+      currentLayoutDraft: layoutDraft,
+    })
+    const rotationState: ScheduleState = {
+      ...scheduleState,
+      playlistType: 'rotation',
+      playlistId: 'playlist-rotation-actions',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: 2 * 60 * 60,
+    }
+    const rotationContext = buildForegroundAgentContextPackage({
+      latestUserInput: '补齐当前所有空窗',
+      scheduleState: rotationState,
+      currentSchedule: [],
+    })
+
+    expect(tvFullContext.scenario).toBe('full_generate')
+    expect(tvFullContext.allowedActions).toEqual([
+      'continue_layout_draft',
+      'partial_generate',
+      'upload_layout_draft',
+      'switch_layout_draft',
+      'cancel',
+    ])
+    expect(tvFullContext.layoutDraft.available).toBe(true)
+    expect(tvFullContext.layoutDraft.referencedByCurrentTask).toBe(false)
+    expect(tvFullContext.layoutDraft.completeness.status).toBe('partial')
+    expect(tvFullContext.layoutDraft.segments).toEqual([
+      { id: 'slot-1', startTime: '09:00:00', endTime: '10:00:00', label: '新闻', constraintKind: 'column' },
+      { id: 'slot-2', startTime: '10:00:00', endTime: '11:00:00', label: '电视剧', constraintKind: 'program' },
+    ])
+    expect(tvFullContext.injectionProfile.includeLayoutSegments).toBe(true)
+    expect(tvFullContext.allowedActions).not.toContain('full_generate')
+    expect(tvPartialContext.scenario).toBe('partial_generate')
+    expect(tvPartialContext.allowedActions).toEqual(['partial_generate', 'cancel'])
+    expect(tvPartialContext.layoutDraft.segments).toBeUndefined()
+    expect(rotationContext.scenario).toBe('partial_generate')
+    expect(rotationContext.allowedActions).toEqual(['upload_layout_draft', 'generate_layout_draft', 'cancel'])
+    expect(rotationContext.allowedActions).not.toContain('partial_generate')
+    expect(rotationContext.allowedActions).not.toContain('prepare_layout')
+  })
+
+  it('blocks rotation workspaces from advertising tv-style all-day generation without structured support', () => {
+    const rotationState: ScheduleState = {
+      ...scheduleState,
+      playlistType: 'rotation',
+      playlistId: 'playlist-rotation-all-day',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: 3 * 60 * 60,
+    }
+
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '帮我全天编排',
+      scheduleState: rotationState,
+      currentSchedule: [],
+    })
+
+    expect(context.scenario).toBe('full_generate')
+    expect(context.workspace.playlistType).toBe('rotation')
+    expect(context.allowedActions).toEqual([
+      'create_tv_playlist',
+      'open_tv_playlist',
+      'set_rotation_duration',
+      'switch_rotation_strategy',
+      'upload_layout_draft',
+      'generate_layout_draft',
+      'cancel',
+    ])
+    expect(context.allowedActions).not.toContain('full_generate')
+  })
+
+  it('requires a loaded tv layout draft before advertising all-day generation', () => {
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '帮我全天编排',
+      scheduleState: {
+        ...scheduleState,
+        playlistType: 'tv',
+        playlistId: 'playlist-tv-missing-draft',
+      },
+      currentSchedule: [],
+      currentLayoutDraft: null,
+    })
+
+    expect(context.scenario).toBe('full_generate')
+    expect(context.workspace.playlistType).toBe('tv')
+    expect(context.layoutDraft.available).toBe(false)
+    expect(context.allowedActions).toEqual([
+      'load_channel_layout_draft',
+      'upload_layout_draft',
+      'switch_layout_draft',
+      'partial_generate',
+      'cancel',
+    ])
+    expect(context.allowedActions).not.toContain('full_generate')
+  })
+
+  it('does not leak rotation-only fields into a tv workspace context', () => {
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '补齐当前所有空窗',
+      scheduleState: {
+        ...scheduleState,
+        playlistType: 'tv',
+        playlistId: 'playlist-tv-no-rotation',
+      },
+      currentSchedule: [],
+    })
+
+    expect(context.workspace.playlistType).toBe('tv')
+    expect(context.workspace).not.toHaveProperty('rotationStrategy')
+    expect(context.workspace).not.toHaveProperty('rotationDurationSeconds')
+  })
+
+  it('keeps the foreground context package inside an explicit scenario budget', () => {
+    const longScheduleItems: RuntimeScheduleItem[] = Array.from({ length: 40 }, (_, index) => ({
+      id: `long-item-${index + 1}-${'X'.repeat(100)}`,
+      programName: `超长节目名${index + 1}${'节目'.repeat(100)}`,
+      startTime: `${String(6 + (index % 18)).padStart(2, '0')}:00:00`,
+      endTime: `${String(7 + (index % 18)).padStart(2, '0')}:00:00`,
+      programType: `超长类型${'类型'.repeat(50)}`,
+    }))
+    const longDraft: LayoutDraft = {
+      ...layoutDraft,
+      layoutReference: {
+        ...layoutDraft.layoutReference,
+        slots: Array.from({ length: 20 }, (_, index) => ({
+          id: `slot-${index + 1}-${'S'.repeat(100)}`,
+          columnId: `column-${index + 1}`,
+          startTime: `${String(6 + index).padStart(2, '0')}:00:00`,
+          endTime: `${String(7 + index).padStart(2, '0')}:00:00`,
+        })),
+      },
+      columns: Array.from({ length: 20 }, (_, index) => ({
+        columnId: `column-${index + 1}`,
+        columnName: `超长栏目名${index + 1}${'栏目'.repeat(100)}`,
+        defaultProgramType: 'news',
+        source: 'default',
+        draftConstraintKind: 'column',
+      })),
+    }
+
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: `参考草案全天编排，${'把这些额外描述压缩进上下文'.repeat(200)}`,
+      scheduleState,
+      currentSchedule: longScheduleItems,
+      currentLayoutDraft: longDraft,
+    })
+    const promptBlock = formatForegroundAgentContextForPrompt(context) ?? ''
+
+    expect(context.scenario).toBe('layout_reference')
+    expect(context.latestUserInput).toContain('...已截断')
+    expect(context.workspace.scheduleSummary).toHaveLength(12)
+    expect(context.layoutDraft.segments).toHaveLength(12)
+    expect(context.workspace.scheduleSummary[0]?.programName?.length).toBeLessThanOrEqual(80)
+    expect(context.workspace.scheduleSummary[0]?.programType?.length).toBeLessThanOrEqual(80)
+    expect(context.layoutDraft.segments?.[0]?.label.length).toBeLessThanOrEqual(80)
+    expect(context.budget).toMatchObject({
+      maxPromptChars: 12000,
+      omittedScheduleItems: 28,
+      omittedLayoutSegments: 8,
+      truncated: true,
+    })
+    expect(context.budget.omissions).toEqual(['latest_user_input', 'schedule_summary', 'layout_segments'])
+    expect(context.budget.estimatedPromptChars).toBe(promptBlock.length)
+    expect(context.budget.estimatedPromptChars).toBeLessThanOrEqual(context.budget.maxPromptChars)
+  })
+
+  it('marks pending command as a one-turn review gate', () => {
+    const pendingCommand: RuntimePendingCommand = {
+      command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
+      summary: '删除 09:00 的《节目1》',
+      reasoning: 'delete requires confirmation',
+    }
+
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '确认',
+      scheduleState,
+      currentSchedule: scheduleItems,
+      pendingCommand,
+    })
+
+    expect(context.scenario).toBe('review')
+    expect(context.review).toMatchObject({
+      kind: 'command',
+      action: 'delete',
+      riskLevel: 'high',
+      allowedResponses: ['confirm', 'cancel'],
+      expiresOnNextNonAnswer: true,
+    })
+  })
+
+  it('treats a different user request as a new task while exposing the stale pending review for UI expiry', () => {
+    const pendingCommand: RuntimePendingCommand = {
+      command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
+      summary: '删除 09:00 的《节目1》',
+      reasoning: 'delete requires confirmation',
+    }
+
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '查询看东方还有哪些候选',
+      scheduleState,
+      currentSchedule: scheduleItems,
+      pendingCommand,
+    })
+
+    expect(context.scenario).toBe('atomic')
+    expect(context.review).toMatchObject({
+      kind: 'command',
+      action: 'delete',
+      expiresOnNextNonAnswer: true,
+    })
+    expect(context.allowedActions).toContain('insert')
+  })
+
+  it('keeps a pending review only when the user answers inside the same workspace', () => {
+    const pendingCommand: RuntimePendingCommand = {
+      command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
+      summary: '删除 09:00 的《节目1》',
+      reasoning: 'delete requires confirmation',
+    }
+
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '确认',
+      currentWorkspaceKey: 'tv:playlist-tv-1',
+      pendingWorkspaceKey: 'tv:playlist-tv-1',
+      pendingCommand,
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: true,
+      shouldExpire: false,
+    })
+  })
+
+  it('keeps an Agent pending confirmation when the user confirms inside the same workspace', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '确认',
+      currentWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingAtomicContext: {
+        action: 'insert',
+        phase: 'clarifying',
+        slots: {
+          targetTime: '00:00:00',
+          programName: '城市微短片：春日花路 30秒',
+        },
+        summary: '轮播单插入《城市微短片：春日花路 30秒》前需要确认。',
+        agentPendingTask: {
+          taskId: 'pending-agent-insert-1',
+          intent: 'insert',
+          phase: 'needs_confirmation',
+          originalInput: '0点插入城市形象春日花路短片',
+          collectedInput: '0点插入城市形象春日花路短片',
+          missingSlots: ['confirmation'],
+          slots: {
+            targetTime: '00:00:00',
+            programName: '城市微短片：春日花路 30秒',
+          },
+          updatedAt: 1,
+        },
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: true,
+      shouldExpire: false,
+    })
+  })
+
+  it('keeps a composite task pending confirmation when the user confirms inside the same workspace', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '确认',
+      currentWorkspaceKey: 'tv:playlist-tv-1',
+      pendingWorkspaceKey: 'tv:playlist-tv-1',
+      pendingAtomicContext: {
+        action: 'delete',
+        phase: 'clarifying',
+        slots: {
+          programName: '东方新闻',
+        },
+        summary: '待确认任务：删除全部《东方新闻》',
+        compositeTaskRun: {
+          id: 'task-composite-delete-1',
+          goal: '删除全部《东方新闻》',
+          originalUserInput: '把全部东方新闻节目删除掉',
+          status: 'waiting_confirm',
+          currentStageIndex: 0,
+          loopCount: 0,
+          limits: {
+            maxStages: 5,
+            maxStepsPerStage: 10,
+            maxLoopTurns: 5,
+            maxAutoExecutePerLoop: 5,
+            maxMatchedItemsBeforeNarrowing: 30,
+          },
+          stages: [{
+            id: 'stage-delete-1',
+            type: 'batch_atomic',
+            status: 'waiting_confirm',
+            summary: '删除当前播单里的 1 条《东方新闻》',
+            action: 'delete',
+            requiresConfirmation: true,
+            steps: [{
+              id: 'delete-item-news',
+              action: 'delete',
+              itemId: 'item-news',
+              programName: '东方新闻',
+            }],
+          }],
+          createdAt: '2026-03-25T00:00:00.000Z',
+          updatedAt: '2026-03-25T00:00:00.000Z',
+        },
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: true,
+      shouldExpire: false,
+    })
+  })
+
+  it('expires a pending review before interpreting a confirmation in another workspace', () => {
+    const pendingCommand: RuntimePendingCommand = {
+      command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
+      summary: '删除 09:00 的《节目1》',
+      reasoning: 'delete requires confirmation',
+    }
+
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '确认',
+      currentWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingWorkspaceKey: 'tv:playlist-tv-1',
+      pendingCommand,
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: false,
+      shouldExpire: true,
+      expireReason: 'workspace_changed',
+    })
+  })
+
+  it('expires a pending review when the next user turn starts a new task', () => {
+    const pendingCommand: RuntimePendingCommand = {
+      command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
+      summary: '删除 09:00 的《节目1》',
+      reasoning: 'delete requires confirmation',
+    }
+
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '补齐当前所有空窗',
+      currentWorkspaceKey: 'tv:playlist-tv-1',
+      pendingWorkspaceKey: 'tv:playlist-tv-1',
+      pendingCommand,
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: false,
+      shouldExpire: true,
+      expireReason: 'next_non_answer',
+    })
+  })
+
+  it('does not treat selection wording as an answer to a confirm-only pending command', () => {
+    const pendingCommand: RuntimePendingCommand = {
+      command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
+      summary: '删除 09:00 的《节目1》',
+      reasoning: 'delete requires confirmation',
+    }
+
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '选第一个',
+      currentWorkspaceKey: 'tv:playlist-tv-1',
+      pendingWorkspaceKey: 'tv:playlist-tv-1',
+      pendingCommand,
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: false,
+      shouldExpire: true,
+      expireReason: 'next_non_answer',
+    })
+  })
+
+  it('does not treat plain confirmation wording as an answer to a candidate-selection review', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '确认',
+      currentWorkspaceKey: 'tv:playlist-tv-1',
+      pendingWorkspaceKey: 'tv:playlist-tv-1',
+      pendingAtomicContext: {
+        action: 'replace',
+        phase: 'recommending_insert',
+        slots: {
+          targetTime: '09:00:00',
+          replacementProgramName: '东方新闻',
+        },
+        summary: '替换 09:00 的节目',
+        insertRecommendations: [
+          {
+            candidateId: 'candidate-1',
+            programName: '东方新闻',
+            durationSeconds: 1800,
+            score: 90,
+            reason: '同类新闻候选',
+          },
+        ],
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: false,
+      shouldExpire: true,
+      expireReason: 'next_non_answer',
+    })
+  })
+
+  it('keeps a candidate-selection review only when the user actually selects an option', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '选第一个',
+      currentWorkspaceKey: 'tv:playlist-tv-1',
+      pendingWorkspaceKey: 'tv:playlist-tv-1',
+      pendingAtomicContext: {
+        action: 'replace',
+        phase: 'recommending_insert',
+        slots: {
+          targetTime: '09:00:00',
+          replacementProgramName: '东方新闻',
+        },
+        summary: '替换 09:00 的节目',
+        insertRecommendations: [
+          {
+            candidateId: 'candidate-1',
+            programName: '东方新闻',
+            durationSeconds: 1800,
+            score: 90,
+            reason: '同类新闻候选',
+          },
+        ],
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: true,
+      shouldExpire: false,
+    })
+  })
+
+  it('formats the package as a structured prompt block', () => {
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '补齐当前所有空窗',
+      scheduleState,
+      currentSchedule: scheduleItems,
+    })
+
+    const promptBlock = formatForegroundAgentContextForPrompt(context)
+
+    expect(promptBlock).toContain('统一前台上下文包')
+    expect(promptBlock).toContain('"scenario": "partial_generate"')
+    expect(promptBlock).toContain('"gapCount": 2')
+    expect(promptBlock).toContain('"contextNotes"')
+    expect(promptBlock).not.toContain('"workspaceKey"')
+    expect(promptBlock).not.toContain('"injectionProfile"')
+    expect(promptBlock).not.toContain('"budget"')
+    expect(context.budget.estimatedPromptChars).toBe(promptBlock?.length)
+  })
+})

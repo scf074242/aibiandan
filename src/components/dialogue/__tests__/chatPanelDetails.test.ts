@@ -318,23 +318,23 @@ describe('chatPanelDetails', () => {
       item.value.includes('今日编排支撑写入/查询/校验')
       && item.value.includes('候选节目支撑插入、替换')
       && item.value.includes('数据完整性')
-      && item.value.includes('多轮上下文')
-      && item.value.includes('上下文变更校验')
+      && item.value.includes('多轮处理')
+      && item.value.includes('播单变更校验')
       && item.value.includes('提交前复核')
       && item.value.includes('电视顺播判断'),
     )).toBe(true)
     expect(summary.some((item) =>
       item.value.includes('候选节目支撑插入、替换')
-      && item.value.includes('多轮上下文')
-      && item.value.includes('上下文变更校验')
+      && item.value.includes('多轮处理')
+      && item.value.includes('播单变更校验')
       && item.value.includes('电视顺播判断'),
     )).toBe(true)
     expect(summary.some((item) =>
-      item.value.includes('LLM结构化意图')
-      && item.value.includes('待办上下文合并')
-      && item.value.includes('LLM调用留痕')
-      && item.value.includes('关键词拆分检索')
-      && item.value.includes('专业时段规则'),
+      item.value.includes('理解用户要求')
+      && item.value.includes('合并待办信息')
+      && item.value.includes('思考记录')
+      && item.value.includes('拆开线索查找')
+      && item.value.includes('时段规则'),
     )).toBe(true)
     expect(summary.some((item) =>
       item.value.includes('时段匹配')
@@ -343,6 +343,12 @@ describe('chatPanelDetails', () => {
       && item.value.includes('近期重播间隔')
       && item.value.includes('轮播素材优先级'),
     )).toBe(true)
+    const visibleSummaryText = summary.map((item) => `${item.label} ${item.value}`).join('\n')
+    expect(visibleSummaryText).not.toContain('LLM结构化意图')
+    expect(visibleSummaryText).not.toContain('LLM调用留痕')
+    expect(visibleSummaryText).not.toContain('关键词拆分检索')
+    expect(visibleSummaryText).not.toContain('专业时段规则')
+    expect(visibleSummaryText).not.toContain('取证链路')
     expect(summary.some((item) =>
       item.value.includes('状态：有限可用')
       && item.value.includes('可执行：8/8（100%）')
@@ -604,16 +610,16 @@ describe('chatPanelDetails', () => {
     }, summaryDeps)
 
     expect(summary).toContainEqual(expect.objectContaining({
-      label: 'LLM上下文',
+      label: '参考信息',
       value: expect.stringContaining('下一轮将合并'),
     }))
-    const llmContext = summary.find((item) => item.label === 'LLM上下文')?.value ?? ''
+    const llmContext = summary.find((item) => item.label === '参考信息')?.value ?? ''
     expect(llmContext).toContain('插入')
     expect(llmContext).toContain('待确认执行')
     expect(llmContext).toContain('还需：确认')
     expect(llmContext).toContain('已收集：目标时间、节目线索、候选节目')
     expect(llmContext).toContain('候选 1 个')
-    expect(llmContext).toContain('上下文：今日编排、候选节目、历史编排、播单策略')
+    expect(llmContext).toContain('参考：今日编排、候选节目、历史编排、播单策略')
     expect(llmContext).toContain('今日编排示例：09:00:00-09:30:00 Morning News NEWS0900 news')
     expect(llmContext).toContain('候选节目示例：Replacement News')
     expect(llmContext).toContain('可选：确认、拒绝、开始新任务、取消当前任务')
@@ -644,7 +650,7 @@ describe('chatPanelDetails', () => {
       },
     }, summaryDeps)
 
-    const llmContext = summary.find((item) => item.label === 'LLM上下文')?.value ?? ''
+    const llmContext = summary.find((item) => item.label === '参考信息')?.value ?? ''
     expect(llmContext).toContain('本轮已合并')
     expect(llmContext).toContain('替换')
     expect(llmContext).toContain('还需：目标时间')

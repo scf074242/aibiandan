@@ -2,6 +2,7 @@ import type {
   AgentPendingTask,
   AtomicCommandIntent,
 } from '@/services/agent/types'
+import type { SchedulingTaskRun } from './schedulingTaskPlan'
 import type {
   RuntimeInsertRecommendationCandidate,
   RuntimePendingAtomicClarification,
@@ -28,12 +29,23 @@ export interface RuntimeAtomicSlotBag {
   rawProgramText?: string
   semanticLabel?: string
   programTypeHint?: string
+  expectedDurationSeconds?: number
   targetItemId?: string
   targetItemName?: string
   direction?: 'forward' | 'backward'
   offsetSeconds?: number
   replacementProgramName?: string
 }
+
+export type RuntimeResumeCompositeTask =
+  | { kind: 'insert_with_shift' }
+  | {
+    kind: 'batch_replace'
+    targetLabel: string
+    matchKind: 'program' | 'time_range'
+    replacementHint: string
+    targetItems: RuntimeScheduleItem[]
+  }
 
 export interface RuntimePendingAtomicContext {
   action: RuntimeAtomicAction | null
@@ -50,8 +62,10 @@ export interface RuntimePendingAtomicContext {
   insertRecommendations?: RuntimeInsertRecommendationCandidate[]
   selectedItemId?: string | null
   selectedCandidateId?: string | null
+  resumeCompositeTask?: RuntimeResumeCompositeTask
   agentPendingTask?: AgentPendingTask
   agentIntent?: AtomicCommandIntent
+  compositeTaskRun?: SchedulingTaskRun
   attemptCount: number
   createdAt: string
   updatedAt: string
@@ -198,6 +212,7 @@ export const buildPendingAtomicContextFromInsertRecommendation = (
     rawProgramText: pending.rawProgramText,
     semanticLabel: pending.semanticLabel,
     programTypeHint: pending.programTypeHint,
+    expectedDurationSeconds: pending.expectedDurationSeconds,
     targetItemId: pending.targetItemId,
     targetItemName: pending.targetItemName,
   },
@@ -205,6 +220,7 @@ export const buildPendingAtomicContextFromInsertRecommendation = (
   followUpQuestion: pending.summary,
   insertRecommendations: pending.recommendedCandidates,
   selectedCandidateId: pending.selectedCandidateId,
+  resumeCompositeTask: pending.resumeCompositeTask,
   attemptCount: source?.attemptCount ?? 0,
   createdAt: source?.createdAt ?? timestamp,
   updatedAt: timestamp,
@@ -294,9 +310,11 @@ export const rehydratePendingInsertRecommendationFromAtomicContext = (
     rawProgramText: pending.slots.rawProgramText,
     semanticLabel: pending.slots.semanticLabel,
     programTypeHint: pending.slots.programTypeHint,
+    expectedDurationSeconds: pending.slots.expectedDurationSeconds,
     targetItemId: pending.slots.targetItemId,
     targetItemName: pending.slots.targetItemName,
     recommendedCandidates: pending.insertRecommendations,
     selectedCandidateId: pending.selectedCandidateId ?? null,
+    resumeCompositeTask: pending.resumeCompositeTask,
   }
 }

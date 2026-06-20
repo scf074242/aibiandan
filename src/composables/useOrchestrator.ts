@@ -23,6 +23,15 @@ export interface UseOrchestratorOptions {
   onStatusChange?: (status: PlanningSessionStatus, previousStatus: PlanningSessionStatus) => void
 }
 
+export interface PartialGenerationTarget {
+  targetGapIds?: string[]
+  targetTimeRange?: {
+    start: string
+    end: string
+  }
+  searchKeywords?: string[]
+}
+
 export function useOrchestrator(options: UseOrchestratorOptions = {}) {
   const isRunning = ref(false)
   const session = shallowRef<PlanningSession | null>(null)
@@ -135,12 +144,12 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
     session.value = orchestrator!.getSession()
   }
 
-  const startPartialGeneration = async (channelId: string, date: string, targetGapIds?: string[]) => {
+  const startPartialGeneration = async (channelId: string, date: string, target?: string[] | PartialGenerationTarget) => {
     if (!orchestrator) initialize()
     isRunning.value = true
     currentGap.value = null
     logs.value = []
-    await orchestrator!.startPartialGeneration(channelId, date, targetGapIds)
+    await orchestrator!.startPartialGeneration(channelId, date, target)
     session.value = orchestrator!.getSession()
   }
 

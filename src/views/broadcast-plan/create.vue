@@ -57,17 +57,17 @@
               class="playlist-workspace-tab"
               :class="{ 'is-active': playlistType !== 'none' && isScheduleWorkspaceActive }"
               :disabled="playlistType === 'none'"
-              @click="activeWorkspaceTab = 'schedule'"
+              @click="switchWorkspaceTab('schedule')"
             >
               编排内容
             </button>
             <button
-              v-if="playlistType === 'tv'"
+              v-if="showLayoutDraftTab"
               type="button"
               class="playlist-workspace-tab"
               :class="{ 'is-active': showLayoutDraftWorkspace && activeWorkspaceTab === 'draft' }"
               :disabled="!showLayoutDraftWorkspace"
-              @click="activeWorkspaceTab = 'draft'"
+              @click="switchWorkspaceTab('draft')"
             >
               版面草案
               <span v-if="currentLayoutDraft" class="playlist-workspace-tab-count">{{ currentLayoutDraft.layoutReference.slots.length }}</span>
@@ -95,7 +95,7 @@
           <div v-if="isScheduleWorkspaceActive" class="timeline-header">
             <div class="timeline-header-left">
               <div class="timeline-heading">
-                <h2 class="timeline-title">时间轴与素材清单</h2>
+                <h2 class="timeline-title">{{ playlistType === 'rotation' ? '内容队列与素材清单' : '时间轴与素材清单' }}</h2>
               </div>
               <div class="timeline-action-group">
                 <el-button
@@ -121,7 +121,7 @@
                 共 {{ displayItems.length }} {{ displayItemUnitLabel }}，总时长 {{ totalDurationText }}
               </span>
               <el-tag
-                v-if="unlinkedItemCount > 0"
+                v-if="playlistType !== 'rotation' && unlinkedItemCount > 0"
                 type="danger"
                 effect="light"
                 size="small"
@@ -131,7 +131,7 @@
                 未关联成品 {{ unlinkedItemCount }} 条
               </el-tag>
               <el-tag
-                v-if="emptyMaterialItemCount > 0"
+                v-if="playlistType !== 'rotation' && emptyMaterialItemCount > 0"
                 type="danger"
                 effect="light"
                 size="small"
@@ -155,7 +155,7 @@
                     class="header-alert-tag"
                   >
                     <el-icon><WarningFilled /></el-icon>
-                    {{ gapSummaryLabel }} {{ displayGapCount }} 条
+                  {{ playlistType === 'rotation' ? `剩余时长 ${rotationRemainingDurationText}` : `${gapSummaryLabel} ${displayGapCount} 条` }}
                   </el-tag>
                 </template>
                 <div class="continuity-popover">
@@ -229,12 +229,12 @@
           <div v-if="isScheduleWorkspaceActive" class="timeline-insight-bar">
             <div class="insight-group">
               <span class="insight-label">当前视图</span>
-              <span class="insight-pill">{{ isViewMode ? '查看模式' : '编辑模式' }}</span>
+              <span v-if="playlistType !== 'rotation'" class="insight-pill">{{ isViewMode ? '查看模式' : '编辑模式' }}</span>
               <span class="insight-pill">{{ currentPlaylistTypeLabel }}</span>
               <span v-if="playlistType === 'tv'" class="insight-pill">{{ currentChannelName }}</span>
               <span class="insight-pill">{{ playlistType === 'rotation' ? rotationDurationScopeText : scheduleDate }}</span>
             </div>
-            <div class="insight-group is-risk">
+            <div v-if="playlistType !== 'rotation'" class="insight-group is-risk">
               <span class="insight-label">风险概览</span>
               <span class="insight-pill" :class="{ 'is-danger': unlinkedItemCount > 0 }">
                 未关联 {{ unlinkedItemCount }}
@@ -243,7 +243,7 @@
                 空成品 {{ emptyMaterialItemCount }}
               </span>
               <span class="insight-pill" :class="{ 'is-warning': displayGapCount > 0 }">
-                {{ playlistType === 'rotation' ? '时长空缺' : '空窗' }} {{ displayGapCount }}
+                空窗 {{ displayGapCount }}
               </span>
             </div>
           </div>
@@ -256,30 +256,35 @@
               @scroll="handleTimelineContentScroll"
               @click="handleTimelineAreaClick"
             >
-              <div class="timeline-table-header">
+              <div class="timeline-table-header" :class="{ 'is-rotation': playlistType === 'rotation' }">
                 <div class="header-cell index-cell">序号</div>
                 <div class="header-cell start-time-cell">{{ timelineStartHeaderLabel }}</div>
                 <div class="header-cell end-time-cell">{{ timelineEndHeaderLabel }}</div>
-                <div class="header-cell type-cell">类型</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell type-cell">类型</div>
                 <div class="header-cell content-type-cell">内容类型</div>
                 <div class="header-cell episode-cell">节目名称</div>
-                <div class="header-cell relative-start-cell">相对播出点</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell relative-start-cell">相对播出点</div>
                 <div class="header-cell play-length-cell">播出长度</div>
-                <div class="header-cell program-code-cell">节目编号</div>
-                <div class="header-cell key-slot-cell">键位</div>
-                <div class="header-cell material-cell">素材文件</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell program-code-cell">节目编号</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell key-slot-cell">键位</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell material-cell">素材文件</div>
                 <div class="header-cell status-cell">素材状态</div>
-                <div class="header-cell studio-cell">演播室</div>
-                <div class="header-cell overdue-cell">是否超期</div>
-                <div class="header-cell omni-right-cell">全媒体播出权利</div>
-                <div class="header-cell remark-cell">备注</div>
-                <div class="header-cell third-review-date-cell">三审完成日期</div>
-                <div class="header-cell last-playable-time-cell">最后可播时间</div>
-                <div class="header-cell rebroadcast-reaudit-date-cell">重播重审日期</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell studio-cell">演播室</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell overdue-cell">是否超期</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell omni-right-cell">全媒体播出权利</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell remark-cell">备注</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell third-review-date-cell">三审完成日期</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell last-playable-time-cell">最后可播时间</div>
+                <div v-if="playlistType !== 'rotation'" class="header-cell rebroadcast-reaudit-date-cell">重播重审日期</div>
               </div>
 
               <!-- 节目列表 -->
-              <div ref="scheduleItemsWrapperRef" class="schedule-items-wrapper" @click="handleEmptyAreaClick">
+              <div
+                ref="scheduleItemsWrapperRef"
+                class="schedule-items-wrapper"
+                :class="{ 'is-rotation': playlistType === 'rotation' }"
+                @click="handleEmptyAreaClick"
+              >
                 <div
                   v-if="floatingFocusMarkerVisible"
                   class="floating-focus-marker"
@@ -322,9 +327,8 @@
                   v-for="(item, index) in displayItems"
                   :key="item.id"
                   class="schedule-item-row"
-                  :ref="(element) => registerItemRowRef(item.id, element)"
-                  :data-item-id="item.id"
                   :class="{
+                    'is-rotation': playlistType === 'rotation',
                     'is-program': item.businessType === 'program',
                     'is-ad': item.businessType === 'ad',
                     'is-promo': item.businessType === 'promo',
@@ -336,6 +340,8 @@
                     'is-focus-error': isFocusError(item.id),
                     'is-time-conflict': isTimeConflictItem(item.id),
                   }"
+                  :ref="(element) => registerItemRowRef(item.id, element)"
+                  :data-item-id="item.id"
                   @click="handleItemClick(item)"
                 >
                   <!-- 序号 -->
@@ -353,7 +359,7 @@
                   </div>
 
                   <!-- 类型 -->
-                  <div class="item-cell type-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell type-cell">
                     <el-tag
                       v-if="!item.isUnlinkedProduct"
                       :type="getTypeTagType(item)"
@@ -386,7 +392,7 @@
                     </div>
                   </div>
 
-                  <div class="item-cell relative-start-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell relative-start-cell">
                     <span
                       v-if="shouldShowMaterialFields(item)"
                       class="small-text"
@@ -414,15 +420,15 @@
                     <span v-else class="small-text">-</span>
                   </div>
 
-                  <div class="item-cell program-code-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell program-code-cell">
                     <span class="small-text">{{ item.programCode || '-' }}</span>
                   </div>
 
-                  <div class="item-cell key-slot-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell key-slot-cell">
                     <span class="small-text">{{ item.keySlot || '-' }}</span>
                   </div>
 
-                  <div class="item-cell material-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell material-cell">
                     <span
                       v-if="shouldShowMaterialFields(item)"
                       class="small-text"
@@ -447,31 +453,31 @@
                     <span v-else class="small-text">-</span>
                   </div>
 
-                  <div class="item-cell studio-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell studio-cell">
                     <span class="small-text">{{ item.studio || '-' }}</span>
                   </div>
 
-                  <div class="item-cell overdue-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell overdue-cell">
                     <span class="small-text">{{ item.isOverdue ? '是' : '否' }}</span>
                   </div>
 
-                  <div class="item-cell omni-right-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell omni-right-cell">
                     <span class="small-text">{{ item.omniBroadcastRight || '-' }}</span>
                   </div>
 
-                  <div class="item-cell remark-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell remark-cell">
                     <span class="small-text">{{ item.remark || '-' }}</span>
                   </div>
 
-                  <div class="item-cell third-review-date-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell third-review-date-cell">
                     <span class="small-text">{{ item.thirdReviewDate || '-' }}</span>
                   </div>
 
-                  <div class="item-cell last-playable-time-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell last-playable-time-cell">
                     <span class="small-text">{{ item.lastPlayableTime || '-' }}</span>
                   </div>
 
-                  <div class="item-cell rebroadcast-reaudit-date-cell">
+                  <div v-if="playlistType !== 'rotation'" class="item-cell rebroadcast-reaudit-date-cell">
                     <span class="small-text">{{ item.rebroadcastReauditDate || '-' }}</span>
                   </div>
                 </div>
@@ -492,23 +498,23 @@
           <div v-else-if="showLayoutDraftWorkspace && currentLayoutDraft" class="layout-draft-workspace">
             <div class="layout-draft-workspace-head">
               <div>
-                <h2 class="layout-draft-workspace-title">{{ currentLayoutDraft.layoutReference.name }}</h2>
+                <h2 class="layout-draft-workspace-title">{{ layoutDraftWorkspaceTitle }}</h2>
                 <p class="layout-draft-workspace-subtitle">
-                  {{ formatTime4(currentLayoutDraft.coverage.start) }} - {{ formatTime4(currentLayoutDraft.coverage.end) }}
-                  · {{ currentLayoutDraft.layoutReference.slots.length }} 个时段
+                  {{ layoutDraftWorkspaceSubtitle }}
                 </p>
               </div>
               <el-tag
                 v-if="currentLayoutDraftFeasibility"
-                :type="currentLayoutDraftFeasibility.ok ? 'success' : 'warning'"
+                type="primary"
                 effect="light"
               >
                 {{ currentLayoutDraftFeasibility.ok ? '可进入编排' : '需调整' }}
               </el-tag>
             </div>
-            <div v-if="currentLayoutDraft.strategyProfile" class="layout-draft-strategy-summary">
-              <strong>{{ currentLayoutDraft.strategyProfile.label }}</strong>
-              <span>{{ currentLayoutDraft.strategyProfile.selectionSummary }}</span>
+            <div v-if="layoutDraftStrategySummary" class="layout-draft-strategy-summary">
+              <div class="layout-draft-strategy-kicker">{{ layoutDraftStrategySummary.kicker }}</div>
+              <strong>{{ layoutDraftStrategySummary.label }}</strong>
+              <span>{{ layoutDraftStrategySummary.summary }}</span>
             </div>
             <div class="layout-draft-workspace-list">
               <div
@@ -520,9 +526,9 @@
                 <div class="layout-draft-workspace-time">{{ segment.timeRange }}</div>
                 <div class="layout-draft-workspace-main">
                   <div class="layout-draft-workspace-label">{{ segment.label }}</div>
-                  <div class="layout-draft-workspace-desc">{{ segment.desc }}</div>
+                  <div v-if="segment.intent" class="layout-draft-workspace-desc">{{ segment.intent }}</div>
                 </div>
-                <span class="layout-draft-workspace-status">{{ segment.statusText }}</span>
+                <span v-if="segment.statusText" class="layout-draft-workspace-status">{{ segment.statusText }}</span>
               </div>
             </div>
           </div>
@@ -537,16 +543,31 @@
         </div>
       </div>
 
-      <!-- 右侧：AI 助手侧边栏 -->
+      <!-- 右侧：AI 编审助手侧边栏 -->
       <div class="ai-sidebar">
         <div class="ai-sidebar-header">
           <div class="ai-sidebar-heading">
             <h3 class="ai-sidebar-title">
               <el-icon><ChatDotRound /></el-icon>
-              AI 助手
+              AI编审助手
             </h3>
-            <p class="ai-sidebar-subtitle">{{ aiSidebarSubtitle }}</p>
           </div>
+          <el-tooltip
+            v-if="activeAssistantWorkspace"
+            effect="light"
+            placement="bottom"
+            :content="activeAssistantWorkspace.tooltip"
+          >
+            <button
+              type="button"
+              class="assistant-workspace-chip"
+              @click="handleCloseAssistantWorkspace"
+            >
+              <span class="assistant-workspace-dot" />
+              <span class="assistant-workspace-text">{{ activeAssistantWorkspace.label }}</span>
+              <el-icon class="assistant-workspace-close"><Close /></el-icon>
+            </button>
+          </el-tooltip>
           <div class="ai-sidebar-actions">
             <el-button link @click="llmConfigVisible = true">
               <el-icon><Setting /></el-icon>
@@ -565,6 +586,8 @@
             :rotation-strategy="rotationStrategy"
             :rotation-duration-seconds="rotationTargetDurationSeconds"
             :playlist-id="currentPlaylistId"
+            :current-layout-draft="currentLayoutDraft"
+            :workspace-closed-notice="assistantWorkspaceClosedNotice"
             :orchestration-logs="orchestratorRuntime.logs.value"
             :orchestration-session="orchestratorRuntime.session.value"
             :is-orchestrating="orchestratorRuntime.isRunning.value"
@@ -617,6 +640,7 @@ import {
   WarningFilled,
   ChatDotRound,
   Setting,
+  Close,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import ScheduleItemDialog from './components/ScheduleItemDialog.vue'
@@ -698,6 +722,8 @@ import type { DraftFeasibilityReport, LayoutDraft, PlaylistType, RotationPlaylis
 import ChatPanel from '@/components/dialogue/ChatPanel.vue'
 import LLMConfigPanel from '@/components/llm/LLMConfigPanel.vue'
 import { getScheduleValidationService } from '@/services/scheduleValidationService'
+import { resolveForegroundLayoutDraft } from '@/services/runtime/foregroundLayoutDraft'
+import { formatClockWithFrame, normalizeClockText as normalizeClockTextValue } from '@/services/time/clockFormat'
 
 const route = useRoute()
 const router = useRouter()
@@ -754,8 +780,17 @@ const rotationTargetDurationSeconds = ref<number | null>(null)
 const activeWorkspaceTab = ref<'schedule' | 'draft'>('schedule')
 const currentLayoutDraft = ref<LayoutDraft | null>(null)
 const currentLayoutDraftFeasibility = ref<DraftFeasibilityReport | null>(null)
-const showLayoutDraftWorkspace = computed(() => playlistType.value === 'tv')
+const assistantWorkspaceClosedNotice = ref('')
+const showLayoutDraftWorkspace = computed(() => (
+  playlistType.value === 'tv'
+  || (playlistType.value === 'rotation' && Boolean(currentLayoutDraft.value))
+))
+const showLayoutDraftTab = computed(() => showLayoutDraftWorkspace.value)
 const isScheduleWorkspaceActive = computed(() => activeWorkspaceTab.value !== 'draft' || !showLayoutDraftWorkspace.value)
+const switchWorkspaceTab = (tab: 'schedule' | 'draft') => {
+  if (tab === 'draft' && !showLayoutDraftWorkspace.value) return
+  activeWorkspaceTab.value = tab
+}
 const currentPlaylistTypeLabel = computed(() => {
   if (playlistType.value === 'tv') return '电视播单'
   if (playlistType.value === 'rotation') return '轮播单'
@@ -791,12 +826,78 @@ const currentPlaylistDocumentMeta = computed(() => {
   }
   return `${rotationDurationScopeText.value} · ${rotationStrategyLabel.value}`
 })
+
+const activeAssistantWorkspace = computed(() => {
+  if (playlistType.value === 'none') return null
+  const label = playlistType.value === 'tv'
+    ? `${currentChannelName.value}电视播单`
+    : '轮播单'
+  const meta = playlistType.value === 'tv'
+    ? `${scheduleDate.value} · ${currentChannelName.value}`
+    : `${rotationDurationScopeText.value} · ${rotationStrategyLabel.value}`
+  return {
+    label,
+    tooltip: `正在与${label}交互。点击可退出当前工作区；退出后新的自然语言不会再指向该播单。${meta}`,
+  }
+})
+
+const resetCurrentPlaylistWorkspace = () => {
+  currentPlaylistId.value = null
+  playlistType.value = 'none'
+  scheduleItems.value = []
+  currentLayoutDraft.value = null
+  currentLayoutDraftFeasibility.value = null
+  rotationTargetDurationSeconds.value = null
+  activeWorkspaceTab.value = 'schedule'
+  currentBroadcastWindow.value = {
+    startTime: '06:00:00',
+    endTime: '23:59:59',
+  }
+  syncPageItemsToAtomic()
+  refreshValidationReport()
+  updateScrollMetrics()
+}
+
+const handleCloseAssistantWorkspace = async () => {
+  const workspace = activeAssistantWorkspace.value
+  if (!workspace) return
+  try {
+    await ElMessageBox.confirm(
+      `退出当前工作区后，AI编审助手将不再默认指向“${workspace.label}”。`,
+      '退出工作区',
+      {
+        confirmButtonText: '退出',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+  persistCurrentPlaylistDocument()
+  resetCurrentPlaylistWorkspace()
+  assistantWorkspaceClosedNotice.value = `已退出“${workspace.label}”工作区。你可以新建或打开播单后继续编排。`
+}
 const timelineStartHeaderLabel = computed(() => playlistType.value === 'rotation' ? '起始位置' : '起始时间')
 const timelineEndHeaderLabel = computed(() => playlistType.value === 'rotation' ? '结束位置' : '结束时间')
 
 const cloneScheduleItems = (items: ScheduleItem[]) => items.map((item) => ({ ...item }))
 
 const createLocalPlaylistId = (type: Exclude<PlaylistType, 'none'>) => `${type}-local-${Date.now()}`
+
+const resolveCurrentTvLayoutDraft = () => resolveForegroundLayoutDraft({
+  channelId: currentChannelId.value,
+  channelName: currentChannelName.value,
+  date: scheduleDate.value,
+  playlistType: 'tv',
+})
+
+const ensureCurrentTvLayoutDraft = () => {
+  if (playlistType.value !== 'tv') return
+  if (currentLayoutDraft.value) return
+  currentLayoutDraft.value = resolveCurrentTvLayoutDraft()
+  currentLayoutDraftFeasibility.value = null
+}
 
 const persistCurrentPlaylistDocument = () => {
   if (!currentPlaylistId.value || playlistType.value === 'none') return
@@ -810,8 +911,8 @@ const persistCurrentPlaylistDocument = () => {
     rotationStrategy: playlistType.value === 'rotation' ? rotationStrategy.value : undefined,
     rotationDurationSeconds: playlistType.value === 'rotation' ? rotationTargetDurationSeconds.value : null,
     scheduleItems: cloneScheduleItems(scheduleItems.value),
-    layoutDraft: playlistType.value === 'tv' ? currentLayoutDraft.value : null,
-    layoutDraftFeasibility: playlistType.value === 'tv' ? currentLayoutDraftFeasibility.value : null,
+    layoutDraft: currentLayoutDraft.value,
+    layoutDraftFeasibility: currentLayoutDraftFeasibility.value,
     broadcastWindow: { ...currentBroadcastWindow.value },
   }
   if (existingIndex >= 0) {
@@ -835,8 +936,10 @@ const openPlaylistDocument = (document: PlaylistDocumentState) => {
     ? document.rotationDurationSeconds ?? null
     : null
   scheduleItems.value = cloneScheduleItems(document.scheduleItems)
-  currentLayoutDraft.value = document.playlistType === 'tv' ? document.layoutDraft : null
-  currentLayoutDraftFeasibility.value = document.playlistType === 'tv' ? document.layoutDraftFeasibility : null
+  currentLayoutDraft.value = document.playlistType === 'tv'
+    ? document.layoutDraft ?? resolveCurrentTvLayoutDraft()
+    : document.layoutDraft ?? null
+  currentLayoutDraftFeasibility.value = document.layoutDraftFeasibility ?? null
   currentBroadcastWindow.value = document.playlistType === 'rotation'
     ? {
         startTime: '00:00:00',
@@ -1237,12 +1340,6 @@ const handleChatLayoutDraftUpdated = (payload: {
   draft: LayoutDraft | null
   feasibilityReport?: DraftFeasibilityReport | null
 }) => {
-  if (playlistType.value === 'rotation') {
-    currentLayoutDraft.value = null
-    currentLayoutDraftFeasibility.value = null
-    activeWorkspaceTab.value = 'schedule'
-    return
-  }
   currentLayoutDraft.value = payload.draft
   currentLayoutDraftFeasibility.value = payload.feasibilityReport ?? null
   if (payload.draft) {
@@ -1251,6 +1348,7 @@ const handleChatLayoutDraftUpdated = (payload: {
   } else {
     activeWorkspaceTab.value = 'schedule'
   }
+  persistCurrentPlaylistDocument()
 }
 
 const handleCreatePlaylist = (type: Exclude<PlaylistType, 'none'>) => {
@@ -1260,7 +1358,7 @@ const handleCreatePlaylist = (type: Exclude<PlaylistType, 'none'>) => {
   rotationStrategy.value = type === 'rotation' ? 'content_match' : rotationStrategy.value
   rotationTargetDurationSeconds.value = null
   scheduleItems.value = []
-  currentLayoutDraft.value = null
+  currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : null
   currentLayoutDraftFeasibility.value = null
   activeWorkspaceTab.value = 'schedule'
   persistCurrentPlaylistDocument()
@@ -1278,6 +1376,7 @@ const handlePlaylistStateChanged = (payload: {
   date?: string
 }) => {
   const isNewPlaylistDocument = Boolean(payload.playlistId && payload.playlistId !== currentPlaylistId.value)
+  const isSwitchingPlaylistType = payload.playlistType !== playlistType.value
   if (isNewPlaylistDocument) {
     persistCurrentPlaylistDocument()
     currentPlaylistId.value = payload.playlistId ?? null
@@ -1292,8 +1391,9 @@ const handlePlaylistStateChanged = (payload: {
     scheduleForm.value.channelId = payload.channelId ?? currentChannelId.value
     scheduleForm.value.channelName = payload.channelName ?? currentChannelName.value
     scheduleForm.value.date = payload.date ?? scheduleDate.value
+    ensureCurrentTvLayoutDraft()
   }
-  if (payload.playlistType === 'rotation') {
+  if (payload.playlistType === 'rotation' && (isNewPlaylistDocument || isSwitchingPlaylistType)) {
     currentLayoutDraft.value = null
     currentLayoutDraftFeasibility.value = null
     activeWorkspaceTab.value = 'schedule'
@@ -1514,7 +1614,7 @@ const handleSeedTvSequenceContext = () => {
       sortOrder: 1,
       materialStatus: 'ready',
       materialName: '002601120001-MAT',
-      remark: '顺播上下文演示：已排第1集',
+      remark: '连续剧检查演示：已排第1集',
     },
     {
       id: 'demo-sequence-episode-3',
@@ -1535,14 +1635,14 @@ const handleSeedTvSequenceContext = () => {
       sortOrder: 2,
       materialStatus: 'ready',
       materialName: '002601120003-MAT',
-      remark: '顺播上下文演示：已排第3集',
+      remark: '连续剧检查演示：已排第3集',
     },
   ]
   syncPageItemsToAtomic()
   persistCurrentPlaylistDocument()
   refreshValidationReport()
   updateScrollMetrics()
-  ElMessage.success('已载入顺播上下文：09:00 第1集，10:30 第3集')
+  ElMessage.success('已载入连续剧检查：09:00 第1集，10:30 第3集')
 }
 
 const chatScheduleItems = computed(() =>
@@ -1589,10 +1689,7 @@ const timeToSeconds = (time: string): number => {
 }
 
 const normalizeClockText = (time: string): string => {
-  if (time.includes('T')) {
-    return time.split('T')[1]?.slice(0, 8) || time
-  }
-  return time.length === 5 ? `${time}:00` : time
+  return normalizeClockTextValue(time)
 }
 
 const resolveManualCandidateId = async (item: Partial<ScheduleItem>): Promise<string | null> => {
@@ -1641,16 +1738,6 @@ const displayGapEntries = computed<GapEntry[]>(() => {
 const displayGapCount = computed(() => displayGapEntries.value.length)
 const gapSummaryLabel = computed(() => playlistType.value === 'rotation' ? '时长空缺' : resolveGapSummaryLabel(runtimeGapEntries.value))
 
-const aiSidebarSubtitle = computed(() => {
-  if (playlistType.value === 'rotation') {
-    return '围绕当前轮播单总时长和素材线索，直接查找、插入、调整或校验编单。'
-  }
-  if (playlistType.value === 'tv') {
-    return '围绕当前频道、日期和时间空窗，直接补齐、调整或校验编单。'
-  }
-  return '先创建电视播单或轮播单，再通过自然语言驱动编排。'
-})
-
 const {
   orchestratorRuntime,
   handleCancelOrchestration,
@@ -1668,6 +1755,9 @@ const {
   applyRuntimeScheduleItems,
   syncAtomicItemsToPageDeferred,
   persistCurrentPlaylistDocument,
+  activateScheduleWorkspace: () => {
+    activeWorkspaceTab.value = 'schedule'
+  },
   focusRuntime,
   normalizeClockText,
 })
@@ -1776,11 +1866,17 @@ const formatDurationScopeText = (durationSeconds: number) => {
 
 const rotationDurationScopeText = computed(() => {
   if (rotationTargetDurationSeconds.value) {
-    return `时长制 · 总时长 ${formatDurationScopeText(rotationTargetDurationSeconds.value)} · 0 点起算`
+    return `总时长 ${formatDurationScopeText(rotationTargetDurationSeconds.value)}`
   }
   return scheduleItems.value.length > 0
-    ? `时长制 · 当前总时长 ${totalDurationText.value} · 0 点起算`
-    : '时长制 · 待确定总时长 · 0 点起算'
+    ? `已排 ${totalDurationText.value}`
+    : '待确定总时长'
+})
+
+const rotationRemainingDurationText = computed(() => {
+  if (!rotationTargetDurationSeconds.value) return '待确定'
+  const scheduledSeconds = scheduleItems.value.reduce((sum, item) => sum + (item.duration || 0), 0)
+  return formatDurationScopeText(Math.max(0, rotationTargetDurationSeconds.value - scheduledSeconds))
 })
 
 const formatTimelinePositionText = (time: string) => {
@@ -1788,7 +1884,7 @@ const formatTimelinePositionText = (time: string) => {
     return formatTime4(time)
   }
   const seconds = timeToSeconds(normalizeClockText(time))
-  if (seconds <= 0) return '0点起算'
+  if (seconds <= 0) return '开始'
   return `+${formatDurationScopeText(seconds)}`
 }
 
@@ -1813,33 +1909,111 @@ const handleBack = () => {
 }
 
 const formatTime4 = (time: string) => {
-  const parts = (time || '').split(':')
-  const h = String(parseInt(parts[0] || '0', 10) || 0).padStart(2, '0')
-  const m = String(parseInt(parts[1] || '0', 10) || 0).padStart(2, '0')
-  const s = String(parseInt(parts[2] || '0', 10) || 0).padStart(2, '0')
-  const f = String(parseInt(parts[3] || '0', 10) || 0).padStart(2, '0')
-  return `${h}:${m}:${s}:${f}`
+  return formatClockWithFrame(time)
 }
+
+const formatLayoutDraftTime = (time: string) => {
+  return normalizeClockText(time)
+}
+
+const layoutDraftStrategySummary = computed(() => {
+  const draft = currentLayoutDraft.value
+  if (!draft) return null
+  if (playlistType.value === 'tv') {
+    return {
+      kicker: '编排策略',
+      label: '电视播单',
+      summary: buildTvLayoutDraftStrategyText(draft),
+    }
+  }
+  if (draft.strategyProfile) {
+    return {
+      kicker: '编排策略',
+      label: draft.strategyProfile.label,
+      summary: draft.strategyProfile.selectionSummary || draft.strategyProfile.constraintSummary,
+    }
+  }
+  return null
+})
+
+const buildTvLayoutDraftStrategyText = (draft: LayoutDraft) => {
+  void draft
+  return '按草案里的栏目名找栏目或节目；连续剧按播出顺序接着排；找不到合适节目时留空，留给人工确认，不阻断编排。'
+}
+
+const isRotationLayoutDraft = computed(() => {
+  const draft = currentLayoutDraft.value
+  return playlistType.value !== 'tv' && Boolean(draft?.draftKind === 'duration_segments' || draft?.durationSegments?.length)
+})
+
+const layoutDraftWorkspaceTitle = computed(() => {
+  const draft = currentLayoutDraft.value
+  if (!draft) return ''
+  return isRotationLayoutDraft.value ? '轮播草案' : draft.layoutReference.name
+})
+
+const layoutDraftWorkspaceSubtitle = computed(() => {
+  const draft = currentLayoutDraft.value
+  if (!draft) return ''
+  if (isRotationLayoutDraft.value) {
+    const targetDurationSeconds = draft.targetDurationSeconds
+      ?? draft.durationSegments?.reduce((sum, segment) => sum + segment.targetDurationSeconds, 0)
+      ?? 0
+    const segmentCount = draft.durationSegments?.length ?? draft.layoutReference.slots.length
+    return `目标总时长 ${formatDurationText(targetDurationSeconds)} · ${segmentCount} 个内容块`
+  }
+  return `${formatLayoutDraftTime(draft.coverage.start)} - ${formatLayoutDraftTime(draft.coverage.end)} · ${draft.layoutReference.slots.length} 个时段`
+})
+
+const describeLayoutDraftSegment = (
+  column: LayoutDraft['columns'][number] | undefined,
+) => {
+  if (!column) return '等待补充栏目或节目名称。'
+  if (playlistType.value !== 'tv') {
+    return column.selectionPolicy?.notes?.[0] ?? '按当前轮播需求选择候选内容。'
+  }
+  return ''
+}
+
+const formatLayoutDraftSegmentLabel = (
+  column: LayoutDraft['columns'][number] | undefined,
+  fallbackLabel: string,
+) => column?.semanticLabel ?? column?.columnName ?? fallbackLabel
 
 const layoutDraftWorkspaceSegments = computed(() => {
   const draft = currentLayoutDraft.value
   if (!draft) return []
   return draft.layoutReference.slots.map((slot, index) => {
     const column = draft.columns[index]
+    const durationSegment = draft.durationSegments?.find((segment) => segment.id === slot.id) ?? draft.durationSegments?.[index]
     const feasibility = currentLayoutDraftFeasibility.value?.segments.find((segment) => segment.segmentId === slot.id)
     const status = feasibility?.status ?? 'ready'
     const matchedCount = feasibility?.matchedCandidateCount ?? 0
-    const desc = feasibility?.reasons[0]
-      ?? column?.selectionPolicy?.notes?.[0]
-      ?? column?.queryHints?.slice(0, 2).join('、')
-      ?? '等待正式编排时读取候选'
+    const intent = playlistType.value === 'tv'
+      ? ''
+      : status === 'blocked'
+      ? feasibility?.reasons[0] ?? '当前时段暂不可编排。'
+      : describeLayoutDraftSegment(column)
+    const statusText = playlistType.value === 'tv'
+      ? ''
+      : status === 'blocked'
+        ? '不可编排'
+        : status === 'warning'
+          ? '候选较少'
+          : matchedCount > 0
+            ? `候选 ${matchedCount}`
+            : ''
     return {
       id: slot.id,
-      timeRange: `${formatTime4(slot.startTime)} - ${formatTime4(slot.endTime)}`,
-      label: column?.semanticLabel ?? column?.columnName ?? `时段 ${index + 1}`,
+      timeRange: isRotationLayoutDraft.value && durationSegment
+        ? `目标 ${formatDurationText(durationSegment.targetDurationSeconds)}`
+        : `${formatLayoutDraftTime(slot.startTime)} - ${formatLayoutDraftTime(slot.endTime)}`,
+      label: isRotationLayoutDraft.value
+        ? durationSegment?.label ?? durationSegment?.contentHint ?? formatLayoutDraftSegmentLabel(column, `内容块 ${index + 1}`)
+        : formatLayoutDraftSegmentLabel(column, `时段 ${index + 1}`),
       status,
-      statusText: status === 'blocked' ? '不可编排' : status === 'warning' ? '候选较少' : '待确认',
-      desc: matchedCount > 0 ? `候选 ${matchedCount} 个 · ${desc}` : desc,
+      statusText,
+      intent,
     }
   })
 })
@@ -1968,8 +2142,23 @@ watch(
 watch(
   () => [playlistType.value, activeWorkspaceTab.value],
   () => {
+    if (playlistType.value === 'tv' && activeWorkspaceTab.value === 'draft') {
+      ensureCurrentTvLayoutDraft()
+    }
+    if (!showLayoutDraftWorkspace.value && activeWorkspaceTab.value === 'draft') {
+      activeWorkspaceTab.value = 'schedule'
+    }
     updateScrollMetrics()
   }
+)
+
+watch(
+  () => currentLayoutDraft.value,
+  () => {
+    if (!showLayoutDraftWorkspace.value && activeWorkspaceTab.value === 'draft') {
+      activeWorkspaceTab.value = 'schedule'
+    }
+  },
 )
 
 watch(
@@ -2004,6 +2193,12 @@ watch(
 watch(
   () => [currentChannelId.value, scheduleDate.value],
   () => {
+    if (playlistType.value === 'tv') {
+      currentLayoutDraft.value = null
+      currentLayoutDraftFeasibility.value = null
+      ensureCurrentTvLayoutDraft()
+      persistCurrentPlaylistDocument()
+    }
     refreshValidationReport()
   },
 )
@@ -2181,18 +2376,18 @@ onBeforeUnmount(() => {
 
 // AI 智能编排按钮样式
 .ai-orchestration-btn {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, var(--app-accent) 0%, var(--app-accent-soft) 100%);
   color: white;
   border: none;
   font-weight: 500;
   
   &:hover {
-    background: linear-gradient(135deg, #5a6fd6 0%, #6a4190 100%);
+    background: linear-gradient(135deg, var(--app-accent-deep) 0%, var(--app-accent) 100%);
     opacity: 0.95;
   }
   
   &:active {
-    background: linear-gradient(135deg, #4e5fc4 0%, #5e3a82 100%);
+    background: linear-gradient(135deg, #4f46e5 0%, var(--app-accent-deep) 100%);
   }
 }
 
@@ -2215,7 +2410,7 @@ onBeforeUnmount(() => {
   }
 
   .continuity-item.is-clickable:hover .continuity-text {
-    color: #9a3412;
+    color: var(--app-accent-deep);
   }
 
   .continuity-text {
@@ -2292,6 +2487,10 @@ onBeforeUnmount(() => {
   }
 }
 
+.timeline-table-header.is-rotation {
+  grid-template-columns: 60px 110px 110px 110px minmax(240px, 1fr) 120px 100px;
+}
+
 // 时间轴内容
 .timeline-content {
   flex: 1;
@@ -2329,6 +2528,10 @@ onBeforeUnmount(() => {
   }
 }
 
+.schedule-items-wrapper.is-rotation {
+  min-width: 860px;
+}
+
 // 编单项行 - 使用CSS Grid确保对齐
 .schedule-item-row {
   display: grid;
@@ -2340,7 +2543,11 @@ onBeforeUnmount(() => {
   height: 50px;
 
   &:hover {
-    background-color: rgba(249, 115, 22, 0.05);
+    background-color: rgba(100, 108, 255, 0.05);
+  }
+
+  &.is-rotation {
+    grid-template-columns: 60px 110px 110px 110px minmax(240px, 1fr) 120px 100px;
   }
 
   &.is-section-disabled {
@@ -2713,7 +2920,7 @@ onBeforeUnmount(() => {
   transition: width 0.3s ease;
 }
 
-// 右侧 AI 助手侧边栏
+// 右侧 AI 编审助手侧边栏
 .ai-sidebar {
   width: 540px;
   min-width: 540px;
@@ -2740,7 +2947,7 @@ onBeforeUnmount(() => {
       margin: 0;
 
       .el-icon {
-        color: var(--el-color-success);
+        color: var(--app-accent);
       }
     }
   }
@@ -2836,8 +3043,8 @@ onBeforeUnmount(() => {
   min-height: 24px;
   padding: 0 10px;
   border-radius: 999px;
-  background: #fff7ed;
-  color: #9a3412;
+  background: var(--app-accent-tint);
+  color: var(--app-accent-deep);
   font-size: 11px;
   letter-spacing: 0.04em;
   font-weight: 600;
@@ -3182,6 +3389,8 @@ onBeforeUnmount(() => {
 
 .layout-draft-strategy-summary {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 10px;
   padding: 10px 12px;
@@ -3191,6 +3400,17 @@ onBeforeUnmount(() => {
   color: #34445a;
   font-size: 12px;
   line-height: 1.6;
+}
+
+.layout-draft-strategy-kicker {
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--app-accent-deep);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 22px;
 }
 
 .layout-draft-workspace-list {
@@ -3211,11 +3431,12 @@ onBeforeUnmount(() => {
 }
 
 .layout-draft-workspace-item.is-warning {
-  border-color: #f3c371;
+  border-color: var(--app-line-strong);
+  background: #f8f9ff;
 }
 
 .layout-draft-workspace-item.is-blocked {
-  border-color: #f3a6a6;
+  border-color: #fca5a5;
 }
 
 .layout-draft-workspace-time {
@@ -3250,9 +3471,19 @@ onBeforeUnmount(() => {
 }
 
 .layout-draft-workspace-status {
-  color: #64748b;
+  min-width: 64px;
+  color: #2563eb;
   font-size: 12px;
   font-weight: 600;
+  text-align: right;
+}
+
+.layout-draft-workspace-item.is-warning .layout-draft-workspace-status {
+  color: var(--app-accent-deep);
+}
+
+.layout-draft-workspace-item.is-blocked .layout-draft-workspace-status {
+  color: #b91c1c;
 }
 
 .layout-draft-empty {
@@ -3299,7 +3530,7 @@ onBeforeUnmount(() => {
 }
 
 .insight-label {
-  color: #78716c;
+  color: var(--app-text-muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -3312,7 +3543,7 @@ onBeforeUnmount(() => {
   padding: 0 8px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.96);
-  border: 1px solid rgba(251, 146, 60, 0.14);
+  border: 1px solid var(--app-line);
   color: #44403c;
   font-size: 11px;
   font-weight: 600;
@@ -3325,9 +3556,9 @@ onBeforeUnmount(() => {
 }
 
 .insight-pill.is-warning {
-  color: #b45309;
-  background: rgba(255, 251, 235, 0.98);
-  border-color: rgba(245, 158, 11, 0.18);
+  color: var(--app-accent-deep);
+  background: rgba(238, 242, 255, 0.98);
+  border-color: var(--app-line);
 }
 
 .timeline-table-header {
@@ -3355,19 +3586,19 @@ onBeforeUnmount(() => {
 .timeline-table-header .index-cell,
 .schedule-item-row .index-cell {
   left: 0;
-  box-shadow: 1px 0 0 rgba(251, 146, 60, 0.12);
+  box-shadow: 1px 0 0 var(--app-line);
 }
 
 .timeline-table-header .start-time-cell,
 .schedule-item-row .start-time-cell {
   left: 60px;
-  box-shadow: 1px 0 0 rgba(251, 146, 60, 0.12);
+  box-shadow: 1px 0 0 var(--app-line);
 }
 
 .timeline-table-header .end-time-cell,
 .schedule-item-row .end-time-cell {
   left: 170px;
-  box-shadow: 8px 0 18px rgba(146, 64, 14, 0.05);
+  box-shadow: 8px 0 18px rgba(83, 91, 242, 0.05);
 }
 
 .timeline-table-header .index-cell,
@@ -3396,7 +3627,7 @@ onBeforeUnmount(() => {
 }
 
 .schedule-item-row.is-program {
-  background-color: rgba(245, 158, 11, 0.035);
+  background-color: rgba(100, 108, 255, 0.035);
 }
 
 .schedule-item-row.is-ad {
@@ -3435,11 +3666,11 @@ onBeforeUnmount(() => {
 }
 
 .schedule-item-row.is-focus-active::after {
-  border: 2px dashed rgba(245, 158, 11, 0.95);
+  border: 2px dashed rgba(100, 108, 255, 0.95);
 }
 
 .schedule-item-row.is-focus-recent::after {
-  border: 2px dashed rgba(22, 163, 74, 0.9);
+  border: 2px dashed rgba(100, 108, 255, 0.72);
 }
 
 .schedule-item-row.is-focus-error::after {
@@ -3465,7 +3696,7 @@ onBeforeUnmount(() => {
 
 .schedule-item-row:hover .episode-name,
 .schedule-item-row:hover .time-text {
-  color: #9a3412;
+  color: var(--app-accent-deep);
 }
 
 .focus-range-marker,
@@ -3475,7 +3706,7 @@ onBeforeUnmount(() => {
   right: 6px;
   z-index: 4;
   border-radius: 8px;
-  border: 2px dashed rgba(245, 158, 11, 0.92);
+  border: 2px dashed rgba(100, 108, 255, 0.92);
   background: transparent;
   pointer-events: none;
   box-sizing: border-box;
@@ -3483,7 +3714,7 @@ onBeforeUnmount(() => {
 
 .focus-range-marker.is-success,
 .floating-focus-marker.is-success {
-  border-color: rgba(22, 163, 74, 0.92);
+  border-color: rgba(100, 108, 255, 0.78);
 }
 
 .focus-range-marker.is-error,
@@ -3568,15 +3799,65 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
-.ai-sidebar-subtitle {
-  margin: 0;
-  color: #78716c;
+.ai-sidebar-title .el-icon {
+  color: var(--app-accent);
+}
+
+.assistant-workspace-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 220px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--app-line-strong);
+  border-radius: 999px;
+  background: #ffffff;
+  color: #34445a;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    color 0.16s ease;
+}
+
+.assistant-workspace-chip:hover {
+  border-color: var(--app-accent);
+  background: var(--app-accent-tint);
+  color: var(--app-accent-deep);
+}
+
+.assistant-workspace-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--app-accent);
+  flex: 0 0 auto;
+}
+
+.assistant-workspace-text {
+  overflow: hidden;
+  min-width: 0;
   font-size: 12px;
-  line-height: 1.6;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-workspace-close {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.assistant-workspace-chip:hover .assistant-workspace-close {
+  color: var(--app-accent-deep);
 }
 
 .ai-sidebar .ai-sidebar-header {
-  background: rgba(255, 250, 245, 0.86);
+  background: #f8f9ff;
 }
 
 @media (max-width: 1280px) {

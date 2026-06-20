@@ -174,7 +174,7 @@ describe('DemoRuntimeFacade insert recommendation', () => {
     expect(result.pendingAtomicContext.slots.programName).toContain('健康')
   })
 
-  it('明确节目名且高置信时会直接生成插入命令', async () => {
+  it('明确节目名且高置信时会形成待确认插入', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -196,15 +196,15 @@ describe('DemoRuntimeFacade insert recommendation', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('execute_command')
-    if (result.kind !== 'execute_command') {
-      throw new Error('expected execute_command')
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') {
+      throw new Error('expected pending_atomic_context')
     }
-    expect(result.execution.command.action).toBe('insert')
-    expect(result.execution.command.data).toMatchObject({
-      candidateId: 'I103001-0001',
-      insertTime: '18:30:00',
-    })
+    expect(result.pendingAtomicContext.action).toBe('insert')
+    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
+    expect(result.pendingAtomicContext.slots.targetTime).toBe('18:30:00')
+    expect(result.feedback.content).toContain('请确认具体要插入哪一个')
+    expect(result.pendingAtomicContext.insertRecommendations[0]?.programName).toContain('东方新闻')
   })
 
   it('会根据当前节目名锚点反推后置插入时间并进入推荐确认', async () => {

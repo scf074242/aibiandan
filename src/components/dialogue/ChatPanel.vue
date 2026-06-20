@@ -59,6 +59,19 @@
             </div>
           </div>
 
+          <div
+            v-if="message.role !== 'user' && getAssistantProcessLines(message).length > 0"
+            class="system-process-strip"
+          >
+            <span
+              v-for="line in getAssistantProcessLines(message)"
+              :key="line"
+              class="system-process-line"
+            >
+              {{ line }}
+            </span>
+          </div>
+
           <div v-if="message.role === 'user'" class="message-text">{{ message.content }}</div>
 
           <button
@@ -130,7 +143,7 @@
               v-if="getAgentSearchSummaryCards(message).length > 0"
               class="agent-search-panel"
             >
-              <div class="explanation-title">检索与上下文</div>
+              <div class="explanation-title">查找记录</div>
               <div class="agent-search-list">
                 <div
                   v-for="card in getAgentSearchSummaryCards(message)"
@@ -205,7 +218,6 @@
 
       <div v-if="messages.length === 0 && !loading" class="empty-state">
         <el-icon :size="48"><ChatDotRound /></el-icon>
-        <p>输入自然语言需求，AI 会识别意图、生成命令，并按风险级别决定直接执行或请求确认。</p>
       </div>
     </div>
 
@@ -215,7 +227,7 @@
           <div class="pending-command-title">待确认修改</div>
           <div class="pending-command-summary">{{ pendingCommand.summary }}</div>
         </div>
-        <el-tag type="warning" effect="light">高风险</el-tag>
+        <el-tag type="danger" effect="light">高风险</el-tag>
       </div>
 
       <div class="pending-command-body">
@@ -328,7 +340,7 @@
                   </span>
                 </span>
                 <span class="insert-recommendation-confidence">
-                  置信度 {{ Math.round(candidate.confidence * 100) }}%
+                  {{ formatRecommendationStrengthLabel(index) }}
                 </span>
               </span>
               <span class="insert-recommendation-meta">
@@ -342,7 +354,7 @@
             </span>
           </button>
           <div class="insert-recommendation-footer-note">
-            相似候选已经按匹配度排序，建议优先确认上方靠前的节目。
+            我按节目线索和当前播单排好了候选。你选一个后我再写入；不选就不会改动播单。
           </div>
         </div>
       </div>
@@ -366,7 +378,7 @@
           <div class="pending-command-title">待确认执行</div>
           <div class="pending-command-summary">{{ formatPendingAtomicSummary(pendingAtomicContext) }}</div>
         </div>
-        <el-tag type="warning" effect="light">需确认</el-tag>
+        <el-tag type="primary" effect="light">需确认</el-tag>
       </div>
 
       <div class="pending-command-body">
@@ -395,38 +407,45 @@
 
     <div class="input-area">
       <input
-        v-if="false"
         ref="layoutFileInput"
         type="file"
         accept=".xls,.xlsx"
         class="layout-file-input"
         @change="handleLayoutFileChange"
       >
-      <el-input
-        v-model="inputMessage"
-        type="textarea"
-        :rows="2"
-        placeholder="例如：在9点插入节目看东方，或把9点的节目向后移动1小时"
-        @keydown.enter.prevent="handlePrimaryAction"
-      />
-      <el-button
-        v-if="false"
-        :loading="uploadingLayout"
-        :disabled="props.isOrchestrating"
-        class="layout-upload-button"
-        @click="openLayoutUpload"
-      >
-        <el-icon><UploadFilled /></el-icon>
-      </el-button>
-      <el-button
-        :type="props.isOrchestrating ? 'danger' : 'primary'"
-        :disabled="props.isOrchestrating ? !props.canInterrupt : !inputMessage.trim() || loading"
-        :loading="loading && !props.isOrchestrating"
-        @click="handlePrimaryAction"
-      >
-        <span v-if="props.isOrchestrating">中止</span>
-        <el-icon v-else><Promotion /></el-icon>
-      </el-button>
+      <div class="input-shell" :class="{ 'is-busy': loading || isForegroundOrchestrationRunning }">
+        <el-input
+          v-model="inputMessage"
+          class="message-input"
+          type="textarea"
+          :rows="2"
+          placeholder="例如：在9点插入节目看东方，或把9点的节目向后移动1小时"
+          @keydown.enter.prevent="handlePrimaryAction"
+        />
+        <div class="input-control-row">
+          <button
+            type="button"
+            class="input-icon-button"
+            :class="{ 'is-loading': uploadingLayout }"
+            :disabled="uploadingLayout || isForegroundOrchestrationRunning"
+            title="上传版面草案"
+            @click="openLayoutUpload"
+          >
+            <el-icon><Paperclip /></el-icon>
+          </button>
+          <button
+            type="button"
+            class="send-action-button"
+            :class="{ 'is-stop': isForegroundOrchestrationRunning }"
+            :disabled="isForegroundOrchestrationRunning ? !props.canInterrupt : !inputMessage.trim() || loading"
+            :title="isForegroundOrchestrationRunning ? '中止编排' : '发送'"
+            @click="handlePrimaryAction"
+          >
+            <span v-if="isForegroundOrchestrationRunning" class="stop-square" />
+            <el-icon v-else><Top /></el-icon>
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -434,7 +453,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ChatDotRound, Document, Promotion, UploadFilled } from '@element-plus/icons-vue'
+import { ChatDotRound, Document, Paperclip, Top } from '@element-plus/icons-vue'
 import type { ChatMessage } from '@/types/llm'
 import type {
   DraftFeasibilityReport,
@@ -467,12 +486,24 @@ import {
   getDemoRuntimeFacade,
   summarizeRuntimeCommand,
   type RuntimeDecision,
+  type RuntimeAnalysisContext,
   type RuntimeExecutedResult,
   type RuntimeFeedback,
   type RuntimeOrchestrationRequest,
   type RuntimePendingCommand,
   type RuntimeScheduleItem,
 } from '@/services/runtime/demoRuntimeFacade'
+import {
+  buildForegroundAgentContextPackage,
+  resolvePendingReviewLifecycle,
+} from '@/services/runtime/foregroundAgentContextPackage'
+import { resolveForegroundLayoutDraft } from '@/services/runtime/foregroundLayoutDraft'
+import {
+  buildWorkspaceScopedRuntimeHistory,
+  buildForegroundWorkspaceIdentity,
+  resolveForegroundWorkspaceKey,
+  resolveForegroundWorkspaceTransition,
+} from '@/services/runtime/foregroundWorkspaceState'
 import {
   clearRuntimeLayout,
   getEffectiveColumnDefinition,
@@ -551,6 +582,7 @@ interface Message extends ChatMessage {
   stepMetric?: MessageStepMetric
   focusTarget?: MessageFocusTarget
   hiddenFromThread?: boolean
+  workspaceKey?: string | null
 }
 
 type SchedulePreviewItem = RuntimeScheduleItem
@@ -599,6 +631,8 @@ interface Props {
   playlistId?: string | null
   rotationStrategy?: RotationPlaylistStrategy
   rotationDurationSeconds?: number | null
+  currentLayoutDraft?: LayoutDraft | null
+  workspaceClosedNotice?: string
 }
 
 const props = defineProps<Props>()
@@ -628,13 +662,25 @@ const messagesContainer = ref<HTMLElement>()
 const layoutFileInput = ref<HTMLInputElement>()
 const pendingCommand = ref<RuntimePendingCommand | null>(null)
 const pendingAtomicContext = ref<RuntimePendingAtomicContext | null>(null)
+const analysisContext = ref<RuntimeAnalysisContext | null>(null)
+const pendingReviewWorkspaceKey = ref<string | null>(null)
+const pendingReviewInterruptedNotice = ref<string | null>(null)
 const pendingLayoutDraft = ref<LayoutDraft | null>(null)
 const layoutDraftFeasibility = ref<DraftFeasibilityReport | null>(null)
 const pendingLayoutDraftMode = ref<Extract<TaskMode, 'full_generate' | 'partial_generate'> | null>(null)
+const preferLayoutDraftContinuation = ref(false)
+const preserveIncomingLayoutDraftOnWorkspaceChange = ref(false)
 const activePlaylistType = ref<PlaylistType>(props.playlistType ?? 'none')
 const activeRotationStrategy = ref<RotationPlaylistStrategy>(props.rotationStrategy ?? 'content_match')
 const activeRotationDurationSeconds = ref<number | null>(props.rotationDurationSeconds ?? null)
+const foregroundLayoutDraftRuntimeEnabled = true
 const foregroundLayoutDraftEnabled = false
+const terminalOrchestrationStatuses = new Set(['completed', 'manual_review', 'failed', 'cancelled'])
+const isTerminalOrchestrationStatus = (status?: string) => Boolean(status && terminalOrchestrationStatuses.has(status))
+const isForegroundOrchestrationRunning = computed(() => (
+  Boolean(props.isOrchestrating)
+  && !isTerminalOrchestrationStatus(props.orchestrationSession?.status)
+))
 const commandExecutor = getCommandExecutor()
 const candidateService = getCandidateService()
 const scheduleCommandBus = getScheduleCommandBus()
@@ -645,6 +691,7 @@ const lastSummarySessionId = ref('')
 const uploadingLayout = ref(false)
 const activeImportedLayoutName = ref('')
 const queuedCommands = ref<string[]>([])
+const interruptedCommandAfterCancel = ref<string | null>(null)
 let activeThinkingController: {
   stop: () => void
   message: Message
@@ -660,19 +707,65 @@ const MIN_VISIBLE_MESSAGE_DURATION_MS = 100
 watch(() => props.playlistType, (value, oldValue) => {
   const nextPlaylistType = value ?? 'none'
   const previousPlaylistType = oldValue ?? activePlaylistType.value
+  const transition = resolveForegroundWorkspaceTransition(
+    buildForegroundWorkspaceIdentity({
+      playlistId: props.playlistId,
+      playlistType: previousPlaylistType,
+      channelId: props.channelId,
+      channelName: props.channelName,
+      date: props.date,
+      rotationStrategy: activeRotationStrategy.value,
+      rotationDurationSeconds: activeRotationDurationSeconds.value,
+    }),
+    buildForegroundWorkspaceIdentity({
+      playlistId: props.playlistId,
+      playlistType: nextPlaylistType,
+      channelId: props.channelId,
+      channelName: props.channelName,
+      date: props.date,
+      rotationStrategy: activeRotationStrategy.value,
+      rotationDurationSeconds: activeRotationDurationSeconds.value,
+    }),
+  )
   activePlaylistType.value = nextPlaylistType
-  if (previousPlaylistType !== nextPlaylistType) {
-    clearPendingRuntimeTaskState({ clearLayoutDraft: nextPlaylistType === 'rotation' })
+  if (transition.changed) {
+    clearPendingRuntimeTaskState({
+      clearLayoutDraft: transition.clearLayoutDraft && !preserveIncomingLayoutDraftOnWorkspaceChange.value,
+    })
     return
   }
-  if (activePlaylistType.value === 'rotation') {
+  if (activePlaylistType.value === 'rotation' && !preserveIncomingLayoutDraftOnWorkspaceChange.value) {
     clearPendingLayoutDraftState()
   }
 })
 
 watch(() => props.playlistId, (value, oldValue) => {
-  if (oldValue !== undefined && value !== oldValue) {
-    clearPendingRuntimeTaskState({ clearLayoutDraft: activePlaylistType.value === 'rotation' })
+  const transition = resolveForegroundWorkspaceTransition(
+    oldValue === undefined
+      ? null
+      : buildForegroundWorkspaceIdentity({
+        playlistId: oldValue,
+        playlistType: activePlaylistType.value,
+        channelId: props.channelId,
+        channelName: props.channelName,
+        date: props.date,
+        rotationStrategy: activeRotationStrategy.value,
+        rotationDurationSeconds: activeRotationDurationSeconds.value,
+      }),
+    buildForegroundWorkspaceIdentity({
+      playlistId: value,
+      playlistType: activePlaylistType.value,
+      channelId: props.channelId,
+      channelName: props.channelName,
+      date: props.date,
+      rotationStrategy: activeRotationStrategy.value,
+      rotationDurationSeconds: activeRotationDurationSeconds.value,
+    }),
+  )
+  if (transition.changed) {
+    clearPendingRuntimeTaskState({
+      clearLayoutDraft: transition.clearLayoutDraft && !preserveIncomingLayoutDraftOnWorkspaceChange.value,
+    })
   }
 })
 
@@ -684,6 +777,16 @@ watch(() => props.rotationDurationSeconds, (value) => {
   activeRotationDurationSeconds.value = typeof value === 'number' && value > 0 ? value : null
 })
 
+watch(() => props.workspaceClosedNotice, (value, oldValue) => {
+  if (!value || value === oldValue) return
+  clearPendingRuntimeTaskState({ clearLayoutDraft: true })
+  pushAssistantMessage(buildAssistantMessage({
+    content: value,
+    processType: 'planning',
+    processTypeLabel: '工作区',
+  }))
+})
+
 const SEED_TV_SEQUENCE_CONTEXT_PROMPT = '__seed_tv_sequence_context__'
 
 const quickActions: QuickAction[] = [
@@ -692,8 +795,10 @@ const quickActions: QuickAction[] = [
   { label: '内容匹配优先', prompt: '按内容匹配优先' },
   { label: '收视率优先', prompt: '按收视率优先' },
   { label: '热播优先', prompt: '按热播优先' },
-  { label: '顺播上下文', prompt: SEED_TV_SEQUENCE_CONTEXT_PROMPT, playlistTypes: ['tv'] },
+  { label: '连续剧检查', prompt: SEED_TV_SEQUENCE_CONTEXT_PROMPT, playlistTypes: ['tv'] },
   { label: '顺播倒序', prompt: '08:00 插入纵有疾风起第2集', playlistTypes: ['tv'] },
+  { label: '全天编排', prompt: '帮我全天编排', playlistTypes: ['tv'] },
+  { label: '补齐空窗', prompt: '补齐当前所有空窗' },
   { label: '插入节目', prompt: '在9点插入节目看东方' },
   { label: '插入短片', prompt: '0点插入城市形象春日花路短片', playlistTypes: ['rotation'] },
   { label: '替换节目', prompt: '把9点的节目替换成东方新闻' },
@@ -753,8 +858,20 @@ const isForegroundLongFlowDetails = (details?: DetailMap): boolean =>
   || isOrchestrationOverviewDetails(details)
   || containsForegroundDraftPayload(details)
 
+const isVisibleLayoutDraftBlockingFeedback = (message: Message): boolean => (
+  !foregroundLayoutDraftEnabled
+  && (
+    message.content.includes('当前版面草案还有')
+    || message.content.includes('不会进入正式编排')
+    || message.content.includes('请调整不可编排')
+  )
+)
+
 const isForegroundLayoutDraftMessage = (message: Message): boolean => {
   if (message.role === 'user') return false
+  if (isVisibleLayoutDraftBlockingFeedback(message)) return false
+  if (message.processTypeLabel === '版面更新') return false
+  if (/^已切换到.+频道版面/.test(message.content) || /^已切换到当前频道默认版面/.test(message.content)) return false
   const details = getMessageDetails(message)
   return message.content.includes('版面草案')
     || message.processTypeLabel?.includes('版面草案') === true
@@ -767,27 +884,20 @@ const visibleMessages = computed(() =>
 )
 
 const buildVisibleRuntimeHistory = (currentUserInput: string): string[] => {
-  const latestVisibleMessages = visibleMessages.value
-    .filter((message) => message.content.trim().length > 0)
-    .slice(-8)
-
-  const historyCandidates = latestVisibleMessages
-    .filter((message, index) => !(index === latestVisibleMessages.length - 1 && message.role === 'user' && message.content.trim() === currentUserInput))
-    .map((message) => {
-      const roleLabel = message.role === 'user' ? '用户' : '助手'
-      return `${roleLabel}：${message.content.trim()}`
-    })
-
-  return historyCandidates.slice(-6)
+  const currentWorkspaceKey = resolveCurrentPendingWorkspaceKey()
+  return buildWorkspaceScopedRuntimeHistory(visibleMessages.value, {
+    currentWorkspaceKey,
+    currentUserInput,
+  })
 }
 
 const applyQuickAction = (prompt: string) => {
   if (prompt === SEED_TV_SEQUENCE_CONTEXT_PROMPT) {
     emit('seedTvSequenceContextRequested')
     pushAssistantMessage(buildAssistantMessage({
-      content: '已在左侧载入电视顺播上下文：09:00 为《品质剧场：纵有疾风起 第1集》，10:30 为第3集。后续插入或替换同系列节目时，我会按当前编排上下文阻断跳集、倒序和占用风险。',
+      content: '已在左侧载入连续剧检查示例：09:00 为《品质剧场：纵有疾风起 第1集》，10:30 为第3集。后续插入或替换同系列节目时，我会帮你拦住跳集、倒序和时间占用风险。',
       processType: 'general',
-      processTypeLabel: '顺播上下文',
+      processTypeLabel: '连续剧检查',
     }), {
       autoFocus: false,
     })
@@ -884,6 +994,7 @@ const clearPendingLayoutDraftState = () => {
   pendingLayoutDraft.value = null
   layoutDraftFeasibility.value = null
   pendingLayoutDraftMode.value = null
+  preferLayoutDraftContinuation.value = false
   emit('layoutDraftUpdated', {
     draft: null,
     feasibilityReport: null,
@@ -893,6 +1004,10 @@ const clearPendingLayoutDraftState = () => {
 const clearPendingRuntimeTaskState = (options: { clearLayoutDraft?: boolean } = {}) => {
   pendingCommand.value = null
   pendingAtomicContext.value = null
+  analysisContext.value = null
+  pendingReviewWorkspaceKey.value = null
+  pendingReviewInterruptedNotice.value = null
+  preferLayoutDraftContinuation.value = false
   if (options.clearLayoutDraft) {
     clearPendingLayoutDraftState()
   }
@@ -938,6 +1053,10 @@ const confirmLayoutDraft = () => {
 }
 
 const openLayoutUpload = () => {
+  if (activePlaylistType.value === 'none') {
+    ElMessage.info('请先新建播单，再上传版面草案。')
+    return
+  }
   layoutFileInput.value?.click()
 }
 
@@ -977,6 +1096,17 @@ const handleLayoutFileChange = async (event: Event) => {
     setRuntimeLayout(imported)
     getCandidateService().clearCache()
     syncImportedLayoutState()
+    const uploadedDraft = resolveForegroundLayoutDraft({
+      channelId: props.channelId,
+      channelName: props.channelName,
+      date: props.date,
+      playlistType: activePlaylistType.value,
+      userIntent: `上传版面草案：${imported.sourceFileName}`,
+    })
+    emit('layoutDraftUpdated', {
+      draft: uploadedDraft,
+      feasibilityReport: null,
+    })
     const importTargetLabel = imported.matchedColumnLabel || imported.matchedWeekdayLabel || imported.matchedSheetName
     const importScopeText = imported.matchedWeekdayLabel && importTargetLabel
       ? `当前编排单为${imported.matchedWeekdayLabel}，已自动采用“${importTargetLabel}”数据。`
@@ -1040,8 +1170,15 @@ const handleLayoutFileChange = async (event: Event) => {
 }
 
 const handlePrimaryAction = async () => {
-  if (props.isOrchestrating) {
+  if (isForegroundOrchestrationRunning.value) {
     if (props.canInterrupt) {
+      const content = inputMessage.value.trim()
+      if (content) {
+        interruptedCommandAfterCancel.value = content
+        messages.value.push(buildUserMessage(content))
+        inputMessage.value = ''
+        await scrollToBottom()
+      }
       emit('cancelRequested')
     }
     return
@@ -1051,6 +1188,7 @@ const handlePrimaryAction = async () => {
 }
 
 const buildCurrentRuntimeScheduleState = (): ScheduleState => ({
+  playlistId: props.playlistId ?? undefined,
   channelId: props.channelId,
   channelName: props.channelName,
   date: props.date,
@@ -1063,6 +1201,79 @@ const buildCurrentRuntimeScheduleState = (): ScheduleState => ({
   rotationDurationSeconds: activePlaylistType.value === 'rotation' ? activeRotationDurationSeconds.value ?? undefined : undefined,
 })
 
+const resolveCurrentPendingWorkspaceKey = () => resolveForegroundWorkspaceKey(buildForegroundWorkspaceIdentity({
+  playlistId: props.playlistId,
+  playlistType: activePlaylistType.value,
+  channelId: props.channelId,
+  channelName: props.channelName,
+  date: props.date,
+  rotationStrategy: activeRotationStrategy.value,
+  rotationDurationSeconds: activeRotationDurationSeconds.value,
+}))
+
+const resolveCurrentMessageWorkspaceKey = (): string | null => resolveCurrentPendingWorkspaceKey()
+
+const buildUserMessage = (content: string): Message => ({
+  role: 'user',
+  content,
+  workspaceKey: resolveCurrentMessageWorkspaceKey(),
+})
+
+const bindPendingReviewToCurrentWorkspace = () => {
+  pendingReviewWorkspaceKey.value = resolveCurrentPendingWorkspaceKey()
+}
+
+const isPendingReviewWorkspaceCurrent = () => (
+  !pendingReviewWorkspaceKey.value
+  || pendingReviewWorkspaceKey.value === resolveCurrentPendingWorkspaceKey()
+)
+
+const expirePendingReviewForWorkspaceChange = (message: string) => {
+  pendingCommand.value = null
+  pendingAtomicContext.value = null
+  pendingReviewWorkspaceKey.value = null
+  ElMessage.warning(message)
+}
+
+const isPendingReviewConfirmText = (content: string): boolean =>
+  /^(确认|确定|执行|可以|好的|好|ok|yes)$/iu.test(content.replace(/\s+/g, ''))
+
+const isPendingReviewCancelText = (content: string): boolean =>
+  /^(取消|不用了|算了|先不用|no|cancel)$/iu.test(content.replace(/\s+/g, ''))
+
+const isPendingReviewSelectionText = (content: string): boolean =>
+  /^(第?[一二三四五六七八九十\d]+个?|选[一二三四五六七八九十\d]+|用[一二三四五六七八九十\d]+)$/u.test(content.replace(/\s+/g, ''))
+
+const isPendingReviewAnswerText = (content: string): boolean => (
+  isPendingReviewConfirmText(content)
+  || isPendingReviewCancelText(content)
+  || isPendingReviewSelectionText(content)
+)
+
+const resolvePendingReviewExpiredNotice = (reason?: 'workspace_changed' | 'next_non_answer') => (
+  reason === 'workspace_changed'
+    ? '上一条待确认操作不属于当前工作区，已自动失效。'
+    : '上一条待确认操作已失效，本轮按新的指令重新判断。'
+)
+
+const pushPendingReviewExpiredMessage = (reason?: 'workspace_changed' | 'next_non_answer') => {
+  pushAssistantMessage(buildAssistantMessage({
+    content: resolvePendingReviewExpiredNotice(reason),
+    processType: 'general',
+    processTypeLabel: '待确认已失效',
+  }))
+}
+
+const interruptPendingReviewForNewInput = (content: string): boolean => {
+  if (!pendingCommand.value && !pendingAtomicContext.value) return false
+  if (isPendingReviewAnswerText(content)) return false
+  pendingCommand.value = null
+  pendingAtomicContext.value = null
+  pendingReviewWorkspaceKey.value = null
+  pendingReviewInterruptedNotice.value = resolvePendingReviewExpiredNotice('next_non_answer')
+  return true
+}
+
 const applyPlaylistStateFromDetails = (details?: DetailMap) => {
   const playlistState = details?.playlistState as {
     playlistId?: string
@@ -1074,11 +1285,28 @@ const applyPlaylistStateFromDetails = (details?: DetailMap) => {
     date?: string
   } | undefined
   if (!playlistState?.playlistType) return
-  const playlistContextChanged = playlistState.playlistType !== activePlaylistType.value
-    || (playlistState.playlistType === 'rotation' && playlistState.rotationStrategy !== activeRotationStrategy.value)
-    || (playlistState.playlistType === 'rotation' && playlistState.rotationDurationSeconds !== activeRotationDurationSeconds.value)
-  if (playlistContextChanged) {
-    clearPendingRuntimeTaskState({ clearLayoutDraft: playlistState.playlistType === 'rotation' })
+  const playlistContextTransition = resolveForegroundWorkspaceTransition(
+    buildForegroundWorkspaceIdentity({
+      playlistId: props.playlistId,
+      playlistType: activePlaylistType.value,
+      channelId: props.channelId,
+      channelName: props.channelName,
+      date: props.date,
+      rotationStrategy: activeRotationStrategy.value,
+      rotationDurationSeconds: activeRotationDurationSeconds.value,
+    }),
+    buildForegroundWorkspaceIdentity({
+      playlistId: playlistState.playlistId ?? props.playlistId,
+      playlistType: playlistState.playlistType,
+      channelId: playlistState.channelId ?? props.channelId,
+      channelName: playlistState.channelName ?? props.channelName,
+      date: playlistState.date ?? props.date,
+      rotationStrategy: playlistState.rotationStrategy,
+      rotationDurationSeconds: playlistState.rotationDurationSeconds,
+    }),
+  )
+  if (playlistContextTransition.changed) {
+    clearPendingRuntimeTaskState({ clearLayoutDraft: playlistContextTransition.clearLayoutDraft })
   }
   activePlaylistType.value = playlistState.playlistType
   activeRotationStrategy.value = playlistState.rotationStrategy ?? 'content_match'
@@ -1127,6 +1355,48 @@ const appendRuntimeFeedback = (feedback: RuntimeFeedback) => {
   }))
 }
 
+const rememberLayoutDraftContinuationIfNeeded = (feedback: RuntimeFeedback) => {
+  const details = (feedback.details ?? undefined) as DetailMap | undefined
+  const draftCompleteness = details?.draftCompleteness as { status?: string } | undefined
+  const blockedMode = details?.blockedMode
+  if (feedback.processTypeLabel !== '还要补草案' || draftCompleteness?.status !== 'partial') return
+
+  preferLayoutDraftContinuation.value = true
+  if (blockedMode === 'full_generate' || blockedMode === 'partial_generate') {
+    pendingLayoutDraftMode.value = blockedMode
+  }
+  if (!pendingLayoutDraft.value && props.currentLayoutDraft) {
+    pendingLayoutDraft.value = props.currentLayoutDraft
+  }
+}
+
+const clearLayoutDraftContinuationPreference = () => {
+  preferLayoutDraftContinuation.value = false
+}
+
+const withRuntimeFeedbackNotice = (
+  feedback: RuntimeFeedback,
+  notice?: string | null,
+): RuntimeFeedback => {
+  if (!notice) return feedback
+  return {
+    ...feedback,
+    content: `${notice}\n${feedback.content}`,
+  }
+}
+
+const appendLayoutDraftWorkspaceFeedback = (feedback: RuntimeFeedback, fallbackContent: string) => {
+  const visibleContent = /切换|上传版面|默认版面|频道版面/.test(feedback.content)
+    ? feedback.content
+    : fallbackContent
+  pushAssistantMessage(buildAssistantMessage({
+    content: visibleContent,
+    thinking: feedback.thinking,
+    processType: feedback.processType as ProcessType,
+    processTypeLabel: '版面更新',
+  }))
+}
+
 const isRuntimeScheduleItemList = (value: unknown): value is RuntimeScheduleItem[] => (
   Array.isArray(value)
   && value.every((item) => (
@@ -1164,12 +1434,20 @@ const emitLatestRuntimeSchedule = (executionData?: unknown) => {
   emit('scheduleUpdated', commandExecutor.getScheduleItems())
 }
 
-const applyRuntimeDecision = async (decision: RuntimeDecision) => {
+const applyRuntimeDecision = async (
+  decision: RuntimeDecision,
+  leadingNotice?: string | null,
+) => {
   switch (decision.kind) {
     case 'agent_execution': {
-      appendRuntimeFeedback(decision.feedback)
-      pendingAtomicContext.value = null
+      appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
+      pendingAtomicContext.value = decision.pendingAtomicContext ?? null
       pendingCommand.value = null
+      if (pendingAtomicContext.value) {
+        bindPendingReviewToCurrentWorkspace()
+      } else {
+        pendingReviewWorkspaceKey.value = null
+      }
       const executionResult = decision.result.executionResult
       emit('commandExecuted', {
         success: decision.result.status === 'executed',
@@ -1185,31 +1463,60 @@ const applyRuntimeDecision = async (decision: RuntimeDecision) => {
       return
     }
     case 'pending_atomic_context':
-      appendRuntimeFeedback(decision.feedback)
+      appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingAtomicContext.value = decision.pendingAtomicContext
+      bindPendingReviewToCurrentWorkspace()
       return
     case 'message':
-      appendRuntimeFeedback(decision.feedback)
+      rememberLayoutDraftContinuationIfNeeded(decision.feedback)
+      if (decision.layoutDraft) {
+        preserveIncomingLayoutDraftOnWorkspaceChange.value = true
+      }
+      appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
+      if (decision.layoutDraft) {
+        pendingLayoutDraft.value = decision.layoutDraft
+        layoutDraftFeasibility.value = decision.layoutDraftFeasibility ?? null
+        pendingLayoutDraftMode.value = decision.layoutDraftMode ?? 'full_generate'
+        emit('layoutDraftUpdated', {
+          draft: decision.layoutDraft,
+          feasibilityReport: decision.layoutDraftFeasibility ?? null,
+        })
+        void nextTick(() => {
+          preserveIncomingLayoutDraftOnWorkspaceChange.value = false
+        })
+      }
+      if ('analysisContext' in decision) {
+        analysisContext.value = decision.analysisContext ?? null
+      }
       pendingAtomicContext.value = decision.pendingAtomicClarification
         ? buildPendingAtomicContextFromClarification(decision.pendingAtomicClarification)
         : null
+      if (pendingAtomicContext.value) {
+        bindPendingReviewToCurrentWorkspace()
+      } else {
+        pendingReviewWorkspaceKey.value = null
+      }
       return
     case 'pending_command':
-      appendRuntimeFeedback(decision.feedback)
+      appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingCommand.value = decision.pendingCommand
       pendingAtomicContext.value = null
+      bindPendingReviewToCurrentWorkspace()
       return
     case 'pending_target_selection':
-      appendRuntimeFeedback(decision.feedback)
+      appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingAtomicContext.value = buildPendingAtomicContextFromTargetSelection(decision.pendingTargetSelection)
+      bindPendingReviewToCurrentWorkspace()
       return
     case 'pending_insert_recommendation':
-      appendRuntimeFeedback(decision.feedback)
+      appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingAtomicContext.value = buildPendingAtomicContextFromInsertRecommendation(decision.pendingInsertRecommendation)
+      bindPendingReviewToCurrentWorkspace()
       return
     case 'execute_command':
       pendingAtomicContext.value = null
       pendingCommand.value = null
+      pendingReviewWorkspaceKey.value = null
       emitFocusTarget(
         decision.execution.details
           ? extractFocusTargetFromDetails(
@@ -1220,27 +1527,21 @@ const applyRuntimeDecision = async (decision: RuntimeDecision) => {
           : undefined,
       )
       await executeCommand(decision.execution.command, {
-        successMessage: decision.execution.successMessage,
+        successMessage: leadingNotice
+          ? `${leadingNotice}\n${decision.execution.successMessage}`
+          : decision.execution.successMessage,
         thinking: decision.execution.thinking,
         explanation: decision.execution.explanation,
         details: decision.execution.details,
       })
       return
     case 'orchestration':
-      appendRuntimeFeedback(decision.feedback)
+      clearLayoutDraftContinuationPreference()
+      appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       emit('orchestrateRequested', decision.orchestrationRequest)
       return
     case 'layout_draft':
-      if (!foregroundLayoutDraftEnabled) {
-        clearPendingLayoutDraftState()
-        appendRuntimeFeedback({
-          content: '这类长流程内容我不会继续在对话框里展开。当前请直接告诉我具体的插入、删除、移动、替换、查询或校验目标，我会按当前播单上下文执行原子编排。',
-          processType: 'planning',
-          processTypeLabel: '原子命令优先',
-        })
-        return
-      }
-      appendRuntimeFeedback(decision.feedback)
+      clearLayoutDraftContinuationPreference()
       pendingLayoutDraft.value = decision.draft
       layoutDraftFeasibility.value = decision.feasibilityReport
       pendingLayoutDraftMode.value = decision.orchestrationMode
@@ -1248,25 +1549,27 @@ const applyRuntimeDecision = async (decision: RuntimeDecision) => {
         draft: decision.draft,
         feasibilityReport: decision.feasibilityReport,
       })
+      if (foregroundLayoutDraftEnabled) {
+        appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
+      } else {
+        appendLayoutDraftWorkspaceFeedback(
+          decision.feedback,
+          decision.feedback.processTypeLabel === '版面草案待调整'
+            ? decision.feedback.content
+            : '左侧版面已更新，可以继续微调或确认进入编排。',
+        )
+      }
       return
     case 'layout_draft_clear':
       pendingAtomicContext.value = null
+      pendingReviewWorkspaceKey.value = null
       clearPendingLayoutDraftState()
       if (foregroundLayoutDraftEnabled) {
-        appendRuntimeFeedback(decision.feedback)
+        appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       }
       return
     case 'layout_commit':
-      if (!foregroundLayoutDraftEnabled) {
-        clearPendingLayoutDraftState()
-        appendRuntimeFeedback({
-          content: '当前对话先聚焦可直接执行的播单原子操作。请告诉我具体节目、素材线索、目标位置和动作，我会继续处理插入、删除、移动、替换、查询或校验。',
-          processType: 'planning',
-          processTypeLabel: '原子命令优先',
-        })
-        return
-      }
-      appendRuntimeFeedback(decision.feedback)
+      clearLayoutDraftContinuationPreference()
       pendingLayoutDraft.value = null
       layoutDraftFeasibility.value = null
       pendingLayoutDraftMode.value = null
@@ -1274,6 +1577,11 @@ const applyRuntimeDecision = async (decision: RuntimeDecision) => {
         draft: null,
         feasibilityReport: null,
       })
+      if (foregroundLayoutDraftEnabled) {
+        appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
+      } else {
+        appendLayoutDraftWorkspaceFeedback(decision.feedback, '已确认左侧版面，开始进入正式编排。')
+      }
       emit('orchestrateRequested', decision.orchestrationRequest)
       return
   }
@@ -1339,23 +1647,88 @@ const applyRuntimeExecutedResult = (executed: RuntimeExecutedResult, stepMetric?
   }))
 }
 
-const processMessage = async (content: string) => {
+const processMessage = async (content: string, progressLabel = '思考中') => {
   loading.value = true
-  const stepProgress = startStepProgress('思考中')
+  const stepProgress = startStepProgress(progressLabel)
 
   try {
+    const scheduleState = buildCurrentRuntimeScheduleState()
+    const currentLayoutDraft = foregroundLayoutDraftRuntimeEnabled
+      ? props.currentLayoutDraft ?? pendingLayoutDraft.value
+      : null
+    const currentWorkspaceKey = resolveCurrentPendingWorkspaceKey()
+    const pendingReviewLifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: content,
+      currentWorkspaceKey,
+      pendingWorkspaceKey: pendingReviewWorkspaceKey.value,
+      pendingCommand: pendingCommand.value,
+      pendingAtomicContext: pendingAtomicContext.value,
+    })
+    const usablePendingCommand = pendingReviewLifecycle.canUsePendingReview ? pendingCommand.value : null
+    const usablePendingAtomicContext = pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null
+    const interruptedPendingReviewNotice = pendingReviewInterruptedNotice.value
+    pendingReviewInterruptedNotice.value = null
+    const pendingReviewExpiredNotice = interruptedPendingReviewNotice ?? (pendingReviewLifecycle.shouldExpire
+      ? resolvePendingReviewExpiredNotice(pendingReviewLifecycle.expireReason)
+      : null)
+    if (usablePendingCommand && isPendingReviewCancelText(content)) {
+      const summary = usablePendingCommand.summary.replace(/[，,。.!！?？]+$/u, '')
+      pendingCommand.value = null
+      pendingAtomicContext.value = null
+      pendingReviewWorkspaceKey.value = null
+      messages.value.push(buildAssistantMessage({
+        content: `${summary}，已取消执行。`,
+        thinking: '我已根据你的选择停止这次待确认修改，不会对当前编排单做任何变更。',
+        processType: 'general',
+        processTypeLabel: '已取消',
+        stepMetric: stepProgress.finish(),
+      }))
+      return
+    }
+    if (usablePendingCommand && isPendingReviewConfirmText(content)) {
+      pendingCommand.value = null
+      pendingAtomicContext.value = null
+      pendingReviewWorkspaceKey.value = null
+      const result = await runtimeFacade.executePendingCommand({
+        pendingCommand: usablePendingCommand,
+        scheduleDate: props.date,
+        channelId: props.channelId,
+      })
+      applyRuntimeExecutedResult(result, stepProgress.finish())
+      return
+    }
+    if (pendingReviewLifecycle.shouldExpire) {
+      pendingCommand.value = null
+      pendingAtomicContext.value = null
+      pendingReviewWorkspaceKey.value = null
+    }
+    const foregroundContextPackage = buildForegroundAgentContextPackage({
+      latestUserInput: content,
+      scheduleState,
+      currentSchedule: props.currentSchedule,
+      currentLayoutDraft,
+      pendingCommand: usablePendingCommand,
+      pendingAtomicContext: usablePendingAtomicContext,
+    })
+    const preferLayoutDraftRefine = foregroundLayoutDraftRuntimeEnabled
+      && Boolean(currentLayoutDraft)
+      && preferLayoutDraftContinuation.value
+    preferLayoutDraftContinuation.value = false
     const decision = await runtimeFacade.submitInstruction({
-      scheduleState: buildCurrentRuntimeScheduleState(),
+      scheduleState,
       userInput: content,
       currentSchedule: props.currentSchedule,
-      currentLayoutDraft: foregroundLayoutDraftEnabled ? pendingLayoutDraft.value : null,
-      currentLayoutDraftMode: foregroundLayoutDraftEnabled ? pendingLayoutDraftMode.value : null,
-      pendingAtomicContext: pendingAtomicContext.value,
+      currentLayoutDraft,
+      currentLayoutDraftMode: foregroundLayoutDraftRuntimeEnabled ? pendingLayoutDraftMode.value : null,
+      analysisContext: analysisContext.value,
+      pendingAtomicContext: usablePendingAtomicContext,
+      foregroundContextPackage,
       history: buildVisibleRuntimeHistory(content),
       agentCoreEnabled: true,
-      layoutDraftEnabled: foregroundLayoutDraftEnabled,
+      layoutDraftEnabled: foregroundLayoutDraftRuntimeEnabled,
+      preferLayoutDraftRefine,
     })
-    await applyRuntimeDecision(decision)
+    await applyRuntimeDecision(decision, pendingReviewExpiredNotice)
     attachStepMetricToLatestAssistantMessage(stepProgress.finish())
   } catch (error) {
     const stepMetric = stepProgress.finish()
@@ -1379,7 +1752,8 @@ const sendMessage = async () => {
   const content = inputMessage.value.trim()
   if (!content) return
 
-  messages.value.push({ role: 'user', content })
+  interruptPendingReviewForNewInput(content)
+  messages.value.push(buildUserMessage(content))
   inputMessage.value = ''
   await scrollToBottom()
 
@@ -1474,6 +1848,9 @@ const getClarifyingPendingSummary = (context: RuntimePendingAtomicContext): stri
 }
 
 const formatPendingAtomicSummary = (context: RuntimePendingAtomicContext): string => {
+  if (context.compositeTaskRun) {
+    return formatCompositeTaskSummary(context.compositeTaskRun)
+  }
   if (context.agentPendingTask?.phase === 'needs_confirmation' || context.missingFields.includes('selection')) {
     const targetText = formatAtomicSlotTime(context.slots.targetTime || context.slots.targetTimeHint)
     const targetName = context.slots.targetItemName || context.slots.programName
@@ -1504,6 +1881,9 @@ const formatPendingAtomicReasoning = (
   context: RuntimePendingAtomicContext,
   preferred: 'reasoning' | 'followUp' = 'reasoning',
 ): string => {
+  if (context.compositeTaskRun) {
+    return formatCompositeTaskConfirmationNote(context.compositeTaskRun)
+  }
   const primary = preferred === 'followUp'
     ? context.followUpQuestion || context.reasoning
     : context.reasoning || context.followUpQuestion
@@ -1592,7 +1972,58 @@ const formatPendingAtomicKnownFacts = (context: RuntimePendingAtomicContext): st
   return `${factText}${missingText}`.trim()
 }
 
+type PendingCompositeTaskRun = NonNullable<RuntimePendingAtomicContext['compositeTaskRun']>
+type PendingCompositeStage = PendingCompositeTaskRun['stages'][number]
+
+const getCurrentCompositeStage = (taskRun: PendingCompositeTaskRun): PendingCompositeStage | undefined =>
+  taskRun.stages[taskRun.currentStageIndex] ?? taskRun.stages.find((stage) => stage.status === 'waiting_confirm') ?? taskRun.stages[0]
+
+const formatCompositeActionLabel = (action?: PendingCompositeStage['action']): string => {
+  switch (action) {
+    case 'delete':
+      return '删除'
+    case 'move':
+      return '移动'
+    case 'replace':
+      return '替换'
+    case 'insert':
+      return '插入'
+    default:
+      return '处理'
+  }
+}
+
+const formatCompositeTaskSummary = (taskRun: PendingCompositeTaskRun): string => {
+  const stage = getCurrentCompositeStage(taskRun)
+  const stepCount = stage?.steps?.length ?? 0
+  const actionLabel = formatCompositeActionLabel(stage?.action)
+  const targetLabel = taskRun.batch?.targetLabel
+  const batchText = taskRun.batch ? `第 ${taskRun.batch.batchIndex} 批` : ''
+  const targetText = targetLabel ? `《${targetLabel}》` : '节目'
+  if (stepCount > 0) {
+    return `${batchText}准备${actionLabel} ${stepCount} 条${targetLabel ? ` ${targetText}` : '节目'}`
+  }
+  return `准备${actionLabel}${targetLabel ? targetText : '当前播单'}`
+}
+
+const formatCompositeTaskConfirmationNote = (taskRun: PendingCompositeTaskRun): string => {
+  const stage = getCurrentCompositeStage(taskRun)
+  const stepCount = stage?.steps?.length ?? 0
+  const actionLabel = formatCompositeActionLabel(stage?.action)
+  const remainingCount = taskRun.batch?.remainingCount ?? 0
+  const remainingText = remainingCount > stepCount
+    ? `这批完成后，我会告诉你还剩 ${remainingCount - stepCount} 条要不要继续。`
+    : '完成后我会复查当前播单。'
+  if (stepCount > 0) {
+    return `确认后我先${actionLabel}这 ${stepCount} 条，写入前会再检查当前播单是否变过。${remainingText}取消则不改动播单。`
+  }
+  return `确认后我会按这一步继续处理，写入前会再检查当前播单是否变过。取消则不改动播单。`
+}
+
 const formatPendingAtomicConfirmationNote = (context: RuntimePendingAtomicContext): string => {
+  if (context.compositeTaskRun) {
+    return formatCompositeTaskConfirmationNote(context.compositeTaskRun)
+  }
   const modelNote = context.confirmationNote || context.reasoning
   if (modelNote && !isTechnicalPendingReason(modelNote)) {
     return formatAssistantDisplayContent(modelNote)
@@ -1669,7 +2100,7 @@ const formatPendingAgentTaskState = (phase?: string): string => {
   if (phase === 'selecting_target') return '等待选择目标节目'
   if (phase === 'selecting_candidate') return '等待选择候选节目'
   if (phase === 'needs_clarification') return '等待补充关键信息'
-  return '已保留上下文'
+  return '已记下当前说法'
 }
 
 const formatProgramTypeLabel = (programType: string): string => {
@@ -1689,18 +2120,21 @@ const formatProgramTypeLabel = (programType: string): string => {
   return labelMap[normalized] ?? normalized.replace(/_/g, ' ')
 }
 
-const formatInsertRecommendationMeta = (duration: number, programType: string, confidence: number): string => {
+const formatInsertRecommendationMeta = (duration: number, programType: string, _confidence: number): string => {
   const durationMinutes = duration >= 60
     ? duration % 60 === 0
       ? `${duration / 60}分钟`
       : `${(duration / 60).toFixed(1)}分钟`
     : `${duration}秒`
-  const confidenceText = `${Math.round(confidence * 100)}%`
-  return `${durationMinutes} · ${formatProgramTypeLabel(programType)} · 匹配度 ${confidenceText}`
+  return `${durationMinutes} · ${formatProgramTypeLabel(programType)}`
 }
 
 const getInsertRecommendationBadgeLabel = (index: number): string => (
   index === 0 ? '优先推荐' : `候选 ${index + 1}`
+)
+
+const formatRecommendationStrengthLabel = (index: number): string => (
+  index === 0 ? '建议优先看' : '可作为备选'
 )
 
 const getAtomicPhaseLabel = (phase?: RuntimePendingAtomicContext['phase']) => {
@@ -1712,7 +2146,7 @@ const getAtomicPhaseLabel = (phase?: RuntimePendingAtomicContext['phase']) => {
     case 'recommending_insert':
       return '插入推荐'
     default:
-      return '原子上下文'
+      return '待处理信息'
   }
 }
 
@@ -1728,8 +2162,8 @@ const getAtomicRecommendationAriaLabel = () => (
 
 const getAtomicRecommendationActionHint = () => (
   isPendingAtomicReplaceRecommendation()
-    ? '选择后会继续执行替换，并保留当前时点编排上下文。'
-    : '选择后会继续执行插入，并保留当前时点编排上下文。'
+    ? '选好后我会先预演替换，确认没有问题再写入。'
+    : '选好后我会先预演插入，确认没有问题再写入。'
 )
 
 const getAtomicRecommendationConfirmLabel = () => (
@@ -1795,7 +2229,8 @@ const showClarifyingAtomicPanel = computed(() => false)
 const showTargetSelectionAtomicPanel = computed(() => pendingAtomicPhase.value === 'selecting_target' && pendingAtomicTargetCandidates.value.length > 0)
 const showInsertRecommendationAtomicPanel = computed(() => pendingAtomicPhase.value === 'recommending_insert' && pendingAtomicInsertRecommendations.value.length > 0)
 const showAgentPendingConfirmationPanel = computed(() =>
-  pendingAtomicContext.value?.agentPendingTask?.phase === 'needs_confirmation',
+  pendingAtomicContext.value?.agentPendingTask?.phase === 'needs_confirmation'
+  || pendingAtomicContext.value?.compositeTaskRun?.status === 'waiting_confirm',
 )
 
 const formatDetails = (details: DetailMap) => formatStructuredDetails(sanitizeForegroundDraftPayload(details), formatDisplayTime)
@@ -1873,8 +2308,8 @@ const getPlaylistFileCard = (message: Message): PlaylistFileCard | null => {
     ? playlistState.rotationDurationSeconds
     : null
   const durationText = rotationDurationSeconds
-    ? `时长制：总时长 ${formatPlaylistDurationText(rotationDurationSeconds)}，0 点起算`
-    : '时长制：0 点起算，待确定总时长'
+    ? `总时长 ${formatPlaylistDurationText(rotationDurationSeconds)}`
+    : '待确定总时长'
   return {
     playlistId: typeof playlistState?.playlistId === 'string' ? playlistState.playlistId : undefined,
     playlistType,
@@ -2247,12 +2682,12 @@ const buildDecisionShortExplanation = (message: Message): string | undefined => 
       return '已结合当前栏目顺播进度和已排记录，优先选择下一可播集/期。'
     }
     if (strategy === 'rerun') {
-      return '当前栏目不强调顺播，已按时段匹配度筛选更稳妥的重播候选。'
+      return '当前栏目不强调顺播，我已按这个时段更适合的节目来筛选。'
     }
   }
 
   if (details?.matchedItem && (details?.selectedCandidate || typeof details?.selectedCandidateName === 'string')) {
-    return '已结合目标节目、候选匹配度和当前编排约束完成判断。'
+    return '已结合目标节目、可用候选和当前播单约束完成判断。'
   }
 
   if (details?.matchedItem) {
@@ -2272,11 +2707,11 @@ const buildDecisionShortExplanation = (message: Message): string | undefined => 
   }
 
   if (message.processType === 'execution') {
-    return '已根据当前时段、节目匹配度和风险提示完成这次处理。'
+    return '已根据当前时段、节目线索和风险提示完成这次处理。'
   }
 
   if (message.processType === 'selection') {
-    return '已结合当前空窗、候选匹配度和约束条件做出选择。'
+    return '已结合当前空窗、可用候选和约束条件做出选择。'
   }
 
   if (message.processType === 'error') {
@@ -2330,10 +2765,7 @@ const decorateAssistantMessage = (message: Message): Message => {
 }
 
 const sanitizeForegroundDraftText = (value: string): string => {
-  if (foregroundLayoutDraftEnabled) return value
   return value
-    .replace(/版面草案/g, '编排参考')
-    .replace(/草案/g, '参考内容')
 }
 
 const shouldDropForegroundDraftKey = (key: string): boolean => {
@@ -2368,12 +2800,23 @@ const sanitizeAssistantMessageInput = (input: Omit<Message, 'role'>): Omit<Messa
   explanation: sanitizeForegroundDraftPayload(input.explanation),
 })
 
+const shouldKeepDraftBlockingInputVisible = (input: Omit<Message, 'role'>): boolean => (
+  !foregroundLayoutDraftEnabled
+  && typeof input.content === 'string'
+  && (
+    input.content.includes('当前版面草案还有')
+    || input.content.includes('不会进入正式编排')
+    || input.content.includes('请调整不可编排')
+  )
+)
+
 const buildAssistantMessage = (input: Omit<Message, 'role'>): Message => {
   const hiddenFromThread = input.hiddenFromThread
-    || (!foregroundLayoutDraftEnabled && containsForegroundDraftPayload(input))
+    || (!foregroundLayoutDraftEnabled && containsForegroundDraftPayload(input) && !shouldKeepDraftBlockingInputVisible(input))
   return decorateAssistantMessage({
     role: 'assistant',
     expanded: false,
+    workspaceKey: resolveCurrentMessageWorkspaceKey(),
     ...sanitizeAssistantMessageInput(input),
     hiddenFromThread,
   })
@@ -2861,7 +3304,7 @@ const getBudgetLine = (label: string, value: unknown): { text: string; truncated
     ? `${included}/${total}`
     : String(included ?? total)
   return {
-    text: `${label}：送入 ${countText} 条${truncated ? '，已按上下文预算裁剪' : ''}`,
+    text: `${label}：参考 ${countText} 条${truncated ? '，已精简显示' : ''}`,
     truncated,
   }
 }
@@ -2910,12 +3353,30 @@ const getAgentSearchSummaryCards = (message: Message): AgentSearchSummaryCard[] 
   }
   if (budgetLines.length > 0) {
     cards.push({
-      title: 'LLM上下文',
+      title: '参考信息',
       lines: budgetLines.map((item) => item.text),
       tone: budgetLines.some((item) => item.truncated) ? 'limited' : 'normal',
     })
   }
   return cards
+}
+
+const getAssistantProcessLines = (message: Message): string[] => {
+  const details = getMessageDetails(message)
+  const processSummary = getDetailStringArray(toDetailMap(details)?.assistantProcessSummary).slice(0, 2)
+  if (processSummary.length > 0) return processSummary
+
+  if (toDetailMap(details)?.missingLayoutDraft === true) {
+    return ['已检查当前播单：暂无草案。']
+  }
+
+  const draftCompleteness = toDetailMap(toDetailMap(details)?.draftCompleteness)
+  const draftStatus = typeof draftCompleteness?.status === 'string' ? draftCompleteness.status : ''
+  if (draftStatus === 'partial') {
+    return ['已检查草案：只覆盖部分时段。']
+  }
+
+  return []
 }
 
 const getAgentAuditCards = (message: Message): AgentAuditCard[] => {
@@ -3185,14 +3646,13 @@ const resolveMatchedColumnInfo = (details?: DetailMap) => {
 }
 
 const formatMatchedColumnText = (details?: DetailMap) => {
-  const { columnId, columnName } = resolveMatchedColumnInfo(details)
-  if (columnName && columnId) return `${columnName}（${columnId}）`
-  return columnName || columnId
+  const { columnName } = resolveMatchedColumnInfo(details)
+  return columnName
 }
 
 const formatMatchedColumnPhrase = (details?: DetailMap) => {
   const matchedColumnText = formatMatchedColumnText(details)
-  return matchedColumnText ? `栏目 ${matchedColumnText}` : '当前栏目约束'
+  return matchedColumnText ? `栏目 ${matchedColumnText}` : '当前栏目'
 }
 
 const formatExpectedDuration = (expectedDuration: unknown): string => {
@@ -3205,11 +3665,11 @@ const formatExpectedDuration = (expectedDuration: unknown): string => {
 const buildQueryCriteriaSummary = (criteria: DetailMap): string => {
   const columnName =
     typeof criteria.columnId === 'string' && criteria.columnId.trim()
-      ? getEffectiveColumnDefinition(criteria.columnId)?.columnName ?? criteria.columnId
+      ? getEffectiveColumnDefinition(criteria.columnId)?.columnName ?? ''
       : ''
   const duration = formatExpectedDuration(criteria.expectedDuration)
   const result = [columnName, duration].filter(Boolean).join('，')
-  return result ? `查询：${result}` : '查询：未指定'
+  return result ? `查询：${result}` : ''
 }
 
 const compressLogDetails = (details: DetailMap, processType: ProcessType): DetailMap | undefined => {
@@ -3275,11 +3735,11 @@ const buildFriendlyLogExplanation = (log: PlanningLogEntry, details: DetailMap) 
     const diagnosticText = formatCandidateQueryDiagnosticText(details)
     return diagnosticText
       ? `${timeRange} ${diagnosticText}。`
-      : `${timeRange} 在当前栏目约束、类型偏好和关键词条件下，暂未找到合适节目。建议后续尝试调整编排内容、放宽检索条件，或改用其他栏目方案继续补排。`
+      : `${timeRange} 按当前栏目和内容要求暂时没有找到合适节目。可以调整这一段的栏目或节目要求后继续补排。`
   }
 
   if (typeof details.summary === 'string') {
-    return '已结合空窗位置、栏目约束和前后节目衔接生成建议，展开后可查看结构化信息。'
+    return '已结合空窗位置、栏目要求和前后节目衔接生成建议，展开后可查看明细。'
   }
 
   if (typeof details.reasoning === 'string') {
@@ -3319,8 +3779,8 @@ const buildRuntimeThinking = (log: PlanningLogEntry, details: DetailMap): string
   if (isNoCandidateCase(details)) {
     const diagnosticText = formatCandidateQueryDiagnosticText(details)
     return diagnosticText
-      ? `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已按${columnName || '当前栏目约束'}做了候选检索，${diagnosticText}。`
-      : `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已按${columnName || '当前栏目约束'}做了候选检索，但没有命中合适节目。`
+      ? `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已按${columnName || '当前栏目'}查找节目，${diagnosticText}。`
+      : `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已按${columnName || '当前栏目'}查找节目，但没有找到合适节目。`
   }
 
   if (typeof details.programName === 'string' && typeof details.itemId === 'string') {
@@ -3332,7 +3792,7 @@ const buildRuntimeThinking = (log: PlanningLogEntry, details: DetailMap): string
   }
 
   if (typeof details.candidateCount === 'number') {
-    return `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已完成候选检索，正在基于${columnName || matchedColumnPhrase}继续判断候选。`
+    return `${timeRange ? `${timeRange} 这段空窗` : '当前空窗'}已按${columnName || matchedColumnPhrase}找到可用节目，正在继续判断。`
   }
 
   if (typeof details.summary === 'string') {
@@ -3376,8 +3836,8 @@ const buildRuntimeResult = (log: PlanningLogEntry, details: DetailMap): string =
   if (typeof details.candidateCount === 'number') {
     const matchedColumnPhrase = formatMatchedColumnPhrase(details)
     return timeRange
-      ? `${timeRange} 已完成候选检索，命中 ${details.candidateCount} 个候选，来自${matchedColumnPhrase}。`
-      : `已完成候选检索，命中 ${details.candidateCount} 个候选，来自${matchedColumnPhrase}。`
+      ? `${timeRange} 已找到 ${details.candidateCount} 个可用节目，来自${matchedColumnPhrase}。`
+      : `已找到 ${details.candidateCount} 个可用节目，来自${matchedColumnPhrase}。`
   }
 
   if (typeof details.selectedCandidateName === 'string') {
@@ -3477,11 +3937,16 @@ const executeCommand = async (
 
 const confirmPendingCommand = async () => {
   if (!pendingCommand.value) return
-  const stepProgress = startStepProgress('思考中')
+  if (!isPendingReviewWorkspaceCurrent()) {
+    expirePendingReviewForWorkspaceChange('当前待确认操作不属于这个工作区，已失效。请在当前播单重新发起操作。')
+    return
+  }
+  const stepProgress = startStepProgress('执行中')
   try {
     const pending = pendingCommand.value
     pendingCommand.value = null
     pendingAtomicContext.value = null
+    pendingReviewWorkspaceKey.value = null
     const result = await runtimeFacade.executePendingCommand({
       pendingCommand: pending,
       scheduleDate: props.date,
@@ -3505,7 +3970,11 @@ const confirmPendingTargetSelection = async () => {
     return
   }
   if (!pendingAtomicContext.value) {
-    ElMessage.warning('当前目标选择上下文已失效，请重新发起操作。')
+    ElMessage.warning('当前目标选择已失效，请重新发起操作。')
+    return
+  }
+  if (!isPendingReviewWorkspaceCurrent()) {
+    expirePendingReviewForWorkspaceChange('当前目标选择不属于这个工作区，已失效。请在当前播单重新发起操作。')
     return
   }
   if (pendingAtomicContext.value.agentPendingTask) {
@@ -3514,10 +3983,10 @@ const confirmPendingTargetSelection = async () => {
       value: selectedItemId,
       rawText: '界面确认目标节目',
     })) {
-      ElMessage.warning('当前目标选择上下文已失效，请重新发起操作。')
+      ElMessage.warning('当前目标选择已失效，请重新发起操作。')
       return
     }
-    await continuePendingAgentTask('确认')
+    await continuePendingAgentTask('确认', '确认目标中')
     return
   }
   const pendingTargetSelection = rehydratePendingTargetSelectionFromAtomicContext({
@@ -3525,10 +3994,10 @@ const confirmPendingTargetSelection = async () => {
     selectedItemId,
   })
   if (!pendingTargetSelection) {
-    ElMessage.warning('当前目标选择上下文不完整，请重新发起操作。')
+    ElMessage.warning('当前目标选择信息不完整，请重新发起操作。')
     return
   }
-  const stepProgress = startStepProgress('思考中')
+  const stepProgress = startStepProgress('确认目标中')
   try {
     const decision = await runtimeFacade.resolvePendingTargetSelection({
       channelId: props.channelId,
@@ -3556,7 +4025,11 @@ const confirmPendingInsertRecommendation = async () => {
     return
   }
   if (!pendingAtomicContext.value) {
-    ElMessage.warning(`当前${actionLabel}推荐上下文已失效，请重新发起${actionLabel}指令。`)
+    ElMessage.warning(`当前${actionLabel}推荐已失效，请重新发起${actionLabel}指令。`)
+    return
+  }
+  if (!isPendingReviewWorkspaceCurrent()) {
+    expirePendingReviewForWorkspaceChange(`当前${actionLabel}推荐不属于这个工作区，已失效。请在当前播单重新发起${actionLabel}指令。`)
     return
   }
   if (pendingAtomicContext.value.agentPendingTask) {
@@ -3565,10 +4038,10 @@ const confirmPendingInsertRecommendation = async () => {
       value: selectedCandidateId,
       rawText: `界面确认${actionLabel}候选`,
     })) {
-      ElMessage.warning(`当前${actionLabel}推荐上下文已失效，请重新发起${actionLabel}指令。`)
+      ElMessage.warning(`当前${actionLabel}推荐已失效，请重新发起${actionLabel}指令。`)
       return
     }
-    await continuePendingAgentTask('确认')
+    await continuePendingAgentTask('确认', `确认${actionLabel}中`)
     return
   }
   const pendingInsertRecommendation = rehydratePendingInsertRecommendationFromAtomicContext({
@@ -3576,10 +4049,10 @@ const confirmPendingInsertRecommendation = async () => {
     selectedCandidateId,
   })
   if (!pendingInsertRecommendation) {
-    ElMessage.warning(`当前${actionLabel}推荐上下文不完整，请重新发起${actionLabel}指令。`)
+    ElMessage.warning(`当前${actionLabel}推荐信息不完整，请重新发起${actionLabel}指令。`)
     return
   }
-  const stepProgress = startStepProgress('思考中')
+  const stepProgress = startStepProgress(`确认${actionLabel}中`)
   try {
     const decision = await runtimeFacade.resolvePendingInsertRecommendation({
       scheduleState: buildCurrentRuntimeScheduleState(),
@@ -3597,12 +4070,16 @@ const confirmPendingInsertRecommendation = async () => {
   }
 }
 
-const continuePendingAgentTask = async (content: '确认' | '取消') => {
-  if (!pendingAtomicContext.value?.agentPendingTask) {
-    ElMessage.warning('当前待确认上下文已失效，请重新发起操作。')
+const continuePendingAgentTask = async (content: '确认' | '取消', progressLabel = '执行中') => {
+  if (!pendingAtomicContext.value?.agentPendingTask && !pendingAtomicContext.value?.compositeTaskRun) {
+    ElMessage.warning('当前待确认操作已失效，请重新发起操作。')
     return
   }
-  await processMessage(content)
+  if (!isPendingReviewWorkspaceCurrent()) {
+    expirePendingReviewForWorkspaceChange('当前待确认操作不属于这个工作区，已失效。请在当前播单重新发起操作。')
+    return
+  }
+  await processMessage(content, progressLabel)
 }
 
 const confirmPendingAgentTask = async () => {
@@ -3627,6 +4104,7 @@ const cancelPendingCommand = async () => {
     }))
     pendingCommand.value = null
     pendingAtomicContext.value = null
+    pendingReviewWorkspaceKey.value = null
   } catch (error) {
     messages.value.push(buildAssistantMessage({
       content: error instanceof Error ? error.message : '取消执行失败，请稍后重试。',
@@ -3650,6 +4128,7 @@ const cancelPendingAtomicContext = async () => {
       stepMetric: stepProgress.finish(),
     }))
     pendingAtomicContext.value = null
+    pendingReviewWorkspaceKey.value = null
   } catch (error) {
     messages.value.push(buildAssistantMessage({
       content: error instanceof Error ? error.message : '取消补参失败，请稍后重试。',
@@ -3673,6 +4152,7 @@ const cancelPendingTargetSelection = async () => {
       stepMetric: stepProgress.finish(),
     }))
     pendingAtomicContext.value = null
+    pendingReviewWorkspaceKey.value = null
   } catch (error) {
     messages.value.push(buildAssistantMessage({
       content: error instanceof Error ? error.message : '取消目标选择失败，请稍后重试。',
@@ -3697,6 +4177,7 @@ const cancelPendingInsertRecommendation = async () => {
       stepMetric: stepProgress.finish(),
     }))
     pendingAtomicContext.value = null
+    pendingReviewWorkspaceKey.value = null
   } catch (error) {
     messages.value.push(buildAssistantMessage({
       content: error instanceof Error ? error.message : '取消插入推荐失败，请稍后重试。',
@@ -4048,12 +4529,12 @@ const summarizeRuntimeLog = (log: PlanningLogEntry): string => {
 
   if (typeof details.candidateCount === 'number') {
     const matchedColumnPhrase = formatMatchedColumnPhrase(details)
-    return `候选检索完成，命中 ${details.candidateCount} 个，来自${matchedColumnPhrase}`
+    return `已找到 ${details.candidateCount} 个可用节目，来自${matchedColumnPhrase}`
   }
 
   if (details.criteria && typeof details.criteria === 'object') {
     const criteriaSummary = buildQueryCriteriaSummary(details.criteria as DetailMap)
-    return criteriaSummary ? `接口查询参数：${criteriaSummary}` : '接口查询参数已生成'
+    return criteriaSummary ? `正在按${criteriaSummary.replace(/^查询：/, '')}查找节目` : '正在查找合适节目'
   }
 
   if (typeof details.programName === 'string' && typeof details.startTime === 'string') {
@@ -4261,13 +4742,14 @@ watch(
     syncImportedLayoutState()
     pendingCommand.value = null
     pendingAtomicContext.value = null
+    pendingReviewWorkspaceKey.value = null
   },
   { immediate: true },
 )
 
 watch(
   () => ({
-    isOrchestrating: props.isOrchestrating,
+    isOrchestrating: isForegroundOrchestrationRunning.value,
     sessionId: props.orchestrationSession?.id ?? '',
     status: props.orchestrationSession?.status ?? '',
     processingRange:
@@ -4303,12 +4785,13 @@ watch(
       activeThinkingController = null
     }
 
-    if (
-      isOrchestrating ||
-      !sessionId ||
-      !['completed', 'manual_review'].includes(status) ||
-      !props.orchestrationSession
-    ) {
+    if (!isOrchestrating && interruptedCommandAfterCancel.value && !loading.value) {
+      const nextContent = interruptedCommandAfterCancel.value
+      interruptedCommandAfterCancel.value = null
+      void processMessage(nextContent, '重新判断中')
+    }
+
+    if (!sessionId || !['completed', 'manual_review'].includes(status) || !props.orchestrationSession) {
       return
     }
 
@@ -4340,8 +4823,8 @@ onBeforeUnmount(() => {
   flex-direction: column;
   height: 100%;
   background:
-    radial-gradient(circle at top left, rgba(251, 146, 60, 0.12), transparent 24%),
-    linear-gradient(180deg, #fffdf9 0%, #fff8ef 100%);
+    radial-gradient(circle at top left, rgba(100, 108, 255, 0.12), transparent 24%),
+    linear-gradient(180deg, #ffffff 0%, #f8f9ff 100%);
 }
 
 .messages-container {
@@ -4369,7 +4852,7 @@ onBeforeUnmount(() => {
   padding: 13px 16px;
   border-radius: 18px 18px 6px 18px;
   background: linear-gradient(135deg, #111827 0%, #334155 100%);
-  color: #fff7ed;
+  color: #ffffff;
   box-shadow: 0 10px 26px rgba(15, 23, 42, 0.18);
 }
 
@@ -4386,7 +4869,7 @@ onBeforeUnmount(() => {
 
 .system-row.is-focusable .system-summary-text {
   text-decoration: underline;
-  text-decoration-color: rgba(245, 158, 11, 0.28);
+  text-decoration-color: rgba(100, 108, 255, 0.28);
   text-underline-offset: 2px;
 }
 
@@ -4403,7 +4886,7 @@ onBeforeUnmount(() => {
 }
 
 .system-summary-row.is-focusable:hover .system-summary-text {
-  color: #9a3412;
+  color: var(--app-accent-deep);
 }
 
 .system-summary-text {
@@ -4436,6 +4919,20 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.system-process-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 2px solid rgba(100, 108, 255, 0.18);
+  color: #64748b;
+}
+
+.system-process-line {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .system-status-text {
   display: inline-flex;
   align-items: center;
@@ -4446,7 +4943,7 @@ onBeforeUnmount(() => {
 }
 
 .system-status-text.is-running {
-  color: #9a3412;
+  color: var(--app-accent-deep);
 }
 
 .system-status-text.is-success {
@@ -4454,7 +4951,7 @@ onBeforeUnmount(() => {
 }
 
 .system-status-text.is-warning {
-  color: #92400e;
+  color: var(--app-accent-deep);
 }
 
 .system-status-text.is-error {
@@ -4481,9 +4978,9 @@ onBeforeUnmount(() => {
   min-height: 22px;
   padding: 0 8px;
   border-radius: 999px;
-  background: rgba(255, 247, 237, 0.9);
-  border: 1px solid rgba(251, 146, 60, 0.16);
-  color: #9a3412;
+  background: rgba(238, 242, 255, 0.9);
+  border: 1px solid var(--app-line);
+  color: var(--app-accent-deep);
   font-size: 11px;
   font-weight: 600;
 }
@@ -4529,7 +5026,7 @@ onBeforeUnmount(() => {
 }
 
 .step-timer-chip.is-running {
-  color: #9a3412;
+  color: var(--app-accent-deep);
 }
 
 .step-timer-value {
@@ -4610,7 +5107,7 @@ onBeforeUnmount(() => {
 }
 
 .user-bubble .message-text {
-  color: #fff7ed;
+  color: #ffffff;
 }
 
 .explanation-card {
@@ -4640,7 +5137,7 @@ onBeforeUnmount(() => {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0;
-  color: #78716c;
+  color: var(--app-text-muted);
   line-height: 1.7;
 }
 
@@ -4672,7 +5169,7 @@ onBeforeUnmount(() => {
 }
 
 .analysis-report-label.is-risk {
-  color: #b45309;
+  color: #b91c1c;
 }
 
 .analysis-report-body {
@@ -4685,7 +5182,7 @@ onBeforeUnmount(() => {
 }
 
 .explanation-section.is-risk .explanation-content {
-  color: #b45309;
+  color: #b91c1c;
 }
 
 .agent-audit-panel {
@@ -4716,8 +5213,8 @@ onBeforeUnmount(() => {
 }
 
 .agent-audit-card.is-warning {
-  border-left-color: #d97706;
-  background: #fffbeb;
+  border-left-color: #535bf2;
+  background: #eef2ff;
 }
 
 .agent-audit-card.is-blocker {
@@ -4766,8 +5263,8 @@ onBeforeUnmount(() => {
 }
 
 .agent-search-card.is-limited {
-  border-color: #fed7aa;
-  background: #fff7ed;
+  border-color: var(--app-line-strong);
+  background: var(--app-accent-tint);
 }
 
 .agent-search-title {
@@ -4778,7 +5275,7 @@ onBeforeUnmount(() => {
 }
 
 .agent-search-card.is-limited .agent-search-title {
-  color: #b45309;
+  color: var(--app-accent-deep);
 }
 
 .agent-search-lines {
@@ -4845,7 +5342,7 @@ onBeforeUnmount(() => {
   padding: 0;
   border-radius: 0;
   background: transparent;
-  color: #9a3412;
+  color: var(--app-accent-deep);
   font-size: 11px;
   font-weight: 600;
 }
@@ -4891,7 +5388,7 @@ onBeforeUnmount(() => {
 }
 
 .detail-summary-label {
-  color: #78716c;
+  color: var(--app-text-muted);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.6;
@@ -4921,10 +5418,10 @@ onBeforeUnmount(() => {
 
 .pending-command-panel {
   margin: 0 18px 12px;
-  border: 1px solid rgba(251, 191, 36, 0.35);
-  border-left: 3px solid rgba(245, 158, 11, 0.9);
+  border: 1px solid var(--app-line-strong);
+  border-left: 3px solid var(--app-accent);
   border-radius: 10px;
-  background: rgba(255, 251, 235, 0.7);
+  background: rgba(238, 242, 255, 0.7);
   box-shadow: none;
 }
 
@@ -4939,7 +5436,7 @@ onBeforeUnmount(() => {
 .pending-command-title {
   font-size: 12px;
   font-weight: 700;
-  color: #92400e;
+  color: var(--app-accent-deep);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -4963,9 +5460,9 @@ onBeforeUnmount(() => {
 .pending-command-guidance {
   margin-top: 8px;
   padding: 8px 10px;
-  border-left: 3px solid #f59e0b;
+  border-left: 3px solid var(--app-accent);
   border-radius: 6px;
-  background: #fff8eb;
+  background: var(--app-accent-tint);
   color: #374151;
   font-size: 12px;
   line-height: 1.65;
@@ -4987,9 +5484,9 @@ onBeforeUnmount(() => {
 
 .pending-quick-replies :deep(.el-button) {
   margin-left: 0;
-  border-color: #fed7aa;
-  background: #fffaf3;
-  color: #9a3412;
+  border-color: var(--app-line-strong);
+  background: var(--app-accent-tint);
+  color: var(--app-accent-deep);
 }
 
 .pending-command-actions {
@@ -5013,7 +5510,7 @@ onBeforeUnmount(() => {
   margin-right: 0;
   margin-bottom: 0;
   padding: 12px 14px;
-  border: 1px solid rgba(251, 191, 36, 0.18);
+  border: 1px solid var(--app-line);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.8);
   transition:
@@ -5024,15 +5521,15 @@ onBeforeUnmount(() => {
 }
 
 :deep(.target-selection-list .el-radio:hover) {
-  border-color: rgba(245, 158, 11, 0.38);
+  border-color: rgba(100, 108, 255, 0.38);
   background: rgba(255, 255, 255, 0.96);
   transform: translateY(-1px);
 }
 
 :deep(.target-selection-list .el-radio.is-checked) {
-  border-color: rgba(245, 158, 11, 0.52);
-  background: linear-gradient(180deg, rgba(255, 252, 245, 0.98) 0%, rgba(255, 247, 230, 0.92) 100%);
-  box-shadow: 0 18px 30px -24px rgba(180, 83, 9, 0.42);
+  border-color: rgba(100, 108, 255, 0.52);
+  background: linear-gradient(180deg, rgba(248, 249, 255, 0.98) 0%, rgba(238, 242, 255, 0.92) 100%);
+  box-shadow: 0 18px 30px -24px rgba(83, 91, 242, 0.42);
 }
 
 :deep(.target-selection-list .el-radio__input) {
@@ -5052,23 +5549,23 @@ onBeforeUnmount(() => {
 }
 
 :deep(.target-selection-list .el-radio__input .el-radio__inner:hover) {
-  border-color: #f59e0b;
+  border-color: var(--app-accent);
 }
 
 :deep(.target-selection-list .el-radio__input.is-checked .el-radio__inner) {
-  border-color: #f59e0b;
-  background: #f59e0b;
+  border-color: var(--app-accent);
+  background: var(--app-accent);
 }
 
 .insert-recommendation-panel {
-  border-color: rgba(245, 158, 11, 0.38);
-  background: linear-gradient(180deg, rgba(255, 252, 244, 0.96) 0%, rgba(255, 247, 229, 0.94) 100%);
-  box-shadow: 0 24px 36px -30px rgba(180, 83, 9, 0.4);
+  border-color: rgba(100, 108, 255, 0.38);
+  background: linear-gradient(180deg, rgba(248, 249, 255, 0.96) 0%, rgba(238, 242, 255, 0.94) 100%);
+  box-shadow: 0 24px 36px -30px rgba(83, 91, 242, 0.4);
 }
 
 .insert-recommendation-panel .pending-command-header {
   padding-bottom: 10px;
-  border-bottom: 1px solid rgba(251, 191, 36, 0.18);
+  border-bottom: 1px solid var(--app-line);
 }
 
 .insert-recommendation-list {
@@ -5090,7 +5587,7 @@ onBeforeUnmount(() => {
   width: 100%;
   margin: 0;
   padding: 12px 14px;
-  border: 1px solid rgba(251, 191, 36, 0.18);
+  border: 1px solid var(--app-line);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.8);
   cursor: pointer;
@@ -5106,23 +5603,23 @@ onBeforeUnmount(() => {
 }
 
 .insert-recommendation-option:hover {
-  border-color: rgba(245, 158, 11, 0.38);
+  border-color: rgba(100, 108, 255, 0.38);
   background: rgba(255, 255, 255, 0.96);
   transform: translateY(-1px);
 }
 
 .insert-recommendation-option:focus-visible {
   outline: none;
-  border-color: rgba(245, 158, 11, 0.52);
+  border-color: rgba(100, 108, 255, 0.52);
   box-shadow:
-    0 0 0 3px rgba(245, 158, 11, 0.16),
-    0 18px 30px -24px rgba(180, 83, 9, 0.42);
+    0 0 0 3px rgba(100, 108, 255, 0.16),
+    0 18px 30px -24px rgba(83, 91, 242, 0.42);
 }
 
 .insert-recommendation-option.is-selected {
-  border-color: rgba(245, 158, 11, 0.52);
-  background: linear-gradient(180deg, rgba(255, 252, 245, 0.98) 0%, rgba(255, 247, 230, 0.92) 100%);
-  box-shadow: 0 18px 30px -24px rgba(180, 83, 9, 0.42);
+  border-color: rgba(100, 108, 255, 0.52);
+  background: linear-gradient(180deg, rgba(248, 249, 255, 0.98) 0%, rgba(238, 242, 255, 0.92) 100%);
+  box-shadow: 0 18px 30px -24px rgba(83, 91, 242, 0.42);
 }
 
 .insert-recommendation-selector {
@@ -5145,14 +5642,14 @@ onBeforeUnmount(() => {
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: #f59e0b;
+  background: var(--app-accent);
   transform: scale(0);
   transition: transform 0.18s ease;
 }
 
 .insert-recommendation-option.is-selected .insert-recommendation-selector {
-  border-color: #f59e0b;
-  background: rgba(255, 247, 230, 0.92);
+  border-color: var(--app-accent);
+  background: rgba(238, 242, 255, 0.92);
 }
 
 .insert-recommendation-option.is-selected .insert-recommendation-selector-dot {
@@ -5187,9 +5684,9 @@ onBeforeUnmount(() => {
   min-height: 22px;
   padding: 0 8px;
   border-radius: 999px;
-  background: rgba(146, 64, 14, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.18);
-  color: #b45309;
+  background: rgba(100, 108, 255, 0.08);
+  border: 1px solid var(--app-line);
+  color: var(--app-accent-deep);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -5205,7 +5702,7 @@ onBeforeUnmount(() => {
 .insert-recommendation-confidence {
   flex: 0 0 auto;
   padding-left: 12px;
-  color: #92400e;
+  color: var(--app-accent-deep);
   font-size: 11px;
   font-weight: 700;
   line-height: 1.5;
@@ -5219,14 +5716,14 @@ onBeforeUnmount(() => {
 
 .insert-recommendation-tags .reason-tag {
   background: rgba(255, 255, 255, 0.82);
-  border-color: rgba(245, 158, 11, 0.14);
-  color: #b45309;
+  border-color: var(--app-line);
+  color: var(--app-accent-deep);
   font-weight: 500;
 }
 
 .insert-recommendation-footer-note {
   padding: 0 4px;
-  color: #7c5b2a;
+  color: #475569;
   font-size: 11px;
   line-height: 1.6;
 }
@@ -5236,12 +5733,12 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 12px;
   padding-top: 12px;
-  border-top: 1px solid rgba(251, 191, 36, 0.18);
-  background: linear-gradient(180deg, rgba(255, 248, 233, 0) 0%, rgba(255, 248, 233, 0.82) 100%);
+  border-top: 1px solid var(--app-line);
+  background: linear-gradient(180deg, rgba(248, 249, 255, 0) 0%, rgba(238, 242, 255, 0.82) 100%);
 }
 
 .insert-recommendation-action-hint {
-  color: #7c5b2a;
+  color: #475569;
   font-size: 11px;
   line-height: 1.6;
 }
@@ -5279,10 +5776,10 @@ onBeforeUnmount(() => {
 .layout-draft-feasibility-warning {
   margin-top: 10px;
   padding: 8px 10px;
-  border: 1px solid rgba(251, 146, 60, 0.26);
+  border: 1px solid var(--app-line-strong);
   border-radius: 6px;
-  background: rgba(255, 247, 237, 0.86);
-  color: #9a3412;
+  background: rgba(238, 242, 255, 0.86);
+  color: var(--app-accent-deep);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -5335,7 +5832,7 @@ onBeforeUnmount(() => {
   gap: 6px;
   margin-top: 12px;
   padding-top: 10px;
-  border-top: 1px solid rgba(251, 146, 60, 0.12);
+  border-top: 1px solid var(--app-line);
 }
 
 .layout-draft-segment-item {
@@ -5358,7 +5855,7 @@ onBeforeUnmount(() => {
 }
 
 .layout-draft-segment-time {
-  color: #9a3412;
+  color: var(--app-accent-deep);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.5;
@@ -5381,12 +5878,12 @@ onBeforeUnmount(() => {
 }
 
 .layout-draft-segment-status {
-  color: #166534;
+  color: var(--app-accent-deep);
   font-weight: 600;
 }
 
 .layout-draft-segment-status.is-warning {
-  color: #a16207;
+  color: var(--app-accent-deep);
 }
 
 .layout-draft-segment-status.is-blocked {
@@ -5428,23 +5925,134 @@ onBeforeUnmount(() => {
 }
 
 .input-area {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 10px;
   padding: 18px;
-  border-top: 1px solid rgba(251, 146, 60, 0.12);
+  border-top: 1px solid var(--app-line);
   background: rgba(255, 255, 255, 0.92);
 }
 
-.layout-upload-button {
-  min-width: 44px;
-  padding-left: 12px;
-  padding-right: 12px;
+.input-shell {
+  position: relative;
+  min-height: 86px;
+  border: 1px solid #dbe4f0;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 14px 32px -28px rgba(83, 91, 242, 0.45);
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
 }
 
-.input-area :deep(.el-textarea__inner) {
+.input-shell:focus-within {
+  border-color: rgba(100, 108, 255, 0.58);
+  box-shadow:
+    0 0 0 3px rgba(100, 108, 255, 0.12),
+    0 18px 36px -30px rgba(83, 91, 242, 0.55);
+}
+
+.input-shell.is-busy {
+  background: #fbfcff;
+}
+
+.message-input {
+  display: block;
+}
+
+.message-input :deep(.el-textarea__inner) {
   min-height: 76px;
-  padding: 12px 14px;
+  padding: 13px 58px 42px 14px;
+  border: 0;
+  border-radius: 14px;
+  box-shadow: none;
+  resize: none;
+  background: transparent;
+  color: #1f2937;
+  line-height: 1.6;
+}
+
+.message-input :deep(.el-textarea__inner:focus) {
+  box-shadow: none;
+}
+
+.input-control-row {
+  position: absolute;
+  right: 10px;
+  bottom: 9px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.input-icon-button,
+.send-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  appearance: none;
+  cursor: pointer;
+  pointer-events: auto;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease,
+    transform 0.16s ease,
+    opacity 0.16s ease;
+}
+
+.input-icon-button .el-icon,
+.send-action-button .el-icon {
+  font-size: 16px;
+}
+
+.input-icon-button {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: transparent;
+  color: #64748b;
+}
+
+.input-icon-button:hover:not(:disabled) {
+  background: var(--app-accent-tint);
+  color: var(--app-accent-deep);
+}
+
+.input-icon-button.is-loading {
+  color: var(--app-accent-deep);
+}
+
+.send-action-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--app-accent);
+  color: #ffffff;
+  box-shadow: 0 10px 24px -14px rgba(83, 91, 242, 0.7);
+}
+
+.send-action-button:hover:not(:disabled) {
+  background: var(--app-accent-deep);
+  transform: translateY(-1px);
+}
+
+.send-action-button:disabled,
+.input-icon-button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.send-action-button.is-stop {
+  background: #ef4444;
+  box-shadow: 0 10px 24px -14px rgba(239, 68, 68, 0.7);
+}
+
+.stop-square {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  background: currentColor;
 }
 
 @media (max-width: 768px) {
@@ -5456,7 +6064,7 @@ onBeforeUnmount(() => {
   }
 
   .input-area {
-    grid-template-columns: 1fr;
+    padding-bottom: 14px;
   }
 
   .agent-audit-card {

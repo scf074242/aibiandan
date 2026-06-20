@@ -25,16 +25,16 @@ body {
 }
 
 .el-button--primary {
-  --el-button-bg-color: #ea580c;
-  --el-button-border-color: #ea580c;
-  --el-button-hover-bg-color: #c2410c;
-  --el-button-hover-border-color: #c2410c;
-  --el-button-active-bg-color: #9a3412;
-  --el-button-active-border-color: #9a3412;
+  --el-button-bg-color: var(--app-accent);
+  --el-button-border-color: var(--app-accent);
+  --el-button-hover-bg-color: var(--app-accent-deep);
+  --el-button-hover-border-color: var(--app-accent-deep);
+  --el-button-active-bg-color: #3f46d8;
+  --el-button-active-border-color: #3f46d8;
 }
 
 .el-button:not(.el-button--primary):not(.is-link) {
-  border-color: rgba(194, 101, 22, 0.12);
+  border-color: var(--app-line);
   background: rgba(255, 255, 255, 0.76);
   color: #374151;
 }
@@ -59,7 +59,7 @@ body {
 .el-select__wrapper.is-focused,
 .el-textarea__inner:focus,
 .el-date-editor.el-input__wrapper.is-focus {
-  box-shadow: 0 0 0 1px rgba(234, 88, 12, 0.35);
+  box-shadow: 0 0 0 1px rgba(100, 108, 255, 0.36);
 }
 
 .el-tag {
@@ -71,7 +71,7 @@ body {
 .el-table,
 .el-dialog,
 .el-card {
-  --el-border-color-lighter: rgba(194, 101, 22, 0.12);
+  --el-border-color-lighter: var(--app-line);
 }
 
 ::-webkit-scrollbar {
@@ -81,9 +81,9 @@ body {
 
 ::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(194, 101, 22, 0.28);
+  background: rgba(100, 108, 255, 0.28);
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(255, 247, 237, 0.7);
+  background: rgba(238, 242, 255, 0.7);
 }

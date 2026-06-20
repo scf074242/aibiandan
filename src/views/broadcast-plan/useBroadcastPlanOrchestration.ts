@@ -8,6 +8,7 @@ import { useBroadcastPlanFocus } from './useBroadcastPlanFocus'
 import type { ValidationReport } from '@/types/orchestration'
 import { setRuntimeLayout } from '@/services/orchestration/runtimeLayoutRegistry'
 import type { ChatScheduleUpdateItem } from './broadcastPlanScheduleBridge'
+import { resolveFormalOrchestrationSearchKeywords } from '@/services/retrievalConstraintCompiler'
 
 type UseBroadcastPlanOrchestrationOptions = {
   currentChannelId: ComputedRef<string>
@@ -20,6 +21,7 @@ type UseBroadcastPlanOrchestrationOptions = {
   applyRuntimeScheduleItems: (items: ChatScheduleUpdateItem[]) => void
   syncAtomicItemsToPageDeferred: () => void
   persistCurrentPlaylistDocument: () => void
+  activateScheduleWorkspace?: () => void
   focusRuntime: ReturnType<typeof useBroadcastPlanFocus>
   normalizeClockText: (value: string) => string
 }
@@ -80,14 +82,23 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
     },
   })
 
-  const startOrchestrationRuntime = async (mode: Extract<TaskMode, 'full_generate' | 'partial_generate'> = 'full_generate') => {
+  const startOrchestrationRuntime = async (
+    mode: Extract<TaskMode, 'full_generate' | 'partial_generate'> = 'full_generate',
+    targetTimeRange?: { start: string; end: string },
+    searchKeywords?: string[],
+  ) => {
     try {
       options.focusRuntime.resetForRun()
       options.syncPageItemsToAtomic()
       if (mode === 'partial_generate') {
+        const partialTarget = {
+          ...(targetTimeRange ? { targetTimeRange } : {}),
+          ...(searchKeywords?.length ? { searchKeywords } : {}),
+        }
         await orchestratorRuntime.startPartialGeneration(
           options.currentChannelId.value,
           options.scheduleDate.value,
+          Object.keys(partialTarget).length > 0 ? partialTarget : undefined,
         )
         return
       }
@@ -147,13 +158,14 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
   }
 
   const handleChatOrchestrateRequested = async (
-    payload: { userInput: string; mode: TaskMode; reasoning?: string; layoutDraft?: LayoutDraft },
+    payload: { userInput: string; mode: TaskMode; reasoning?: string; layoutDraft?: LayoutDraft; targetTimeRange?: { start: string; end: string }; searchKeywords?: string[] },
   ) => {
     void payload.userInput
     void payload.reasoning
     if (payload.mode !== 'full_generate' && payload.mode !== 'partial_generate') {
       return
     }
+    options.activateScheduleWorkspace?.()
     if (payload.layoutDraft) {
       setRuntimeLayout({
         sourceFileName: payload.layoutDraft.source === 'uploaded'
@@ -168,7 +180,10 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
         columns: payload.layoutDraft.columns,
       })
     }
-    await startOrchestrationRuntime(payload.mode)
+    const searchKeywords = payload.searchKeywords?.length
+      ? payload.searchKeywords
+      : resolveFormalOrchestrationSearchKeywords(payload.userInput)
+    await startOrchestrationRuntime(payload.mode, payload.targetTimeRange, searchKeywords)
   }
 
   const handleCancelOrchestration = async () => {
