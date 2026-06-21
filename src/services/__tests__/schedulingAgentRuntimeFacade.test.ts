@@ -10,13 +10,19 @@ import { getSchedulingReactTaskRuntime } from '@/services/runtime/reactTaskRunti
 import type { ReactTaskRun } from '@/services/runtime/reactTaskTypes'
 
 describe('SchedulingAgentRuntimeFacade formal agent boundary', () => {
-  it('keeps the real ChatPanel path on the formal runtime facade and records the server migration boundary', () => {
+  it('keeps the real ChatPanel path on the runtime client boundary and records the server migration boundary', () => {
     const chatPanelSource = readFileSync(resolve(process.cwd(), 'src/components/dialogue/ChatPanel.vue'), 'utf8')
+    const runtimeClientSource = readFileSync(resolve(process.cwd(), 'src/services/runtime/agentRuntimeClient.ts'), 'utf8')
     const protocolDoc = readFileSync(resolve(process.cwd(), 'docs/agent-development-protocol.md'), 'utf8')
 
-    expect(chatPanelSource).toContain('getSchedulingAgentRuntimeFacade')
-    expect(chatPanelSource).toContain('@/services/runtime/schedulingAgentRuntimeFacade')
+    expect(chatPanelSource).toContain('getAgentRuntimeClient')
+    expect(chatPanelSource).toContain('@/services/runtime/agentRuntimeClient')
+    expect(chatPanelSource).not.toContain('getSchedulingAgentRuntimeFacade')
+    expect(chatPanelSource).not.toContain('@/services/runtime/schedulingAgentRuntimeFacade')
     expect(chatPanelSource).not.toContain('getDemoRuntimeFacade')
+    expect(runtimeClientSource).toContain('getSchedulingAgentRuntimeFacade')
+    expect(runtimeClientSource).toContain("from './schedulingAgentRuntimeFacade'")
+    expect(runtimeClientSource).toContain('export interface AgentRuntimeClient')
     expect(protocolDoc).toContain('Goal 39 服务端迁移边界')
     expect(protocolDoc).toContain('Goal 40 应开始拆服务端可访问边界')
     expect(protocolDoc).toContain('ChatPanel')

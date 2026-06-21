@@ -218,10 +218,10 @@ describe('ChatPanel quick actions', () => {
   })
 
   it('routes the real foreground conversation through the scheduling runtime directly', () => {
-    expect(chatPanelSource).toContain('const runtimeFacade = getSchedulingAgentRuntimeFacade()')
-    expect(chatPanelSource).toContain("from '@/services/runtime/schedulingAgentRuntimeFacade'")
+    expect(chatPanelSource).toContain('const runtimeClient = getAgentRuntimeClient()')
+    expect(chatPanelSource).toContain("from '@/services/runtime/agentRuntimeClient'")
     expect(chatPanelSource).not.toContain('getDemoRuntimeFacade')
-    expect(chatPanelSource).toContain('const decision = await runtimeFacade.submitInstruction')
+    expect(chatPanelSource).toContain('const decision = await runtimeClient.submitInstruction')
     expect(chatPanelSource).toContain('agentCoreEnabled: true')
     expect(chatPanelSource).toContain('const foregroundLayoutDraftEnabled = false')
     expect(chatPanelSource).toContain('layoutDraftEnabled: foregroundLayoutDraftRuntimeEnabled')
@@ -229,9 +229,9 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('const pendingReviewLifecycle = resolvePendingReviewLifecycle')
     expect(chatPanelSource).toContain('const foregroundContextPackage = buildForegroundAgentContextPackage')
     expect(chatPanelSource).toContain('foregroundContextPackage,')
-    expect(chatPanelSource).toContain('runtimeFacade.executePendingCommand')
-    expect(chatPanelSource).toContain('runtimeFacade.resolvePendingTargetSelection')
-    expect(chatPanelSource).toContain('runtimeFacade.resolvePendingInsertRecommendation')
+    expect(chatPanelSource).toContain('runtimeClient.executePendingCommand')
+    expect(chatPanelSource).toContain('runtimeClient.resolvePendingTargetSelection')
+    expect(chatPanelSource).toContain('runtimeClient.resolvePendingInsertRecommendation')
     expect(chatPanelSource).not.toContain('openClawBridge.submitInstruction')
     expect(chatPanelSource).not.toContain('getOpenClawBridge')
     expect(orchestrationHookSource).toContain('targetTimeRange?: { start: string; end: string }')
@@ -539,7 +539,7 @@ describe('ChatPanel quick actions', () => {
     expect(targetSelectionBlock.indexOf("await continuePendingAgentTask('确认', '确认目标中')")).toBeLessThan(
       targetSelectionBlock.indexOf('rehydratePendingTargetSelectionFromAtomicContext'),
     )
-    expect(targetSelectionBlock).toContain('runtimeFacade.resolvePendingTargetSelection')
+    expect(targetSelectionBlock).toContain('runtimeClient.resolvePendingTargetSelection')
 
     expect(insertRecommendationBlock).toContain('pendingAtomicContext.value.agentPendingTask')
     expect(insertRecommendationBlock).toContain("slot: 'candidateId'")
@@ -547,7 +547,7 @@ describe('ChatPanel quick actions', () => {
     expect(insertRecommendationBlock.indexOf("await continuePendingAgentTask('确认', `确认${actionLabel}中`)")).toBeLessThan(
       insertRecommendationBlock.indexOf('rehydratePendingInsertRecommendationFromAtomicContext'),
     )
-    expect(insertRecommendationBlock).toContain('runtimeFacade.resolvePendingInsertRecommendation')
+    expect(insertRecommendationBlock).toContain('runtimeClient.resolvePendingInsertRecommendation')
   })
 
   it('keeps foreground pending interactions limited to actionable cards', () => {
@@ -620,7 +620,7 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null')
     expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewCancelText(content))')
     expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewConfirmText(content))')
-    expect(chatPanelSource).toContain('runtimeFacade.executePendingCommand({')
+    expect(chatPanelSource).toContain('runtimeClient.executePendingCommand({')
     expect(chatPanelSource).toContain('const pendingReviewInterruptedNotice = ref<string | null>(null)')
     expect(chatPanelSource).toContain('const interruptPendingReviewForNewInput = (content: string): boolean =>')
     expect(chatPanelSource).toContain('interruptPendingReviewForNewInput(content)')

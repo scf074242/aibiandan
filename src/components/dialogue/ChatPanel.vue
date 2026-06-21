@@ -485,7 +485,7 @@ import { getLayoutImportService } from '@/services/layoutImportService'
 import { getCandidateService } from '@/services/candidateService'
 import { getAtomicCapabilities } from '@/services/atomicCapabilities'
 import {
-  getSchedulingAgentRuntimeFacade,
+  getAgentRuntimeClient,
   summarizeRuntimeCommand,
   type RuntimeDecision,
   type RuntimeAnalysisContext,
@@ -494,7 +494,7 @@ import {
   type RuntimeOrchestrationRequest,
   type RuntimePendingCommand,
   type RuntimeScheduleItem,
-} from '@/services/runtime/schedulingAgentRuntimeFacade'
+} from '@/services/runtime/agentRuntimeClient'
 import {
   buildForegroundAgentContextPackage,
   resolvePendingReviewLifecycle,
@@ -697,7 +697,7 @@ const isForegroundOrchestrationRunning = computed(() => (
 const commandExecutor = getCommandExecutor()
 const candidateService = getCandidateService()
 const scheduleCommandBus = getScheduleCommandBus()
-const runtimeFacade = getSchedulingAgentRuntimeFacade()
+const runtimeClient = getAgentRuntimeClient()
 const layoutImportService = getLayoutImportService()
 const displayedLogIds = ref<string[]>([])
 const lastSummarySessionId = ref('')
@@ -1824,7 +1824,7 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       pendingCommand.value = null
       pendingAtomicContext.value = null
       pendingReviewWorkspaceKey.value = null
-      const result = await runtimeFacade.executePendingCommand({
+      const result = await runtimeClient.executePendingCommand({
         pendingCommand: usablePendingCommand,
         scheduleDate: props.date,
         channelId: props.channelId,
@@ -1856,7 +1856,7 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       hasLayoutDraft: Boolean(currentLayoutDraft),
       itemCount: scheduleState.itemCount,
     })
-    const decision = await runtimeFacade.submitInstruction({
+    const decision = await runtimeClient.submitInstruction({
       scheduleState,
       userInput: effectiveContent,
       currentSchedule: props.currentSchedule,
@@ -4188,7 +4188,7 @@ const confirmPendingCommand = async () => {
     pendingCommand.value = null
     pendingAtomicContext.value = null
     pendingReviewWorkspaceKey.value = null
-    const result = await runtimeFacade.executePendingCommand({
+    const result = await runtimeClient.executePendingCommand({
       pendingCommand: pending,
       scheduleDate: props.date,
       channelId: props.channelId,
@@ -4240,7 +4240,7 @@ const confirmPendingTargetSelection = async () => {
   }
   const stepProgress = startStepProgress('确认目标中')
   try {
-    const decision = await runtimeFacade.resolvePendingTargetSelection({
+    const decision = await runtimeClient.resolvePendingTargetSelection({
       channelId: props.channelId,
       date: props.date,
       scheduleState: buildCurrentRuntimeScheduleState(),
@@ -4295,7 +4295,7 @@ const confirmPendingInsertRecommendation = async () => {
   }
   const stepProgress = startStepProgress(`确认${actionLabel}中`)
   try {
-    const decision = await runtimeFacade.resolvePendingInsertRecommendation({
+    const decision = await runtimeClient.resolvePendingInsertRecommendation({
       scheduleState: buildCurrentRuntimeScheduleState(),
       pendingInsertRecommendation,
     })

@@ -249,3 +249,18 @@
 3. 把当前本地 facade 包成 `LocalAgentRuntimeClient`。
 4. 用现有 19 条浏览器场景证明体验不变。
 5. 再开始把 LLM/context/ReAct 逐步迁到服务端实现。
+
+## 阶段 1 落地记录
+
+当前第一步迁移已经开始落地：
+
+- 前台新增 `AgentRuntimeClient` 边界，`ChatPanel` 不再直接依赖具体 runtime facade。
+- 当前默认实现是 `LocalAgentRuntimeClient`，仍包裹现有本地 runtime，保证前台体验不变。
+- 新增 `scripts/agent-server.mjs` 作为 Agent 服务端常驻进程骨架，先提供健康检查和迁移状态接口。
+- 新增启动脚本：
+  - `npm run dev:agent`：本机启动前台和 Agent 服务。
+  - `npm run dev:lan`：绑定 `0.0.0.0`，用于办公网试用。
+  - `npm run agent:server`：单独启动 Agent 服务。
+  - `npm run agent:server:lan`：办公网方式单独启动 Agent 服务。
+
+这个阶段不迁移业务执行逻辑，只先固定前后台协议边界。下一步才适合把 LLM 配置、prompt/context、ReAct task runtime 从本地 client 后面逐步移动到真正的 HTTP runtime。
