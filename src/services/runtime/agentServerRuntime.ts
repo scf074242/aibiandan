@@ -17,9 +17,15 @@ import type { ReactTaskRun } from './reactTaskTypes'
 import {
   AgentServerSessionStore,
   getAgentServerSessionStore,
+  type AgentMaterialEvidenceRecord,
+  type AgentServerSessionEvent,
   type AgentServerSessionState,
 } from './agentServerSessionStore'
 import { FormalPlaylistWriteAdapter } from './formalPlaylistWriteAdapter'
+import {
+  buildFormalPlaylistSnapshot,
+  type FormalPlaylistSnapshot,
+} from './formalPlaylistState'
 
 export interface AgentServerRuntimeOptions {
   runtime?: Pick<SchedulingAgentRuntimeFacade,
@@ -49,6 +55,8 @@ export interface AgentServerSessionPublicState {
   hasPendingAtomicContext: boolean
   activeReactTaskRun?: ReactTaskRun | null
   formalPlaylistVersion?: string | number
+  formalPlaylistItemCount?: number
+  materialEvidenceCount: number
   eventCount: number
 }
 
@@ -87,6 +95,8 @@ const serializeSession = (session: AgentServerSessionState): AgentServerSessionP
   hasPendingAtomicContext: Boolean(session.pendingAtomicContext),
   activeReactTaskRun: session.activeReactTaskRun ?? null,
   formalPlaylistVersion: session.formalPlaylistVersion,
+  formalPlaylistItemCount: session.formalPlaylistSnapshot?.itemCount,
+  materialEvidenceCount: session.materialEvidence?.length ?? 0,
   eventCount: session.eventLog.length,
 })
 
@@ -116,11 +126,19 @@ export class AgentServerRuntime {
     return this.sessions.getSession(sessionId)?.eventLog ?? []
   }
 
+  subscribeSessionEvents(
+    sessionId: string,
+    listener: (event: AgentServerSessionEvent) => void,
+  ): () => void {
+    return this.sessions.subscribe(sessionId, listener)
+  }
+
   async submitInstruction(
     input: RuntimeSubmitInput,
     sessionId?: string | null,
   ): Promise<AgentServerRuntimeEnvelope<RuntimeDecision>> {
     const session = this.sessions.getOrCreateSession(sessionId)
+    const foregroundSnapshot = buildFormalPlaylistSnapshot(input.currentSchedule, 'foreground')
     const activeReactTaskRun = session.activeReactTaskRun ?? input.activeReactTaskRun ?? null
     const pendingAtomicContext = input.pendingAtomicContext ?? null
     const contextPackage = buildForegroundAgentContextPackage({
@@ -136,6 +154,8 @@ export class AgentServerRuntime {
       pendingCommand: null,
       pendingAtomicContext,
       activeReactTaskRun,
+      formalPlaylistSnapshot: foregroundSnapshot,
+      formalPlaylistVersion: foregroundSnapshot.version,
     })
     this.sessions.appendEvent(session.id, {
       type: 'context',
@@ -145,6 +165,8 @@ export class AgentServerRuntime {
         playlistType: contextPackage.workspace.playlistType,
         hasLayoutDraft: contextPackage.layoutDraft.available,
         activeReactTask: contextPackage.reactTask.active,
+        formalPlaylistVersion: foregroundSnapshot.version,
+        formalPlaylistItemCount: foregroundSnapshot.itemCount,
       },
     })
 
@@ -155,6 +177,7 @@ export class AgentServerRuntime {
       foregroundContextPackage: contextPackage,
       agentCoreEnabled: input.agentCoreEnabled ?? true,
     })
+    this.recordMaterialEvidenceFromDecision(session.id, decision)
     const nextSession = this.syncDecision(session.id, decision, contextPackage)
     return {
       sessionId: session.id,
@@ -172,10 +195,14 @@ export class AgentServerRuntime {
     const result = await this.formalPlaylistWrites.execute(input, {
       sessionId: session.id,
       actualPlaylistVersion: session.formalPlaylistVersion,
+      currentSnapshot: session.formalPlaylistSnapshot,
     })
+    const resultSnapshot = this.resolveResultSnapshot(result)
     const nextSession = this.sessions.updateSession(session.id, {
       pendingCommand: null,
       pendingAtomicContext: null,
+      formalPlaylistSnapshot: resultSnapshot ?? session.formalPlaylistSnapshot ?? null,
+      formalPlaylistVersion: resultSnapshot?.version ?? session.formalPlaylistVersion,
     })
     this.sessions.appendEvent(session.id, {
       type: 'execution',
@@ -185,8 +212,20 @@ export class AgentServerRuntime {
         summary: result.summary,
         error: result.error,
         formalWrite: result.details?.formalWrite,
+        playlistPatch: result.playlistPatch,
       },
     })
+    if (result.details?.formalWrite) {
+      this.sessions.appendEvent(session.id, {
+        type: 'formal_write',
+        summary: result.success ? '正式播单写入边界已完成。' : '正式播单写入边界已停止。',
+        data: {
+          formalWrite: result.details.formalWrite,
+          playlistPatch: result.playlistPatch,
+          nextVersion: resultSnapshot?.version,
+        },
+      })
+    }
     return {
       sessionId: session.id,
       result,
@@ -285,8 +324,55 @@ export class AgentServerRuntime {
           observationCount: reactTaskRun.observations.length,
         },
       })
+      const latestObservation = reactTaskRun.observations.at(-1)
+      if (latestObservation?.type === 'asset_search') {
+        this.sessions.appendMaterialEvidence(sessionId, {
+          source: 'react_observation',
+          summary: latestObservation.summary,
+          candidateCount: typeof latestObservation.data?.candidateCount === 'number'
+            ? latestObservation.data.candidateCount
+            : undefined,
+          query: this.resolveEvidenceQuery(latestObservation.data),
+          data: latestObservation.data,
+        })
+      }
     }
-    return nextSession
+    return this.sessions.getOrCreateSession(nextSession.id)
+  }
+
+  private resolveResultSnapshot(result: RuntimeExecutedResult): FormalPlaylistSnapshot | null {
+    const snapshot = result.scheduleSnapshot
+    if (!snapshot || !isRecord(snapshot)) return null
+    if (typeof snapshot.version !== 'string' || !Array.isArray(snapshot.items)) return null
+    return snapshot as unknown as FormalPlaylistSnapshot
+  }
+
+  private recordMaterialEvidenceFromDecision(sessionId: string, decision: RuntimeDecision): AgentMaterialEvidenceRecord | null {
+    const feedback = getRuntimeDecisionFeedback(decision)
+    const details = feedback?.details
+    if (!isRecord(details)) return null
+    const materialEvidence = details.materialEvidence
+    if (!isRecord(materialEvidence)) return null
+    const summary = typeof materialEvidence.summary === 'string'
+      ? materialEvidence.summary
+      : '已记录素材查证结果。'
+    return this.sessions.appendMaterialEvidence(sessionId, {
+      source: 'runtime_feedback',
+      summary,
+      candidateCount: typeof materialEvidence.candidateCount === 'number'
+        ? materialEvidence.candidateCount
+        : undefined,
+      query: this.resolveEvidenceQuery(materialEvidence),
+      data: materialEvidence,
+    })
+  }
+
+  private resolveEvidenceQuery(data: unknown): Record<string, unknown> | undefined {
+    if (!isRecord(data)) return undefined
+    if (isRecord(data.query)) return data.query
+    if (Array.isArray(data.keywords)) return { keywords: data.keywords }
+    if (typeof data.keyword === 'string') return { keyword: data.keyword }
+    return undefined
   }
 
   private resolvePendingAtomicContext(decision: RuntimeDecision): RuntimePendingAtomicContext | null {

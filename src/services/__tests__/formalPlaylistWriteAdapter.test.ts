@@ -20,6 +20,22 @@ const pendingInput = (overrides: Partial<RuntimeExecutePendingCommandInput> = {}
   ...overrides,
 })
 
+const currentSnapshot = {
+  version: 'formal_before',
+  itemCount: 1,
+  updatedAt: '2026-03-25T00:00:00.000Z',
+  source: 'foreground' as const,
+  items: [{
+    id: 'item-1',
+    programName: '看东方',
+    programCode: 'news-1',
+    startTime: '2026-03-25T09:00:00',
+    endTime: '2026-03-25T09:30:00',
+    duration: 1800,
+    programType: 'news',
+  }],
+}
+
 const executedResult = (overrides: Partial<RuntimeExecutedResult> = {}): RuntimeExecutedResult => ({
   success: true,
   command: { action: 'validate' } as never,
@@ -133,6 +149,82 @@ describe('FormalPlaylistWriteAdapter', () => {
     expect(result.success).toBe(true)
     expect(result.details?.formalWrite).toMatchObject({
       status: 'applied',
+    })
+  })
+
+  it('returns a formal playlist patch when the delegated write changes the known snapshot', async () => {
+    const executePendingCommand = vi.fn(async () => executedResult({
+      data: {
+        deletedItem: currentSnapshot.items[0],
+      },
+    }))
+    const adapter = new FormalPlaylistWriteAdapter({
+      executePendingCommand,
+      createRunId: () => 'formal-write-1',
+    })
+
+    const result = await adapter.execute(pendingInput({
+      pendingCommand: {
+        command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '用户确认删除。' } as never,
+        summary: '删除看东方',
+        reasoning: '用户确认删除。',
+      },
+    }), {
+      sessionId: 'session-1',
+      currentSnapshot,
+    })
+
+    expect(result.scheduleSnapshot).toMatchObject({
+      itemCount: 0,
+      items: [],
+    })
+    expect(result.playlistPatch).toMatchObject({
+      type: 'formal_playlist_patch',
+      previousVersion: 'formal_before',
+      itemCount: 0,
+      changedItemIds: ['item-1'],
+    })
+    expect(result.details?.formalWrite).toMatchObject({
+      playlistPatch: {
+        changedItemIds: ['item-1'],
+      },
+    })
+  })
+
+  it('can stop oversized batches before writing when a server batch limit is provided', async () => {
+    const executePendingCommand = vi.fn(async () => executedResult())
+    const adapter = new FormalPlaylistWriteAdapter({
+      executePendingCommand,
+      createRunId: () => 'formal-write-1',
+    })
+
+    const result = await adapter.execute(pendingInput({
+      maxBatchCommands: 1,
+      pendingCommand: {
+        command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '批量删除。' } as never,
+        commands: [
+          { action: 'delete', data: { itemId: 'item-1' }, reasoning: '批量删除。' } as never,
+          { action: 'delete', data: { itemId: 'item-2' }, reasoning: '批量删除。' } as never,
+        ],
+        summary: '批量删除',
+        reasoning: '批量删除。',
+      },
+    }), { sessionId: 'session-1' })
+
+    expect(executePendingCommand).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      success: false,
+      error: 'formal_playlist_batch_limit_exceeded',
+      details: {
+        formalWrite: {
+          status: 'blocked',
+          batch: {
+            commandCount: 2,
+            maxBatchCommands: 1,
+            requiresContinuation: true,
+          },
+        },
+      },
     })
   })
 })

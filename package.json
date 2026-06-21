@@ -9,6 +9,7 @@
     "dev:web:lan": "vite --host 0.0.0.0",
     "agent:server": "node scripts/agent-server.mjs",
     "agent:server:lan": "node scripts/agent-server.mjs --host=0.0.0.0",
+    "agent:health": "node scripts/agent-health-check.mjs",
     "dev:agent": "run-p dev:web agent:server",
     "dev:lan": "run-p dev:web:lan agent:server:lan",
     "build": "run-p type-check \"build-only {@}\" --",

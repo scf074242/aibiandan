@@ -2,12 +2,18 @@ import type {
   RuntimeExecutePendingCommandInput,
   RuntimeExecutedResult,
 } from './schedulingAgentRuntimeFacade'
+import {
+  buildFormalPlaylistWriteArtifacts,
+  type FormalPlaylistPatch,
+  type FormalPlaylistSnapshot,
+} from './formalPlaylistState'
 
 type VersionValue = string | number
 
 export interface FormalPlaylistWriteContext {
   sessionId?: string
   actualPlaylistVersion?: VersionValue | null
+  currentSnapshot?: FormalPlaylistSnapshot | null
 }
 
 export interface FormalPlaylistWriteMetadata {
@@ -26,7 +32,10 @@ export interface FormalPlaylistWriteMetadata {
     completedCount?: number
     remainingCount?: number
     nextIndex?: number
+    maxBatchCommands?: number
+    requiresContinuation?: boolean
   }
+  playlistPatch?: FormalPlaylistPatch
 }
 
 export interface FormalPlaylistWriteAdapterOptions {
@@ -50,13 +59,17 @@ const buildBatchMetadata = (input: RuntimeExecutePendingCommandInput): FormalPla
     completedCount: input.batchCursor?.completedCount,
     remainingCount: input.batchCursor?.remainingCount,
     nextIndex: input.batchCursor?.nextIndex,
+    maxBatchCommands: input.maxBatchCommands,
+    requiresContinuation: typeof input.maxBatchCommands === 'number' && commandCount > input.maxBatchCommands,
   }
 }
 
 const buildMetadata = (
   input: RuntimeExecutePendingCommandInput,
   context: FormalPlaylistWriteContext | undefined,
-  overrides: Pick<FormalPlaylistWriteMetadata, 'writeRunId' | 'status' | 'reused'>,
+  overrides: Pick<FormalPlaylistWriteMetadata, 'writeRunId' | 'status' | 'reused'> & {
+    playlistPatch?: FormalPlaylistPatch
+  },
 ): FormalPlaylistWriteMetadata => ({
   boundary: 'agent-server',
   sessionId: context?.sessionId,
@@ -74,6 +87,7 @@ const withFormalWriteDetails = (
   formalWrite: FormalPlaylistWriteMetadata,
 ): RuntimeExecutedResult => ({
   ...result,
+  playlistPatch: formalWrite.playlistPatch ?? result.playlistPatch,
   details: {
     ...(result.details ?? {}),
     formalWrite,
@@ -130,17 +144,31 @@ export class FormalPlaylistWriteAdapter {
       }))
     }
 
+    const batchLimitBlock = this.resolveBatchLimitBlock(input, context)
+    if (batchLimitBlock) {
+      return batchLimitBlock
+    }
+
     const result = await this.executeDelegate(input)
+    const artifacts = buildFormalPlaylistWriteArtifacts(input, result, context.currentSnapshot)
     const resultWithMetadata = withFormalWriteDetails(result, buildMetadata(input, context, {
       writeRunId: this.createRunId(),
       status: result.success ? 'applied' : 'failed',
       reused: false,
+      playlistPatch: artifacts?.patch,
     }))
+    const resultWithSnapshot = artifacts
+      ? {
+          ...resultWithMetadata,
+          scheduleSnapshot: artifacts.snapshot,
+          playlistPatch: artifacts.patch,
+        }
+      : resultWithMetadata
 
     if (cacheKey) {
-      this.completedByIdempotencyKey.set(cacheKey, resultWithMetadata)
+      this.completedByIdempotencyKey.set(cacheKey, resultWithSnapshot)
     }
-    return resultWithMetadata
+    return resultWithSnapshot
   }
 
   private resolveIdempotencyCacheKey(
@@ -165,5 +193,32 @@ export class FormalPlaylistWriteAdapter {
       expectedPlaylistVersion: input.expectedPlaylistVersion,
       actualPlaylistVersion: context.actualPlaylistVersion,
     }
+  }
+
+  private resolveBatchLimitBlock(
+    input: RuntimeExecutePendingCommandInput,
+    context: FormalPlaylistWriteContext,
+  ): RuntimeExecutedResult | null {
+    const commandCount = input.pendingCommand.commands?.length ?? 1
+    if (typeof input.maxBatchCommands !== 'number' || commandCount <= input.maxBatchCommands) {
+      return null
+    }
+    return withFormalWriteDetails({
+      success: false,
+      command: input.pendingCommand.command,
+      message: `这次包含 ${commandCount} 条操作，建议分批确认后执行。`,
+      error: 'formal_playlist_batch_limit_exceeded',
+      summary: input.pendingCommand.summary,
+      thinking: '正式写入边界发现批量操作超过本次允许的执行数量，已停在写入前。',
+      explanation: input.pendingCommand.reasoning,
+      details: {
+        commandCount,
+        maxBatchCommands: input.maxBatchCommands,
+      },
+    }, buildMetadata(input, context, {
+      writeRunId: this.createRunId(),
+      status: 'blocked',
+      reused: false,
+    }))
   }
 }

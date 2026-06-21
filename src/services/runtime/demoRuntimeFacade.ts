@@ -141,7 +141,7 @@ export interface RuntimeAnalysisContext {
   createdAt: string
 }
 export interface RuntimeExecutionPlan { command: OrchestrationCommand; successMessage?: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap }
-export interface RuntimeExecutedResult { success: boolean; command: OrchestrationCommand; message: string; error?: string; summary: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; data?: unknown; affectedTimeRanges?: { start: string; end: string }[]; validationReport?: ValidationReport; validationSummary?: RuntimeDetailMap }
+export interface RuntimeExecutedResult { success: boolean; command: OrchestrationCommand; message: string; error?: string; summary: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; data?: unknown; affectedTimeRanges?: { start: string; end: string }[]; validationReport?: ValidationReport; validationSummary?: RuntimeDetailMap; scheduleSnapshot?: unknown; playlistPatch?: unknown }
 export interface RuntimeSubmitInput { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[]; currentLayoutDraft?: LayoutDraft | null; currentLayoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'> | null; analysisContext?: RuntimeAnalysisContext | null; pendingTargetSelection?: RuntimePendingTargetSelection | null; pendingInsertRecommendation?: RuntimePendingInsertRecommendation | null; pendingAtomicClarification?: RuntimePendingAtomicClarification | null; pendingAtomicContext?: RuntimePendingAtomicContext | null; activeReactTaskRun?: ReactTaskRun | null; foregroundContextPackage?: ForegroundAgentContextPackage; history?: string[]; agentCoreEnabled?: boolean; layoutDraftEnabled?: boolean; preferDraftFirstFormalOrchestration?: boolean; preferLayoutDraftRefine?: boolean; inputSource?: 'user' | 'quick_action' | 'system' }
 export interface RuntimeResolveTargetSelectionInput { channelId: string; date: string; pendingTargetSelection: RuntimePendingTargetSelection; scheduleState?: ScheduleState }
 export interface RuntimeResolveInsertRecommendationInput { scheduleState: ScheduleState; pendingInsertRecommendation: RuntimePendingInsertRecommendation; currentSchedule?: RuntimeScheduleItem[]; userInput?: string }
@@ -158,6 +158,7 @@ export interface RuntimeExecutePendingCommandInput {
     remainingCount?: number
     nextIndex?: number
   }
+  maxBatchCommands?: number
 }
 export interface RuntimeOrchestrationLifecycle {
   taskKind: 'full_day' | 'overall_refill' | 'local_refill'

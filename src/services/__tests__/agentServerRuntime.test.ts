@@ -113,6 +113,8 @@ describe('AgentServerRuntime migration boundary', () => {
     })
     expect(capturedInput?.foregroundContextPackage).toEqual(result.contextPackage)
     expect(capturedInput?.agentCoreEnabled).toBe(true)
+    expect(result.session.formalPlaylistItemCount).toBe(0)
+    expect(result.session.formalPlaylistVersion).toMatch(/^formal_/)
   })
 
   it('persists ReAct task state in the server session and injects it into the next turn', async () => {
@@ -230,5 +232,82 @@ describe('AgentServerRuntime migration boundary', () => {
       status: 'reused',
       reused: true,
     })
+  })
+
+  it('keeps a server-side formal playlist snapshot and returns a patch after confirmed writes', async () => {
+    const executePendingCommand = vi.fn(async (_input: RuntimeExecutePendingCommandInput) => ({
+      success: true,
+      command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '用户确认删除。' } as never,
+      message: '已删除。',
+      summary: '删除看东方',
+    }))
+    const runtime = createRuntime(async () => messageDecision(), executePendingCommand)
+    const first = await runtime.submitInstruction({
+      ...baseSubmitInput('查询当前播单'),
+      currentSchedule: [{
+        id: 'item-1',
+        programName: '看东方',
+        programCode: 'news-1',
+        startTime: '2026-03-25T09:00:00',
+        endTime: '2026-03-25T09:30:00',
+        duration: 1800,
+        programType: 'news',
+      }],
+    })
+
+    const result = await runtime.executePendingCommand({
+      pendingCommand: {
+        command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '用户确认删除。' } as never,
+        summary: '删除看东方',
+        reasoning: '用户确认删除。',
+        successMessage: '已删除。',
+      },
+      scheduleDate: '2026-03-25',
+      channelId: 'rotation',
+      expectedPlaylistVersion: first.session.formalPlaylistVersion,
+    }, first.sessionId)
+
+    expect(result.result?.playlistPatch).toMatchObject({
+      type: 'formal_playlist_patch',
+      previousVersion: first.session.formalPlaylistVersion,
+      itemCount: 0,
+      changedItemIds: ['item-1'],
+    })
+    expect(result.session.formalPlaylistItemCount).toBe(0)
+    expect(result.session.formalPlaylistVersion).not.toBe(first.session.formalPlaylistVersion)
+    expect(runtime.getSessionEvents(first.sessionId).some((event) => event.type === 'formal_write')).toBe(true)
+  })
+
+  it('records material evidence from ReAct observations as server events', async () => {
+    const runtime = createRuntime(async () => ({
+      kind: 'message',
+      feedback: {
+        content: '我先查素材。',
+        processType: 'planning',
+        processTypeLabel: 'ReAct',
+        details: {
+          reactTaskRun: {
+            ...reactTaskRun,
+            observations: [{
+              ...reactTaskRun.observations[0]!,
+              type: 'asset_search',
+              summary: '已找到金山区景点素材 3 条。',
+              data: {
+                keyword: '金山区热门景点',
+                candidateCount: 3,
+              },
+            }],
+          },
+        },
+      },
+    }))
+
+    const result = await runtime.submitInstruction(baseSubmitInput('第一段金山区景点部分，选择最近3年最火热的景点'))
+
+    expect(result.session.materialEvidenceCount).toBe(1)
+    expect(runtime.getSessionEvents(result.sessionId).some((event) => (
+      event.type === 'material_evidence'
+      && event.summary.includes('金山区景点素材')
+    ))).toBe(true)
   })
 })

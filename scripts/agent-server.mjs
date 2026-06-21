@@ -48,19 +48,37 @@ const readJsonBody = async (request) => {
 
 const unwrapInput = (body) => body?.input ?? body
 
-const writeSse = (request, response, events) => {
+const writeSseEvent = (response, event) => {
+  response.write(`event: ${event.type}\n`)
+  response.write(`data: ${JSON.stringify(event)}\n\n`)
+}
+
+const writeSse = (request, response, events, options = {}) => {
   response.writeHead(200, {
     ...buildHeaders(request),
     'content-type': 'text/event-stream; charset=utf-8',
     connection: 'keep-alive',
   })
   for (const event of events) {
-    response.write(`event: ${event.type}\n`)
-    response.write(`data: ${JSON.stringify(event)}\n\n`)
+    writeSseEvent(response, event)
   }
   response.write('event: ready\n')
   response.write(`data: ${JSON.stringify({ ok: true, time: new Date().toISOString() })}\n\n`)
-  response.end()
+  if (!options.follow || !options.sessionId) {
+    response.end()
+    return
+  }
+  const unsubscribe = runtime.subscribeSessionEvents(options.sessionId, (event) => {
+    writeSseEvent(response, event)
+  })
+  const heartbeat = setInterval(() => {
+    response.write('event: heartbeat\n')
+    response.write(`data: ${JSON.stringify({ ok: true, time: new Date().toISOString() })}\n\n`)
+  }, 15000)
+  request.on('close', () => {
+    clearInterval(heartbeat)
+    unsubscribe()
+  })
 }
 
 const handlePost = async (request, response, url) => {
@@ -159,7 +177,7 @@ const server = http.createServer(async (request, response) => {
       json(request, response, 200, {
         ok: true,
         service: 'aibiandan-agent',
-        stage: 'llm-context-and-react-runtime',
+        stage: 'formal-playlist-and-event-stream-migration',
         time: new Date().toISOString(),
       })
       return
@@ -168,10 +186,15 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/agent/status') {
       json(request, response, 200, {
         service: 'aibiandan-agent',
-        migrationStep: 'phase-2-llm-context-and-phase-3-react-runtime',
+        migrationStep: 'phase-4-to-phase-6-formal-playlist-events-batch-evidence-deployment',
         runtimeMode: 'server-runtime',
         llmContextOwner: 'agent-server',
         reactTaskOwner: 'agent-server-session',
+        formalPlaylistOwner: 'agent-server-session',
+        eventStream: {
+          snapshot: 'GET /api/agent/sessions/:sessionId/events',
+          follow: 'GET /api/agent/sessions/:sessionId/events?follow=1',
+        },
         endpoints: [
           'GET /health',
           'GET /api/agent/status',
@@ -201,7 +224,11 @@ const server = http.createServer(async (request, response) => {
 
     const eventsMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/events$/)
     if (request.method === 'GET' && eventsMatch) {
-      writeSse(request, response, runtime.getSessionEvents(eventsMatch[1]))
+      const sessionId = eventsMatch[1]
+      writeSse(request, response, runtime.getSessionEvents(sessionId), {
+        follow: url.searchParams.get('follow') === '1' || url.searchParams.get('follow') === 'true',
+        sessionId,
+      })
       return
     }
 

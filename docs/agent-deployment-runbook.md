@@ -1,0 +1,89 @@
+# AI编审助手部署与办公网试用说明
+
+## 目标
+
+让 AI编审助手可以从本机开发逐步走向办公网试用和长期运行。前台仍然是 `ChatPanel / broadcast-plan`，Agent Server 负责上下文、LLM、ReAct 状态、正式写入边界、事件流、素材证据和后续批量恢复。
+
+## 本机启动
+
+```bash
+npm run dev:agent
+```
+
+默认地址：
+
+- 前台页面：`http://127.0.0.1:5173`
+- Agent Server：`http://127.0.0.1:3000`
+
+## 办公网试用
+
+```bash
+npm run dev:lan
+```
+
+这会把前台和 Agent Server 绑定到 `0.0.0.0`。同一办公网内其他人可以访问这台机器的局域网 IP。
+
+试用前确认：
+
+- Windows 防火墙允许对应端口访问。
+- 浏览器访问的是前台地址，不是 Agent Server 地址。
+- 如果前台要走 HTTP runtime，需要配置 `VITE_AGENT_RUNTIME_MODE=http` 和 `VITE_AGENT_RUNTIME_BASE_URL`。
+
+## 健康检查
+
+```bash
+npm run agent:health
+```
+
+指定地址：
+
+```bash
+npm run agent:health -- --url=http://127.0.0.1:3000
+```
+
+检查项：
+
+- `/health`：服务是否存活。
+- `/api/agent/status`：迁移阶段、服务端职责、事件流入口和可用 API。
+
+## 长期运行建议
+
+当前阶段可以先用系统进程管理工具托管：
+
+- Windows：任务计划程序、PowerShell 后台任务或 NSSM。
+- Linux：systemd、pm2 或容器。
+
+长期运行时建议：
+
+- API Key 只放在服务端环境变量里，不放浏览器。
+- 每个试用用户独立 session，避免互相污染。
+- 打开服务日志，保留健康检查结果。
+- 限制办公网入口，不直接暴露公网。
+
+## 性能迁移方向
+
+前后台分开后，性能优化目标不是只换部署位置，而是把浏览器里的重活迁走：
+
+- LLM prompt 构建和调用由服务端负责。
+- ReAct 长程任务由服务端持续推进。
+- 素材查证和候选证据由服务端记录。
+- 正式播单写入、幂等、版本冲突和批量恢复由服务端控制。
+- 前台只展示自然语言回复、弱系统过程、pending、进度和最终播单结果。
+
+## 当前阶段边界
+
+已经迁移：
+
+- 服务端上下文重建。
+- 服务端 ReAct task session。
+- HTTP runtime client。
+- 正式写入边界、幂等和版本元数据。
+- 正式播单快照和 patch 元数据。
+- 事件流 `GET /api/agent/sessions/:sessionId/events?follow=1`。
+- 素材证据事件记录。
+
+仍是渐进迁移：
+
+- 旧原子命令执行器仍被复用。
+- 前台暂时仍按旧方式刷新页面状态。
+- 服务端数据层和持久化审计日志尚未接入数据库。

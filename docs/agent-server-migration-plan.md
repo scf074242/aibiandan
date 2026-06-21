@@ -308,3 +308,43 @@
 - 当前前台默认仍不发送版本号，因此旧本地/HTTP 体验不会因为阶段 4 第一批改动被额外阻断；版本字段接入前，行为保持和原来一致。
 
 下一步阶段 4 的后续工作，才适合逐步接入真正的 `playlistPatch`、服务端数据层版本、跨请求批量恢复和持久化审计日志。
+
+## Goal 42-46 连续迁移落地记录
+
+今晚继续把阶段 4 后续和阶段 5/6 的基础边界收进正式 Agent 服务端：
+
+### Goal 42：正式播单状态与 Patch 同步
+
+- 服务端 session 会从每轮 `currentSchedule` 生成正式播单快照和稳定版本号。
+- pending 确认写入时，`FormalPlaylistWriteAdapter` 会读取服务端已知快照。
+- 写入成功后，如果旧执行器返回的信息足够，服务端会生成 `scheduleSnapshot` 和 `playlistPatch`。
+- 当前前台仍保持旧刷新逻辑；这些字段先作为服务端协议和审计证据，不强迫页面马上改用 patch。
+
+### Goal 43：服务端事件流与长程任务进度
+
+- session store 支持事件订阅。
+- SSE 端点继续支持一次性读取已有事件。
+- 新增 `GET /api/agent/sessions/:sessionId/events?follow=1`，用于保持连接并持续推送后续事件。
+- 新增 `formal_write`、`material_evidence`、`task_progress` 等事件类型，为长程任务进度和素材查证准备统一通道。
+
+### Goal 44：批量正式写入与失败恢复
+
+- 写入边界已有批量元数据：命令数量、已完成数量、剩余数量、下一步位置。
+- 新增可选 `maxBatchCommands`，只有调用方显式传入时才会在写入前阻断超大批量。
+- 默认前台不传该字段，因此不会改变现有批量命令行为。
+- 后续真正分批执行时，应复用这个协议，而不是在前台新增批量循环。
+
+### Goal 45：素材查证与候选证据服务端化
+
+- session store 新增 `materialEvidence`。
+- ReAct 的 `asset_search` observation 会进入素材证据事件。
+- runtime feedback 中如果带 `materialEvidence`，服务端也会记录成统一证据。
+- 草案候选数、素材查证结果和缺口后续应从这些证据来，而不是前台临时展示不可靠数字。
+
+### Goal 46：部署与办公网试用稳定化
+
+- 新增 `npm run agent:health`，检查 Agent Server `/health` 和 `/api/agent/status`。
+- 新增 `docs/agent-deployment-runbook.md`，说明本机启动、办公网试用、健康检查、长期运行和性能迁移方向。
+- `/api/agent/status` 已更新为阶段 4-6 的职责说明：正式播单状态、事件流、服务端 session。
+
+这些改动仍然遵守迁移原则：旧原子命令执行器、候选选择、顺播规则、草案/正式播单隔离和前台展示路径不重写，只把服务端协议和状态边界补齐。

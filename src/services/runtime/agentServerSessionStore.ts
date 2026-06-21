@@ -2,6 +2,17 @@ import type { RuntimeDecision, RuntimePendingCommand } from './schedulingAgentRu
 import type { RuntimePendingAtomicContext } from './pendingAtomicContext'
 import type { ForegroundAgentContextPackage } from './foregroundAgentContextPackage'
 import type { ReactTaskRun } from './reactTaskTypes'
+import type { FormalPlaylistSnapshot } from './formalPlaylistState'
+
+export interface AgentMaterialEvidenceRecord {
+  id: string
+  source: 'react_observation' | 'runtime_feedback' | 'manual'
+  summary: string
+  query?: Record<string, unknown>
+  candidateCount?: number
+  createdAt: string
+  data?: Record<string, unknown>
+}
 
 export interface AgentServerSessionState {
   id: string
@@ -13,12 +24,14 @@ export interface AgentServerSessionState {
   pendingAtomicContext?: RuntimePendingAtomicContext | null
   activeReactTaskRun?: ReactTaskRun | null
   formalPlaylistVersion?: string | number
+  formalPlaylistSnapshot?: FormalPlaylistSnapshot | null
+  materialEvidence?: AgentMaterialEvidenceRecord[]
   eventLog: AgentServerSessionEvent[]
 }
 
 export interface AgentServerSessionEvent {
   id: string
-  type: 'session' | 'context' | 'decision' | 'pending' | 'react_task' | 'execution' | 'error'
+  type: 'session' | 'context' | 'decision' | 'pending' | 'react_task' | 'execution' | 'formal_write' | 'material_evidence' | 'task_progress' | 'error'
   summary: string
   createdAt: string
   data?: Record<string, unknown>
@@ -28,8 +41,11 @@ const createId = (prefix: string): string => `${prefix}_${Date.now()}_${Math.ran
 
 const nowIso = (): string => new Date().toISOString()
 
+type AgentServerSessionEventListener = (event: AgentServerSessionEvent) => void
+
 export class AgentServerSessionStore {
   private readonly sessions = new Map<string, AgentServerSessionState>()
+  private readonly listeners = new Map<string, Set<AgentServerSessionEventListener>>()
 
   createSession(): AgentServerSessionState {
     const now = nowIso()
@@ -89,11 +105,59 @@ export class AgentServerSessionStore {
       eventLog,
       updatedAt: nowIso(),
     })
+    this.listeners.get(session.id)?.forEach((listener) => listener(nextEvent))
     return nextEvent
+  }
+
+  appendMaterialEvidence(
+    sessionId: string,
+    evidence: Omit<AgentMaterialEvidenceRecord, 'id' | 'createdAt'>,
+  ): AgentMaterialEvidenceRecord {
+    const session = this.getOrCreateSession(sessionId)
+    const record: AgentMaterialEvidenceRecord = {
+      id: createId('material_evidence'),
+      createdAt: nowIso(),
+      ...evidence,
+    }
+    const materialEvidence = [...(session.materialEvidence ?? []), record].slice(-50)
+    this.sessions.set(session.id, {
+      ...session,
+      materialEvidence,
+      updatedAt: nowIso(),
+    })
+    this.appendEvent(session.id, {
+      type: 'material_evidence',
+      summary: record.summary,
+      data: {
+        source: record.source,
+        candidateCount: record.candidateCount,
+        query: record.query,
+      },
+    })
+    return record
+  }
+
+  subscribe(
+    sessionId: string,
+    listener: AgentServerSessionEventListener,
+  ): () => void {
+    const session = this.getOrCreateSession(sessionId)
+    const listeners = this.listeners.get(session.id) ?? new Set<AgentServerSessionEventListener>()
+    listeners.add(listener)
+    this.listeners.set(session.id, listeners)
+    return () => {
+      const currentListeners = this.listeners.get(session.id)
+      if (!currentListeners) return
+      currentListeners.delete(listener)
+      if (currentListeners.size === 0) {
+        this.listeners.delete(session.id)
+      }
+    }
   }
 
   reset(): void {
     this.sessions.clear()
+    this.listeners.clear()
   }
 }
 
