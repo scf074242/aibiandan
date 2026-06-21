@@ -145,7 +145,20 @@ export interface RuntimeExecutedResult { success: boolean; command: Orchestratio
 export interface RuntimeSubmitInput { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[]; currentLayoutDraft?: LayoutDraft | null; currentLayoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'> | null; analysisContext?: RuntimeAnalysisContext | null; pendingTargetSelection?: RuntimePendingTargetSelection | null; pendingInsertRecommendation?: RuntimePendingInsertRecommendation | null; pendingAtomicClarification?: RuntimePendingAtomicClarification | null; pendingAtomicContext?: RuntimePendingAtomicContext | null; activeReactTaskRun?: ReactTaskRun | null; foregroundContextPackage?: ForegroundAgentContextPackage; history?: string[]; agentCoreEnabled?: boolean; layoutDraftEnabled?: boolean; preferDraftFirstFormalOrchestration?: boolean; preferLayoutDraftRefine?: boolean; inputSource?: 'user' | 'quick_action' | 'system' }
 export interface RuntimeResolveTargetSelectionInput { channelId: string; date: string; pendingTargetSelection: RuntimePendingTargetSelection; scheduleState?: ScheduleState }
 export interface RuntimeResolveInsertRecommendationInput { scheduleState: ScheduleState; pendingInsertRecommendation: RuntimePendingInsertRecommendation; currentSchedule?: RuntimeScheduleItem[]; userInput?: string }
-export interface RuntimeExecutePendingCommandInput { pendingCommand: RuntimePendingCommand; scheduleDate: string; channelId: string }
+export interface RuntimeExecutePendingCommandInput {
+  pendingCommand: RuntimePendingCommand
+  scheduleDate: string
+  channelId: string
+  pendingId?: string
+  idempotencyKey?: string
+  foregroundStateVersion?: string | number
+  expectedPlaylistVersion?: string | number
+  batchCursor?: {
+    completedCount?: number
+    remainingCount?: number
+    nextIndex?: number
+  }
+}
 export interface RuntimeOrchestrationLifecycle {
   taskKind: 'full_day' | 'overall_refill' | 'local_refill'
   playlistModel: 'time_grid' | 'content_queue'

@@ -19,6 +19,7 @@ import {
   getAgentServerSessionStore,
   type AgentServerSessionState,
 } from './agentServerSessionStore'
+import { FormalPlaylistWriteAdapter } from './formalPlaylistWriteAdapter'
 
 export interface AgentServerRuntimeOptions {
   runtime?: Pick<SchedulingAgentRuntimeFacade,
@@ -28,6 +29,7 @@ export interface AgentServerRuntimeOptions {
     | 'resolvePendingInsertRecommendation'
   >
   sessions?: AgentServerSessionStore
+  formalPlaylistWrites?: FormalPlaylistWriteAdapter
 }
 
 export interface AgentServerRuntimeEnvelope<T> {
@@ -46,6 +48,7 @@ export interface AgentServerSessionPublicState {
   hasPendingCommand: boolean
   hasPendingAtomicContext: boolean
   activeReactTaskRun?: ReactTaskRun | null
+  formalPlaylistVersion?: string | number
   eventCount: number
 }
 
@@ -83,16 +86,21 @@ const serializeSession = (session: AgentServerSessionState): AgentServerSessionP
   hasPendingCommand: Boolean(session.pendingCommand),
   hasPendingAtomicContext: Boolean(session.pendingAtomicContext),
   activeReactTaskRun: session.activeReactTaskRun ?? null,
+  formalPlaylistVersion: session.formalPlaylistVersion,
   eventCount: session.eventLog.length,
 })
 
 export class AgentServerRuntime {
   private readonly runtime: NonNullable<AgentServerRuntimeOptions['runtime']>
   private readonly sessions: AgentServerSessionStore
+  private readonly formalPlaylistWrites: FormalPlaylistWriteAdapter
 
   constructor(options: AgentServerRuntimeOptions = {}) {
     this.runtime = options.runtime ?? new SchedulingAgentRuntimeFacade()
     this.sessions = options.sessions ?? getAgentServerSessionStore()
+    this.formalPlaylistWrites = options.formalPlaylistWrites ?? new FormalPlaylistWriteAdapter({
+      executePendingCommand: (input) => this.runtime.executePendingCommand(input),
+    })
   }
 
   createSession(): AgentServerSessionPublicState {
@@ -161,7 +169,10 @@ export class AgentServerRuntime {
     sessionId?: string | null,
   ): Promise<AgentServerRuntimeEnvelope<RuntimeExecutedResult>> {
     const session = this.sessions.getOrCreateSession(sessionId)
-    const result = await this.runtime.executePendingCommand(input)
+    const result = await this.formalPlaylistWrites.execute(input, {
+      sessionId: session.id,
+      actualPlaylistVersion: session.formalPlaylistVersion,
+    })
     const nextSession = this.sessions.updateSession(session.id, {
       pendingCommand: null,
       pendingAtomicContext: null,
@@ -173,6 +184,7 @@ export class AgentServerRuntime {
         success: result.success,
         summary: result.summary,
         error: result.error,
+        formalWrite: result.details?.formalWrite,
       },
     })
     return {

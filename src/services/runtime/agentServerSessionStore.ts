@@ -12,6 +12,7 @@ export interface AgentServerSessionState {
   pendingCommand?: RuntimePendingCommand | null
   pendingAtomicContext?: RuntimePendingAtomicContext | null
   activeReactTaskRun?: ReactTaskRun | null
+  formalPlaylistVersion?: string | number
   eventLog: AgentServerSessionEvent[]
 }
 

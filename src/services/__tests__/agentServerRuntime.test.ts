@@ -72,15 +72,19 @@ const reactTaskRun: ReactTaskRun = {
   updatedAt: '2026-03-25T00:00:00.000Z',
 }
 
-const createRuntime = (submitInstruction: (input: RuntimeSubmitInput) => Promise<RuntimeDecision>) => new AgentServerRuntime({
+const createRuntime = (
+  submitInstruction: (input: RuntimeSubmitInput) => Promise<RuntimeDecision>,
+  executePendingCommand = vi.fn(async (_input: RuntimeExecutePendingCommandInput) => ({
+    success: true,
+    command: { action: 'validate' } as never,
+    message: '已执行。',
+    summary: '执行播单校验',
+  })),
+) => new AgentServerRuntime({
   sessions: new AgentServerSessionStore(),
   runtime: {
     submitInstruction,
-    executePendingCommand: vi.fn(async (_input: RuntimeExecutePendingCommandInput) => ({
-      success: true,
-      command: { action: 'validate' } as never,
-      message: '已执行。',
-    })),
+    executePendingCommand,
     resolvePendingTargetSelection: vi.fn(async (_input: RuntimeResolveTargetSelectionInput) => messageDecision('已选择目标。')),
     resolvePendingInsertRecommendation: vi.fn(async (_input: RuntimeResolveInsertRecommendationInput) => messageDecision('已选择候选。')),
   },
@@ -164,5 +168,67 @@ describe('AgentServerRuntime migration boundary', () => {
     const stopped = runtime.stopReactTask(first.sessionId)
 
     expect(stopped?.activeReactTaskRun?.status).toBe('cancelled')
+  })
+
+  it('executes pending formal writes through the server write boundary', async () => {
+    const executePendingCommand = vi.fn(async (_input: RuntimeExecutePendingCommandInput) => ({
+      success: true,
+      command: { action: 'validate' } as never,
+      message: '已执行。',
+      summary: '执行播单校验',
+    }))
+    const runtime = createRuntime(async () => messageDecision(), executePendingCommand)
+
+    const result = await runtime.executePendingCommand({
+      pendingCommand: {
+        command: { action: 'validate' } as never,
+        summary: '执行播单校验',
+        reasoning: '用户确认执行。',
+      },
+      scheduleDate: '2026-03-25',
+      channelId: 'rotation',
+      idempotencyKey: 'pending-confirm-1',
+    })
+
+    expect(executePendingCommand).toHaveBeenCalledTimes(1)
+    expect(result.result?.details?.formalWrite).toMatchObject({
+      boundary: 'agent-server',
+      status: 'applied',
+      reused: false,
+      idempotencyKey: 'pending-confirm-1',
+    })
+    expect(runtime.getSessionEvents(result.sessionId).some((event) => (
+      event.type === 'execution'
+      && (event.data?.formalWrite as { boundary?: string } | undefined)?.boundary === 'agent-server'
+    ))).toBe(true)
+  })
+
+  it('does not execute the same idempotent pending write twice in one server session', async () => {
+    const executePendingCommand = vi.fn(async (_input: RuntimeExecutePendingCommandInput) => ({
+      success: true,
+      command: { action: 'validate' } as never,
+      message: '已执行。',
+      summary: '执行播单校验',
+    }))
+    const runtime = createRuntime(async () => messageDecision(), executePendingCommand)
+    const input: RuntimeExecutePendingCommandInput = {
+      pendingCommand: {
+        command: { action: 'validate' } as never,
+        summary: '执行播单校验',
+        reasoning: '用户确认执行。',
+      },
+      scheduleDate: '2026-03-25',
+      channelId: 'rotation',
+      idempotencyKey: 'pending-confirm-1',
+    }
+
+    const first = await runtime.executePendingCommand(input)
+    const second = await runtime.executePendingCommand(input, first.sessionId)
+
+    expect(executePendingCommand).toHaveBeenCalledTimes(1)
+    expect(second.result?.details?.formalWrite).toMatchObject({
+      status: 'reused',
+      reused: true,
+    })
   })
 })

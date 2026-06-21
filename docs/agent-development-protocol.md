@@ -170,6 +170,10 @@ Goal 39 是前端内嵌 runtime 的最后一条能力型扩展边界。ReAct 长
   - LLM prompt/context 必须优先在服务端重建，前台传入的 context 只能作为过渡材料。
   - ReAct task run 必须进入服务端 session，前台只负责展示和继续/停止事件。
   - 新增服务端能力优先扩展 Agent API 和 session store，不继续扩大 `ChatPanel.vue` 或 `DemoRuntimeFacade` 的总控职责。
+- Goal 40 阶段 4 起，正式播单写入必须优先经过 `FormalPlaylistWriteAdapter` 或同等 Agent API 写入边界：
+  - 迁移第一步只包裹现有 `executePendingCommand`，不得为了服务端化重写原子命令执行规则。
+  - 幂等、版本检查、批量失败恢复和审计元数据属于写入边界；节目选择、顺播、候选确认和原子命令校验仍由既有业务链路负责，直到它们被单独迁移。
+  - 如果新增正式写入能力，必须能解释它是否改变了旧行为；迁移任务默认不改变旧行为。
 - 前台 `ChatPanel` 只负责展示、输入、确认和工作区状态，不承担新的长程业务判断。
 - OpenClaw 仍只是外部访问方，不能成为服务端迁移或真实前台验证的阻塞条件。
 
