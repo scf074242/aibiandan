@@ -22,4 +22,12 @@ describe('LLMConfigPanel', () => {
     expect(panelSource).not.toContain('localStorage.setItem')
     expect(panelSource).not.toContain('localStorage.getItem')
   })
+
+  it('hides browser API key editing when the Agent runtime is server-managed', () => {
+    expect(panelSource).toContain("import { isHttpAgentRuntimeEnabled } from '@/services/runtime/agentRuntimeClient'")
+    expect(panelSource).toContain('const serverManagedLlm = isHttpAgentRuntimeEnabled()')
+    expect(panelSource).toContain('v-if="serverManagedLlm"')
+    expect(panelSource).toContain('LLM 配置由 Agent 服务端管理')
+    expect(panelSource).toContain('v-else ref="formRef"')
+  })
 })

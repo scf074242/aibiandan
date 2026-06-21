@@ -264,3 +264,27 @@
   - `npm run agent:server:lan`：办公网方式单独启动 Agent 服务。
 
 这个阶段不迁移业务执行逻辑，只先固定前后台协议边界。下一步才适合把 LLM 配置、prompt/context、ReAct task runtime 从本地 client 后面逐步移动到真正的 HTTP runtime。
+
+## 阶段 2 / 阶段 3 落地记录
+
+当前已开始把 LLM/context 和 ReAct runtime 往 Agent 服务端迁移：
+
+- 新增 `AgentServerRuntime`，服务端收到用户输入后会重新构建 `ForegroundAgentContextPackage`，不再只依赖前台传入的上下文包。
+- 新增 `AgentServerSessionStore`，服务端会保存会话、最近上下文、pending 状态、ReAct task run 和事件日志。
+- `scripts/agent-server.mjs` 已从健康检查骨架升级为 Agent API 入口：
+  - `POST /api/agent/sessions`
+  - `POST /api/agent/submit`
+  - `POST /api/agent/sessions/:sessionId/messages`
+  - `POST /api/agent/pending/execute`
+  - `POST /api/agent/pending/target-selection`
+  - `POST /api/agent/pending/insert-recommendation`
+  - `POST /api/agent/sessions/:sessionId/tasks/:taskId/continue`
+  - `POST /api/agent/sessions/:sessionId/tasks/:taskId/stop`
+  - `GET /api/agent/sessions/:sessionId/events`
+- 新增 `HttpAgentRuntimeClient`，前台可以通过 `VITE_AGENT_RUNTIME_MODE=http` 切到服务端 runtime；默认仍是本地 runtime，便于回归和渐进迁移。
+- HTTP runtime 模式下，前台不会把本地构建的 `foregroundContextPackage` 上传为决策依据；服务端 session 会重新构建上下文。
+- HTTP runtime 模式会把 `sessionId` 存入浏览器 `sessionStorage`，刷新页面后仍能接回同一个服务端会话和 ReAct task 状态。
+- LLM 配置读取已兼容 Node 服务端环境，服务端可通过 `CODE_PLAN_LLM_API_KEY` / `AGENT_LLM_API_KEY` 等环境变量读取密钥。
+- HTTP runtime 模式下，前台 LLM 配置面板不再显示或保存 API Key，只提示由服务端管理。
+
+这一步仍不迁移正式播单写入执行器。正式写入、批量幂等、版本冲突和失败恢复属于阶段 4。

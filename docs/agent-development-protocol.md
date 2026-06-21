@@ -166,6 +166,10 @@ Goal 39 是前端内嵌 runtime 的最后一条能力型扩展边界。ReAct 长
 
 - Goal 39 完成 ReAct 基础闭环后，不再新增前端专属的长程编排逻辑。
 - Goal 40 应开始拆服务端可访问边界：Agent API、会话状态、服务端 LLM key、素材检索 adapter、正式写入 adapter、匿名演示/权限边界。
+- Goal 40 的阶段 2/3 迁移方向已经落在 `AgentServerRuntime` / `AgentServerSessionStore` / `HttpAgentRuntimeClient`：
+  - LLM prompt/context 必须优先在服务端重建，前台传入的 context 只能作为过渡材料。
+  - ReAct task run 必须进入服务端 session，前台只负责展示和继续/停止事件。
+  - 新增服务端能力优先扩展 Agent API 和 session store，不继续扩大 `ChatPanel.vue` 或 `DemoRuntimeFacade` 的总控职责。
 - 前台 `ChatPanel` 只负责展示、输入、确认和工作区状态，不承担新的长程业务判断。
 - OpenClaw 仍只是外部访问方，不能成为服务端迁移或真实前台验证的阻塞条件。
 

@@ -1,6 +1,15 @@
 <template>
   <div class="llm-config-panel">
-    <el-form ref="formRef" :model="config" :rules="rules" label-position="top" class="config-form">
+    <el-alert
+      v-if="serverManagedLlm"
+      title="LLM 配置由 Agent 服务端管理"
+      description="当前前台不会保存或显示 API Key。需要调整模型或密钥时，请在服务端环境变量中配置。"
+      type="info"
+      :closable="false"
+      show-icon
+    />
+
+    <el-form v-else ref="formRef" :model="config" :rules="rules" label-position="top" class="config-form">
       <el-form-item label="API Key" prop="apiKey">
         <el-input v-model="config.apiKey" type="password" show-password placeholder="请输入 SiliconFlow API Key" />
       </el-form-item>
@@ -33,7 +42,7 @@
       </el-form-item>
     </el-form>
 
-    <div class="config-actions">
+    <div v-if="!serverManagedLlm" class="config-actions">
       <el-button type="primary" :loading="testing" @click="testConnection">测试连接</el-button>
       <el-button @click="saveConfigHandler">保存配置</el-button>
       <el-button @click="resetConfigHandler">重置</el-button>
@@ -52,10 +61,12 @@ import type { FormInstance, FormRules } from 'element-plus'
 import type { LLMConfig } from '@/types/llm'
 import { getDefaultConfig, loadLLMConfig, saveLLMConfig } from '@/services/llm/llmConfig'
 import { getLLMClient, resetLLMClient } from '@/services/llm/llmClient'
+import { isHttpAgentRuntimeEnabled } from '@/services/runtime/agentRuntimeClient'
 
 const formRef = ref<FormInstance>()
 const testing = ref(false)
 const testResult = ref<{ success: boolean; message: string } | null>(null)
+const serverManagedLlm = isHttpAgentRuntimeEnabled()
 
 const config = reactive<LLMConfig>({
   baseURL: 'https://api.siliconflow.cn/v1',

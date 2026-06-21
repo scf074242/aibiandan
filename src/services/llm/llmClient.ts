@@ -33,6 +33,11 @@ declare global {
   }
 }
 
+const isViteDevRuntime = (): boolean => {
+  const env = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env
+  return env?.DEV === true
+}
+
 export class LLMClient {
   private client: OpenAI | null = null
   private config: LLMConfig
@@ -193,7 +198,7 @@ export class LLMClient {
     traceLabel: string,
     startedAt: number,
   ): Promise<LLMResponse | null> {
-    if (!import.meta.env.DEV || typeof window === 'undefined') return null
+    if (!isViteDevRuntime() || typeof window === 'undefined') return null
     const mock = window.__AIBIANDAN_LLM_MOCK__
     if (typeof mock !== 'function') return null
 

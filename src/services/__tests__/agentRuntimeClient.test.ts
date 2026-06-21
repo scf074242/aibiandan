@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   getAgentRuntimeClient,
+  HttpAgentRuntimeClient,
   setAgentRuntimeClientForTests,
   type AgentRuntimeClient,
 } from '@/services/runtime/agentRuntimeClient'
@@ -9,6 +10,7 @@ import {
 describe('AgentRuntimeClient migration boundary', () => {
   afterEach(() => {
     setAgentRuntimeClientForTests(null)
+    vi.unstubAllGlobals()
   })
 
   it('exposes the foreground runtime through a replaceable client interface', async () => {
@@ -49,5 +51,77 @@ describe('AgentRuntimeClient migration boundary', () => {
       },
     })
     expect(client.submitInstruction).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a server session across HTTP runtime calls', async () => {
+    const storage = new Map<string, string>()
+    vi.stubGlobal('sessionStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        storage.set(key, value)
+      }),
+    })
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { sessionId?: string | null }
+      if (!body.sessionId) {
+        return new Response(JSON.stringify({
+          sessionId: 'agent-session-1',
+          decision: {
+            kind: 'message',
+            feedback: {
+              content: '服务端已接管上下文。',
+              processType: 'planning',
+              processTypeLabel: 'Agent Server',
+            },
+          },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        sessionId: body.sessionId,
+        result: {
+          success: true,
+          command: { action: 'validate' } as never,
+          message: '已执行。',
+        },
+      }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new HttpAgentRuntimeClient('http://agent.local')
+    await client.submitInstruction({
+      scheduleState: {
+        channelId: 'rotation',
+        channelName: '轮播单',
+        date: '2026-03-25',
+        isEmpty: true,
+        itemCount: 0,
+        gapCount: 0,
+        hasSelectedTimeRange: false,
+        playlistType: 'rotation',
+      },
+      userInput: '查询当前播单',
+      currentSchedule: [],
+      foregroundContextPackage: { latestUserInput: '前台不应上传这个上下文包' } as never,
+    })
+    await client.executePendingCommand({
+      pendingCommand: {
+        command: { action: 'validate' } as never,
+        summary: '执行校验',
+        reasoning: '用户确认执行。',
+      },
+      scheduleDate: '2026-03-25',
+      channelId: 'rotation',
+    })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'http://agent.local/api/agent/submit',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).input).not.toHaveProperty('foregroundContextPackage')
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
+      sessionId: 'agent-session-1',
+    })
+    expect(storage.get('aibiandan_agent_session_id')).toBe('agent-session-1')
   })
 })

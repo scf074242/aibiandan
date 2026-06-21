@@ -18,6 +18,16 @@ const DEPRECATED_AUTO_UPGRADE_MODELS = new Set([
   'deepseek-ai/DeepSeek-V3.2-Exp',
 ])
 
+const readRuntimeEnv = (key: string): string | undefined => {
+  const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
+  const viteValue = viteEnv?.[key]
+  if (viteValue) return viteValue
+  const nodeProcess = (globalThis as typeof globalThis & {
+    process?: { env?: Record<string, string | undefined> }
+  }).process
+  return nodeProcess?.env?.[key]
+}
+
 const migrateDeprecatedModel = (config: Partial<LLMConfig>): Partial<LLMConfig> => {
   if (typeof config.model === 'string' && DEPRECATED_AUTO_UPGRADE_MODELS.has(config.model)) {
     return {
@@ -48,11 +58,13 @@ const mergeStoredConfig = (
 }
 
 const readLocalConfig = (): Partial<LLMConfig> => {
+  if (typeof localStorage === 'undefined') return {}
   const stored = localStorage.getItem(STORAGE_KEY)
   return stored ? JSON.parse(stored) as Partial<LLMConfig> : {}
 }
 
 const writeLocalConfig = (config: Partial<LLMConfig>): void => {
+  if (typeof localStorage === 'undefined') return
   localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
 }
 
@@ -94,9 +106,9 @@ const resolveStoredConfig = (): Partial<LLMConfig> => {
 
 export function loadLLMConfig(): LLMConfig {
   const envConfig: Partial<LLMConfig> = {
-    baseURL: import.meta.env.VITE_CODE_PLAN_LLM_BASE_URL,
-    apiKey: import.meta.env.VITE_CODE_PLAN_LLM_API_KEY,
-    model: import.meta.env.VITE_CODE_PLAN_LLM_MODEL,
+    baseURL: readRuntimeEnv('VITE_CODE_PLAN_LLM_BASE_URL') ?? readRuntimeEnv('CODE_PLAN_LLM_BASE_URL') ?? readRuntimeEnv('AGENT_LLM_BASE_URL'),
+    apiKey: readRuntimeEnv('VITE_CODE_PLAN_LLM_API_KEY') ?? readRuntimeEnv('CODE_PLAN_LLM_API_KEY') ?? readRuntimeEnv('AGENT_LLM_API_KEY'),
+    model: readRuntimeEnv('VITE_CODE_PLAN_LLM_MODEL') ?? readRuntimeEnv('CODE_PLAN_LLM_MODEL') ?? readRuntimeEnv('AGENT_LLM_MODEL'),
   }
 
   let storedConfig: Partial<LLMConfig> = {}
