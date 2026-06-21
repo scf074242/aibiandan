@@ -311,4 +311,25 @@ describe('LayoutDraftService', () => {
       programType: 'news_magazine',
     })
   })
+
+  it('需要模型拆结构的草案生成超时时不会悄悄回退成成功草案', async () => {
+    const service = new LayoutDraftService({
+      chat: vi.fn(async () => {
+        throw new Error('LLM request failed after 1 attempt: LLM 网络请求超时，请检查网络或稍后重试。')
+      }),
+    } as never)
+
+    await expect(service.generateSpec({
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      userInput: '帮我策划一个3小时轮播单，第一小时静安寺，第二小时商圈，第三小时天主教堂',
+    })).rejects.toMatchObject({
+      llmFailure: {
+        stage: 'layout_draft_generate',
+        reason: 'timeout',
+        canRetry: true,
+      },
+    })
+  })
 })

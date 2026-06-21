@@ -58,6 +58,7 @@ describe('InsertCandidateResolver', () => {
     }
     expect(result.candidates[0]?.candidate.programName).toContain('东方新闻')
     expect(result.confidence).toBeGreaterThanOrEqual(0.75)
+    expect(result.reasoning).not.toMatch(/置信度|匹配度/u)
   })
 
   it('模糊节目名会进入推荐确认态', async () => {
@@ -91,6 +92,7 @@ describe('InsertCandidateResolver', () => {
     }
     expect(result.trigger).toBe('ambiguous_candidates')
     expect(result.candidates.length).toBeGreaterThan(1)
+    expect(result.reasoning).not.toMatch(/置信度|匹配度/u)
   })
 
   it('只有类型描述时会给出推荐列表', async () => {

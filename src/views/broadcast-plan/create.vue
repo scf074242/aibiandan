@@ -503,13 +503,6 @@
                   {{ layoutDraftWorkspaceSubtitle }}
                 </p>
               </div>
-              <el-tag
-                v-if="currentLayoutDraftFeasibility"
-                type="primary"
-                effect="light"
-              >
-                {{ currentLayoutDraftFeasibility.ok ? '可进入编排' : '需调整' }}
-              </el-tag>
             </div>
             <div v-if="layoutDraftStrategySummary" class="layout-draft-strategy-summary">
               <div class="layout-draft-strategy-kicker">{{ layoutDraftStrategySummary.kicker }}</div>
@@ -712,7 +705,10 @@ type PlaylistDocumentState = {
 }
 
 // AI 编排相关导入
-import { getAtomicCapabilities } from '@/services/atomicCapabilities'
+import {
+  failNextAtomicReplaceAllItemsForHarness,
+  getAtomicCapabilities,
+} from '@/services/atomicCapabilities'
 import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
 import { getManualCommandAdapter } from '@/services/manualCommandAdapter'
 import { getCandidateService } from '@/services/candidateService'
@@ -1360,10 +1356,101 @@ const handleCreatePlaylist = (type: Exclude<PlaylistType, 'none'>) => {
   scheduleItems.value = []
   currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : null
   currentLayoutDraftFeasibility.value = null
-  activeWorkspaceTab.value = 'schedule'
+  activeWorkspaceTab.value = type === 'tv' && currentLayoutDraft.value ? 'draft' : 'schedule'
   persistCurrentPlaylistDocument()
   updateScrollMetrics()
   ElMessage.success(type === 'tv' ? '已新建电视播单' : '已新建轮播单')
+}
+
+type BrowserHarnessPlaylistType = Exclude<PlaylistType, 'none'>
+type BrowserHarnessScheduleItem = Partial<ScheduleItem> & {
+  durationSeconds?: number
+}
+
+const createBrowserHarnessScheduleItem = (
+  item: BrowserHarnessScheduleItem,
+  index: number,
+  type: BrowserHarnessPlaylistType,
+): ScheduleItem => {
+  const startTime = item.startTime ?? (type === 'rotation' ? secondsToClockText(index * 1800) : '09:00:00')
+  const endTime = item.endTime ?? (type === 'rotation' ? secondsToClockText((index + 1) * 1800) : '09:30:00')
+  const durationSeconds = item.durationSeconds ?? Math.max(60, timeToSeconds(endTime) - timeToSeconds(startTime))
+  const durationMinutes = Math.max(1, Math.round(durationSeconds / 60))
+  const programCode = item.programCode || item.code18 || `HARNESS-${type}-${index + 1}`
+  const programName = item.programName || item.instanceName || `测试节目${index + 1}`
+
+  return {
+    id: item.id || `harness-${type}-${index + 1}`,
+    scheduleId: scheduleForm.value.id || '',
+    startTime,
+    endTime,
+    relativeStart: item.relativeStart ?? (type === 'rotation' ? startTime : '00:00:00'),
+    playLength: item.playLength ?? formatPlayLengthText(durationSeconds),
+    duration: item.duration ?? durationMinutes,
+    programCode,
+    code18: item.code18 || programCode,
+    programName,
+    instanceName: item.instanceName || programName,
+    programType: item.programType || 'news_magazine',
+    businessType: item.businessType || 'program',
+    sourceType: item.sourceType || 'record',
+    sortOrder: item.sortOrder ?? index + 1,
+    materialStatus: item.materialStatus || 'ready',
+    materialName: item.materialName || `${programCode}-MAT`,
+    remark: item.remark || 'Goal 38 浏览器场景前置数据',
+  }
+}
+
+const seedBrowserHarnessSchedule = (
+  type: BrowserHarnessPlaylistType,
+  items: BrowserHarnessScheduleItem[],
+  options?: { rotationDurationSeconds?: number },
+) => {
+  persistCurrentPlaylistDocument()
+  currentPlaylistId.value = createLocalPlaylistId(type)
+  playlistType.value = type
+  rotationStrategy.value = type === 'rotation' ? 'content_match' : rotationStrategy.value
+  rotationTargetDurationSeconds.value = type === 'rotation' ? options?.rotationDurationSeconds ?? null : null
+  scheduleItems.value = items.map((item, index) => createBrowserHarnessScheduleItem(item, index, type))
+  currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : null
+  currentLayoutDraftFeasibility.value = null
+  activeWorkspaceTab.value = 'schedule'
+  if (type === 'rotation') {
+    currentBroadcastWindow.value = {
+      startTime: '00:00:00',
+      endTime: secondsToClockText(options?.rotationDurationSeconds ?? scheduleItems.value.reduce((sum, item) => sum + Math.max(60, timeToSeconds(item.endTime) - timeToSeconds(item.startTime)), 0)),
+    }
+  } else {
+    void syncCurrentBroadcastWindow()
+  }
+  syncPageItemsToAtomic()
+  persistCurrentPlaylistDocument()
+  refreshValidationReport()
+  updateScrollMetrics()
+}
+
+const installBrowserHarness = () => {
+  if (!import.meta.env.DEV || typeof window === 'undefined') return
+  const harnessWindow = window as Window & {
+    __AIBIANDAN_PAGE_HARNESS__?: {
+      seedTvSchedule: (items: BrowserHarnessScheduleItem[]) => void
+      seedRotationSchedule: (items: BrowserHarnessScheduleItem[], options?: { rotationDurationSeconds?: number }) => void
+      failNextAtomicReplaceAllItems: (message?: string) => void
+      getState: () => Record<string, unknown>
+    }
+  }
+  harnessWindow.__AIBIANDAN_PAGE_HARNESS__ = {
+    seedTvSchedule: (items) => seedBrowserHarnessSchedule('tv', items),
+    seedRotationSchedule: (items, options) => seedBrowserHarnessSchedule('rotation', items, options),
+    failNextAtomicReplaceAllItems: (message) => failNextAtomicReplaceAllItemsForHarness(message),
+    getState: () => ({
+      playlistType: playlistType.value,
+      currentPlaylistId: currentPlaylistId.value,
+      itemCount: scheduleItems.value.length,
+      layoutDraftSegments: currentLayoutDraft.value?.layoutReference.slots.length ?? 0,
+      activeWorkspaceTab: activeWorkspaceTab.value,
+    }),
+  }
 }
 
 const handlePlaylistStateChanged = (payload: {
@@ -1416,7 +1503,7 @@ const handlePlaylistStateChanged = (payload: {
     void syncCurrentBroadcastWindow()
   }
   if (payload.playlistType !== 'none') {
-    activeWorkspaceTab.value = 'schedule'
+    activeWorkspaceTab.value = payload.playlistType === 'tv' && currentLayoutDraft.value ? 'draft' : 'schedule'
     persistCurrentPlaylistDocument()
     updateScrollMetrics()
   }
@@ -1970,7 +2057,7 @@ const describeLayoutDraftSegment = (
 ) => {
   if (!column) return '等待补充栏目或节目名称。'
   if (playlistType.value !== 'tv') {
-    return column.selectionPolicy?.notes?.[0] ?? '按当前轮播需求选择候选内容。'
+    return column.selectionPolicy?.notes?.[0] ?? '按当前轮播需求组织内容。'
   }
   return ''
 }
@@ -1981,28 +2068,14 @@ const formatLayoutDraftSegmentLabel = (
 ) => column?.semanticLabel ?? column?.columnName ?? fallbackLabel
 
 const layoutDraftWorkspaceSegments = computed(() => {
-  const draft = currentLayoutDraft.value
-  if (!draft) return []
-  return draft.layoutReference.slots.map((slot, index) => {
-    const column = draft.columns[index]
-    const durationSegment = draft.durationSegments?.find((segment) => segment.id === slot.id) ?? draft.durationSegments?.[index]
-    const feasibility = currentLayoutDraftFeasibility.value?.segments.find((segment) => segment.segmentId === slot.id)
-    const status = feasibility?.status ?? 'ready'
-    const matchedCount = feasibility?.matchedCandidateCount ?? 0
-    const intent = playlistType.value === 'tv'
-      ? ''
-      : status === 'blocked'
-      ? feasibility?.reasons[0] ?? '当前时段暂不可编排。'
-      : describeLayoutDraftSegment(column)
-    const statusText = playlistType.value === 'tv'
-      ? ''
-      : status === 'blocked'
-        ? '不可编排'
-        : status === 'warning'
-          ? '候选较少'
-          : matchedCount > 0
-            ? `候选 ${matchedCount}`
-            : ''
+    const draft = currentLayoutDraft.value
+    if (!draft) return []
+    return draft.layoutReference.slots.map((slot, index) => {
+      const column = draft.columns[index]
+      const durationSegment = draft.durationSegments?.find((segment) => segment.id === slot.id) ?? draft.durationSegments?.[index]
+    const status = 'ready'
+    const intent = playlistType.value === 'tv' ? '' : describeLayoutDraftSegment(column)
+    const statusText = ''
     return {
       id: slot.id,
       timeRange: isRotationLayoutDraft.value && durationSegment
@@ -2121,6 +2194,7 @@ onMounted(async () => {
   refreshValidationReport()
   await syncCurrentBroadcastWindow()
   updateScrollMetrics()
+  installBrowserHarness()
 })
 
 watch(
@@ -2208,6 +2282,9 @@ onBeforeUnmount(() => {
   if (resizeRaf) cancelAnimationFrame(resizeRaf)
   if (focusScrollResetTimer) {
     window.clearTimeout(focusScrollResetTimer)
+  }
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    delete (window as Window & { __AIBIANDAN_PAGE_HARNESS__?: unknown }).__AIBIANDAN_PAGE_HARNESS__
   }
   focusRuntime.dispose()
 })

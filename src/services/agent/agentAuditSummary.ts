@@ -245,7 +245,6 @@ const describeIntentInterpretation = (
   if (!interpretation) return '意图理解：来源=能力包兜底'
   return [
     `意图理解：来源=${interpretation.source}`,
-    `置信度=${interpretation.confidence}`,
     `LLM=${interpretation.llmUsed ? '是' : '否'}`,
     interpretation.pendingAction ? `待处理动作=${interpretation.pendingAction}` : '',
     interpretation.slotKeys.length ? `槽位=${interpretation.slotKeys.join('|')}` : '',
@@ -546,7 +545,7 @@ const buildEvidenceConclusion = (
   signalCodes: string[],
 ): string => {
   if (evidence.source === 'none' || !evidence.available) {
-    return `${sourceRoles[sourceKey]}缺失或不可用，这一类证据的判断置信度会降低。`
+    return `${sourceRoles[sourceKey]}缺失或不可用，这一类判断证据会变少。`
   }
   if (signalCodes.length > 0) {
     return `${sourceRoles[sourceKey]}参与了 ${signalCodes.join(', ')} 判断。`

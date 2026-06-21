@@ -37,6 +37,21 @@ const buildLlmVisibleIdentity = (context: SchedulingContext): AgentLlmContextPac
   }
 }
 
+const buildPlaylistSemantics = (context: SchedulingContext): AgentLlmContextPackage['playlistSemantics'] =>
+  context.bundle.identity.playlistType === 'rotation'
+    ? {
+        model: 'content_queue',
+        positionMeaning: '轮播单按内容队列处理，时间表示从0点起算的相对位置，不绑定频道日期播出时段。',
+        draftBoundary: '轮播整体编排和整体补排需要草案；单条插入、删除、移动、替换、查询、校验可以不依赖草案。',
+        writeBoundary: '轮播候选自由度较高，插入和替换通常先给候选或待确认，不让模型直接替用户选最终节目。',
+      }
+    : {
+        model: 'time_grid',
+        positionMeaning: '电视播单按频道日期的播出时间格处理，时间表示真实播出时钟。',
+        draftBoundary: '电视全天编排和整体补排需要频道版面草案；普通原子操作不因草案存在而改写草案。',
+        writeBoundary: '电视写入必须守住时间冲突、顺播、锁定、版权和多候选确认边界。',
+      }
+
 export const buildAgentLlmContextPackage = (
   context: SchedulingContext,
   focusInput?: FocusInput,
@@ -49,6 +64,7 @@ export const buildAgentLlmContextPackage = (
 
   return {
     identity: buildLlmVisibleIdentity(context),
+    playlistSemantics: buildPlaylistSemantics(context),
     budget: {
       scheduleItems: {
         included: currentSchedule.length,

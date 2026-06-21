@@ -80,6 +80,75 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
     expect(confirmed.result.executionResult?.scheduleItems.map((item) => item.programName)).toEqual(['东方新闻'])
   })
 
+  it('keeps a failed batch delete recoverable and retries the same batch on continue', async () => {
+    const facade = new DemoRuntimeFacade()
+    const currentSchedule = [
+      createItem('item-east-1', '看东方', '2026-03-25T07:00:00+08:00', '2026-03-25T09:00:00+08:00'),
+      createItem('item-news', '东方新闻', '2026-03-25T18:30:00+08:00', '2026-03-25T19:00:00+08:00'),
+      createItem('item-east-2', '看东方 午间版', '2026-03-25T22:00:00+08:00', '2026-03-25T22:30:00+08:00'),
+    ]
+
+    const first = await facade.submitInstruction({
+      scheduleState: createScheduleState({ itemCount: currentSchedule.length }),
+      userInput: '把全部看东方节目删除掉',
+      currentSchedule,
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: false,
+    })
+
+    expect(first.kind).toBe('pending_atomic_context')
+    if (first.kind !== 'pending_atomic_context') throw new Error('expected pending composite task')
+
+    const capabilities = getAtomicCapabilities()
+    const replaceAllItemsSpy = vi.spyOn(capabilities, 'replaceAllItems').mockResolvedValueOnce({
+      success: false,
+      message: '模拟写回失败',
+    } as any)
+
+    const failed = await facade.submitInstruction({
+      scheduleState: createScheduleState({ itemCount: currentSchedule.length }),
+      userInput: '确认',
+      currentSchedule,
+      history: ['把全部看东方节目删除掉'],
+      pendingAtomicContext: first.pendingAtomicContext,
+      agentCoreEnabled: true,
+      layoutDraftEnabled: false,
+    })
+
+    expect(failed.kind).toBe('agent_execution')
+    if (failed.kind !== 'agent_execution') throw new Error('expected failed execution')
+    expect(failed.result.status).toBe('failed')
+    expect(failed.result.executionResult?.committed).toBe(false)
+    expect((failed.result.executionResult?.scheduleItems ?? []).map((item) => item.programName)).toEqual([
+      '看东方',
+      '东方新闻',
+      '看东方 午间版',
+    ])
+    expect(failed.pendingAtomicContext?.compositeTaskRun?.status).toBe('waiting_confirm')
+    expect(failed.pendingAtomicContext?.compositeTaskRun?.loopCount).toBe(1)
+    expect(failed.feedback.content).toContain('继续')
+    expect((failed.feedback.details?.recovery as any)?.canRetry).toBe(true)
+
+    replaceAllItemsSpy.mockRestore()
+
+    const retried = await facade.submitInstruction({
+      scheduleState: createScheduleState({ itemCount: currentSchedule.length }),
+      userInput: '继续',
+      currentSchedule,
+      history: ['把全部看东方节目删除掉', '确认'],
+      pendingAtomicContext: failed.pendingAtomicContext,
+      agentCoreEnabled: true,
+      layoutDraftEnabled: false,
+    })
+
+    expect(retried.kind).toBe('agent_execution')
+    if (retried.kind !== 'agent_execution') throw new Error('expected retry execution')
+    expect(retried.result.status).toBe('executed')
+    expect(retried.pendingAtomicContext).toBeUndefined()
+    expect(retried.result.executionResult?.scheduleItems.map((item) => item.programName)).toEqual(['东方新闻'])
+  })
+
   it('compacts a rotation playlist queue after confirmed batch deletion', async () => {
     const facade = new DemoRuntimeFacade()
     const currentSchedule = [

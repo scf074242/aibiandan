@@ -611,7 +611,7 @@ describe('chatPanelDetails', () => {
 
     expect(summary).toContainEqual(expect.objectContaining({
       label: '参考信息',
-      value: expect.stringContaining('下一轮将合并'),
+      value: expect.stringContaining('插入'),
     }))
     const llmContext = summary.find((item) => item.label === '参考信息')?.value ?? ''
     expect(llmContext).toContain('插入')
@@ -619,10 +619,10 @@ describe('chatPanelDetails', () => {
     expect(llmContext).toContain('还需：确认')
     expect(llmContext).toContain('已收集：目标时间、节目线索、候选节目')
     expect(llmContext).toContain('候选 1 个')
-    expect(llmContext).toContain('参考：今日编排、候选节目、历史编排、播单策略')
-    expect(llmContext).toContain('今日编排示例：09:00:00-09:30:00 Morning News NEWS0900 news')
-    expect(llmContext).toContain('候选节目示例：Replacement News')
-    expect(llmContext).toContain('可选：确认、拒绝、开始新任务、取消当前任务')
+    expect(llmContext).not.toContain('下一轮将合并')
+    expect(llmContext).not.toContain('参考：')
+    expect(llmContext).not.toContain('示例：')
+    expect(llmContext).not.toContain('可选：')
   })
 
   it('surfaces the pending LLM context that was used by the current turn', () => {
@@ -651,11 +651,12 @@ describe('chatPanelDetails', () => {
     }, summaryDeps)
 
     const llmContext = summary.find((item) => item.label === '参考信息')?.value ?? ''
-    expect(llmContext).toContain('本轮已合并')
     expect(llmContext).toContain('替换')
     expect(llmContext).toContain('还需：目标时间')
     expect(llmContext).toContain('目标 1 个')
     expect(llmContext).toContain('已结合本轮输入')
+    expect(llmContext).not.toContain('本轮已合并')
+    expect(llmContext).not.toContain('下一轮将合并')
   })
 
   it('surfaces successful candidate search keywords from Agent audit context', () => {

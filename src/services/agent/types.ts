@@ -202,6 +202,12 @@ export interface AgentLlmContextIdentity {
 
 export interface AgentLlmContextPackage {
   identity: AgentLlmContextIdentity
+  playlistSemantics: {
+    model: 'time_grid' | 'content_queue'
+    positionMeaning: string
+    draftBoundary: string
+    writeBoundary: string
+  }
   budget: {
     scheduleItems: {
       included: number

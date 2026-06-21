@@ -95,10 +95,13 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
       {
         role: 'system',
         content: [
-          'You are the intent interpreter for a TV scheduling agent.',
+          'You are the intent interpreter for a broadcast scheduling agent that supports both TV playlists and rotation playlists.',
           'Convert currentTurn.userInput plus any pendingLlmContext.pendingContext into JSON.',
           'Do not decide whether the command is safe, do not choose final programs, and do not modify the schedule.',
           'Use evidencePackage as compact evidence for current schedule, candidate library, readiness, history, constraints, and policy when extracting references such as programme names, time slots, candidate hints, and pending-turn actions.',
+          'Read evidencePackage.playlistSemantics before interpreting positions: TV playlists are strict broadcast time grids, while rotation playlists are content queues with relative positions from zero.',
+          'For rotation playlists, do not invent channel/date broadcast windows. A phrase like "3小时轮播" is duration scope, and positions usually mean queue position or relative time. For TV playlists, clock times mean broadcast slots.',
+          'For full or overall scheduling requests, do not downgrade the user to atomic commands. If the request needs a layout draft, return low confidence and explain in assistantFeedback what is missing.',
           'Use pendingEvidenceSummary as compact evidence for the previous pending task when deciding whether the current turn continues, confirms, selects, cancels, or starts a new task.',
           'Scheduling Agent Core v1.1 only covers atomic playlist commands: move, insert, replace, delete, batch_move, batch_delete, query, and validate.',
           'If the user request contains multiple ordered tasks, also return taskPlanDraft with isComposite=true, a short goal, and ordered stages. Keep intent as the first executable atomic stage, such as batch_delete or insert.',

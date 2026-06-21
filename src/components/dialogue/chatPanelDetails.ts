@@ -399,36 +399,28 @@ const formatAgentPendingLlmContextText = (details?: DetailMap): string => {
   const pendingContext = toDetailMap(context.pendingContext)
   if (!pendingContext) return ''
 
-  const mode = details?.agentLlmContextUsed ? '本轮已合并' : '下一轮将合并'
   const intent = typeof pendingContext.intent === 'string' ? pendingContext.intent : ''
   const phase = typeof pendingContext.phase === 'string' ? pendingContext.phase : ''
   const missingSlots = getStringList(pendingContext.missingSlots)
-  const allowedActions = getStringList(context.allowedActions)
   const collectedSlots = toDetailMap(pendingContext.collectedSlots)
   const collectedSlotKeys = collectedSlots
     ? Object.keys(collectedSlots).filter((key) => collectedSlots[key] !== undefined && collectedSlots[key] !== null)
     : []
   const recommendations = Array.isArray(pendingContext.recommendations) ? pendingContext.recommendations : []
   const targetOptions = Array.isArray(pendingContext.targetOptions) ? pendingContext.targetOptions : []
-  const sourceKeys = formatAgentPendingContextSourceKeys(pendingContext.contextSources)
-  const evidenceText = formatAgentPendingContextEvidenceText(pendingContext.contextSources)
   const latestUserInput = typeof context.latestUserInput === 'string' && context.latestUserInput.trim()
     ? '已结合本轮输入'
     : ''
 
   return truncateText([
-    mode,
     intent ? `${INTENT_LABELS[intent] ?? intent}` : '',
     phase ? `${PHASE_LABELS[phase] ?? phase}` : '',
     missingSlots.length > 0 ? `还需：${formatMappedList(missingSlots, SLOT_LABELS)}` : '参数已齐',
     collectedSlotKeys.length > 0 ? `已收集：${formatMappedList(collectedSlotKeys, SLOT_LABELS)}` : '',
     recommendations.length > 0 ? `候选 ${recommendations.length} 个` : '',
     targetOptions.length > 0 ? `目标 ${targetOptions.length} 个` : '',
-    sourceKeys.length > 0 ? `参考：${formatMappedList(sourceKeys, SOURCE_LABELS)}` : '',
-    evidenceText,
-    allowedActions.length > 0 ? `可选：${formatMappedList(allowedActions, ACTION_LABELS)}` : '',
     latestUserInput,
-  ].filter(Boolean).join('; '), 420)
+  ].filter(Boolean).join('；'), 160)
 }
 
 const formatAgentConstraintHandlingText = (details?: DetailMap): string => {
@@ -707,60 +699,6 @@ const formatAgentCapabilityText = (details?: DetailMap): string => {
 
 const getAgentOperationalReadiness = (details?: DetailMap): DetailMap | undefined =>
   toDetailMap(details?.agentOperationalReadiness)
-
-const formatAgentPendingContextSourceKeys = (value: unknown): string[] => {
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => toDetailMap(item))
-      .map((item) => {
-        const sourceKey = typeof item?.sourceKey === 'string' ? item.sourceKey : ''
-        const key = typeof item?.key === 'string' ? item.key : ''
-        return sourceKey || key
-      })
-      .filter(Boolean)
-      .slice(0, 6)
-  }
-
-  const contextSources = toDetailMap(value)
-  return contextSources
-    ? Object.entries(contextSources)
-      .filter(([, source]) => Boolean(source))
-      .map(([key]) => key)
-      .slice(0, 6)
-    : []
-}
-
-const formatAgentPendingContextEvidenceText = (value: unknown): string => {
-  const entries = Array.isArray(value)
-    ? value.map((item) => {
-        const source = toDetailMap(item)
-        const sourceKey = typeof source?.sourceKey === 'string'
-          ? source.sourceKey
-          : typeof source?.key === 'string'
-            ? source.key
-            : ''
-        return { sourceKey, source }
-      })
-    : Object.entries(toDetailMap(value) ?? {}).map(([sourceKey, source]) => ({
-        sourceKey,
-        source: toDetailMap(source),
-      }))
-
-  const evidence = entries
-    .map(({ sourceKey, source }) => {
-      const samples = Array.isArray(source?.samples)
-        ? source.samples.filter((sample): sample is string => typeof sample === 'string' && sample.trim().length > 0)
-        : []
-      const sample = samples[0]
-      const label = SOURCE_LABELS[sourceKey] ?? sourceKey
-      return sourceKey && sample ? `${label}示例：${truncateText(sample, 52)}` : ''
-    })
-    .filter(Boolean)
-    .slice(0, 4)
-    .join('；')
-
-  return evidence
-}
 
 const formatAgentOperationalReadinessText = (details?: DetailMap): string => {
   const readiness = getAgentOperationalReadiness(details)

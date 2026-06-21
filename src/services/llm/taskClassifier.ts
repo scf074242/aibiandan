@@ -9,6 +9,7 @@ import type { ChatMessage } from '@/types/llm'
 import { looksLikeProgramSchedulingRequest, parseSchedulingTimeRange } from '@/services/schedulingIntentHeuristics'
 import type { ForegroundAgentContextPackage } from '@/services/runtime/foregroundAgentContextPackage'
 import { LLMClient } from './llmClient'
+import { buildLlmFailureInfo } from './llmFailure'
 
 export interface TaskClassifierInput {
   scheduleState: ScheduleState
@@ -352,13 +353,25 @@ export class TaskClassifier {
         traceLabel: 'task_classification',
       })
 
-      return this.parseClassificationResponse(response.content)
+      return this.parseClassificationResponse(response?.content ?? '')
     } catch (error) {
       console.error('LLM classification failed:', error)
+      const errorMessage = error instanceof Error ? error.message : String(error ?? '')
+      if (!/LLM request failed|超时|timeout|timed out|network|fetch|not initialized|not configured|api key|configuration|配置|密钥/i.test(errorMessage)) {
+        return {
+          mode: 'clarify',
+          confidence: 0,
+          reasoning: '解析分类结果失败，需要进一步澄清。',
+        }
+      }
+      const llmFailure = buildLlmFailureInfo('task_classification', error)
       return {
         mode: 'clarify',
         confidence: 0,
-        reasoning: 'LLM 分类失败，需要进一步澄清。',
+        reasoning: llmFailure.message,
+        suggestedParams: {
+          llmFailure,
+        },
       }
     }
   }
@@ -381,6 +394,9 @@ export class TaskClassifier {
 - 用户提到“全天编排”“补齐空窗”“填充节目单”这类正式编排话术时，返回 full_generate 或 partial_generate；只有用户明确说“参考草案/按版面/用草案”时，才会把草案带入编排。
 - 如果用户在描述“某个时段按某类内容铺排版面”，优先判断为 layout_prepare 或 layout_refine。
 - 如果用户说“准备一个/制作一份/生成一份”某个时长的轮播单、直播轮播单、户外直播轮播单，轮播单只表示总时长，不绑定具体日期和频道时间段；例如“14:00到15:00的静安寺户外直播轮播单”应理解为总时长 1 小时，从 0 点起算。
+- 轮播草案是内容队列。用户给出“第一小时/第二小时/每条10分钟/拆成16条/分三段”等结构，或让你“帮我策划怎么排”时，由你负责提出草案区块划分；请在 suggestedParams.segments 中返回每个区块，start/end 用从 00:00:00 起算的相对时长。
+- 不要把多个明确区块合并成一句 semanticLabel。比如“第一个小时A，第二个小时B，第三个小时C”必须返回 3 个 segments；“16条，每条10分钟”必须返回 16 个 segments，semanticLabel 写每条具体内容或区块主题。
+- 如果用户只给出总时长和大主题、没有要求拆分，也可以先返回一个总主题草案；如果用户说不知道怎么排，则你要给出可供用户审看的结构化草案建议，而不是直接澄清。
 - 对地点、活动、户外直播等开放业务短语，不要要求用户改成固定节目类型；可把 suggestedParams.userIntent 保留为原始业务意图。电视播单可给 targetTimeRange；轮播单不要给 targetTimeRange，应给 rotationDurationSeconds。
 - 对节目单、编排单、串联单、特别报道、主题活动、商圈/会场直播、节庆/赛事预热等开放业务话术，只要用户是在请求排播、生成、补排、调整、校验、分析或修复，都必须映射到上述已有模式；信息不足时返回 clarify，但不要当成非编排闲聊。
 - 只处理电视、广播、新媒体轮播、演播室、节目单/版面/素材排播相关任务。写文案、订票、股票、天气查询、写代码、做 PPT、做海报、闲聊等非编排域请求返回 clarify，并说明不进入编排流程。
@@ -398,7 +414,16 @@ export class TaskClassifier {
     "userIntent": "解析后的用户意图",
     "targetTimeRange": { "start": "13:00:00", "end": "18:00:00" },
     "rotationDurationSeconds": 3600,
-    "ignoreExistingLayout": false
+    "ignoreExistingLayout": false,
+    "segments": [
+      {
+        "start": "00:00:00",
+        "end": "01:00:00",
+        "semanticLabel": "静安区静安寺宣传片",
+        "programTypeHint": "news_magazine",
+        "sequential": false
+      }
+    ]
   }
 }`
 
@@ -455,6 +480,10 @@ ${history?.length ? `【历史对话】\n${history.join('\n')}` : ''}`
     ruleResult: TaskClassification,
     llmResult: TaskClassification,
   ): TaskClassification {
+    if (llmResult.suggestedParams?.llmFailure) {
+      return llmResult
+    }
+
     if (llmResult.confidence >= 0.6) {
       return {
         ...llmResult,

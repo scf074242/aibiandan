@@ -1085,6 +1085,12 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
         rotationStrategy: 'content_match',
         positionBasis: 'relative_from_zero',
       },
+      playlistSemantics: {
+        model: 'content_queue',
+        positionMeaning: expect.stringContaining('内容队列'),
+        draftBoundary: expect.stringContaining('整体编排和整体补排需要草案'),
+        writeBoundary: expect.stringContaining('候选或待确认'),
+      },
       currentSchedule: [
         expect.objectContaining({
           itemId: 'item-anchor',
@@ -1166,6 +1172,10 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     expect(systemPrompt).toContain('slots.targetProgramName')
     expect(systemPrompt).toContain('删除看东方')
     expect(systemPrompt).toContain('pendingEvidenceSummary')
+    expect(systemPrompt).toContain('broadcast scheduling agent that supports both TV playlists and rotation playlists')
+    expect(systemPrompt).toContain('TV playlists are strict broadcast time grids')
+    expect(systemPrompt).toContain('rotation playlists are content queues')
+    expect(systemPrompt).toContain('return low confidence and explain in assistantFeedback what is missing')
     expect(systemPrompt).toContain('only covers atomic playlist commands')
     expect(systemPrompt).toContain('layout drafts, full-day auto scheduling, or multi-user collaboration')
     expect(systemPrompt).toContain('do not infer auto-shift, auto-replace, or auto-reorder')
@@ -2060,7 +2070,7 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     expect(result.decision.constraintReport?.issues.some((issue) => issue.code === 'sequence_violation')).toBe(true)
   })
 
-  it('marks rotation candidate writes as professional recommendations that require confirmation', async () => {
+  it('asks for editorial selection when multiple rotation candidates remain available', async () => {
     const dataGateway = buildGateway([], [
       buildCandidate({
         id: 'candidate-low-rating',
@@ -2105,27 +2115,22 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
       date,
     })
 
-    expect(result.status).toBe('needs_confirmation')
+    expect(result.status).toBe('needs_selection')
     expect(result.decision.candidateSelection).toMatchObject({
       method: 'candidate_judge',
       source: 'fallback',
-      selectedCandidateId: 'candidate-high-rating',
+      candidateOptionIds: ['candidate-low-rating', 'candidate-high-rating'],
     })
-    expect(result.decision.candidateSelection?.professionalAssessment?.signals).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: 'playlist_policy', verdict: 'warn' }),
-        expect.objectContaining({ code: 'rotation_priority', verdict: 'prefer' }),
-      ]),
-    )
-    expect(result.decision.auditSummary).toMatchObject({
-      outcome: 'pending',
-      candidate: {
-        candidateId: 'candidate-high-rating',
-        method: 'candidate_judge',
-      },
+    expect(result.decision.pendingTask).toMatchObject({
+      intent: 'insert',
+      phase: 'needs_selection',
+      missingSlots: ['candidateId'],
+      recommendations: [
+        expect.objectContaining({ candidateId: 'candidate-low-rating' }),
+        expect.objectContaining({ candidateId: 'candidate-high-rating' }),
+      ],
     })
-    expect(result.decision.auditSummary?.warnings.some((item) => item.includes('播单策略'))).toBe(true)
-    expect(result.decision.pendingTask?.missingSlots).toContain('confirmation')
+    expect(result.executionResult).toBeUndefined()
   })
 
   it('prefers playable rotation candidates over higher scoring blocked candidates', async () => {
@@ -2252,7 +2257,7 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     expect(result.decision.auditSummary?.blockers.length).toBeGreaterThan(0)
   })
 
-  it('prefers news content for a morning TV information slot', async () => {
+  it('asks for editorial selection when a morning TV hint leaves multiple candidates', async () => {
     const dataGateway = buildGateway([], [
       buildCandidate({
         id: 'candidate-morning-drama',
@@ -2296,30 +2301,21 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
       date,
     })
 
-    expect(result.status).toBe('executed')
+    expect(result.status).toBe('needs_selection')
     expect(result.decision.candidateSelection).toMatchObject({
       method: 'candidate_judge',
       source: 'fallback',
-      selectedCandidateId: 'candidate-morning-news',
+      candidateOptionIds: ['candidate-morning-drama', 'candidate-morning-news'],
     })
-    expect(result.decision.candidateSelection?.professionalAssessment?.signals).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: 'time_slot_fit', verdict: 'prefer', sourceKeys: ['candidates'] }),
-      ]),
-    )
-    expect(result.decision.auditSummary?.signalSourceSummary).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('candidates:'),
-      ]),
-    )
-    expect(result.decision.auditSummary?.keyPoints).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('信号来源：'),
-      ]),
-    )
+    expect(result.decision.pendingTask).toMatchObject({
+      intent: 'insert',
+      phase: 'needs_selection',
+      missingSlots: ['candidateId'],
+    })
+    expect(result.executionResult).toBeUndefined()
   })
 
-  it('prefers candidates that match the neighboring column pattern', async () => {
+  it('keeps neighboring-column matches as selection evidence when multiple candidates remain', async () => {
     const dataGateway = buildGateway([
       buildItem({
         id: 'sports-before',
@@ -2387,25 +2383,21 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
       date,
     })
 
-    expect(result.status).toBe('executed')
+    expect(result.status).toBe('needs_selection')
     expect(result.decision.candidateSelection).toMatchObject({
       method: 'candidate_judge',
       source: 'fallback',
-      selectedCandidateId: 'candidate-sports-special',
+      candidateOptionIds: ['candidate-documentary-special', 'candidate-sports-special'],
     })
-    expect(result.decision.candidateSelection?.professionalAssessment?.signals).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: 'neighbor_column_fit', verdict: 'prefer', sourceKeys: ['today', 'candidates'] }),
-      ]),
-    )
-    expect(result.decision.auditSummary?.signalSourceSummary).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('today:'),
-      ]),
-    )
+    expect(result.decision.pendingTask).toMatchObject({
+      intent: 'insert',
+      phase: 'needs_selection',
+      missingSlots: ['candidateId'],
+    })
+    expect(result.executionResult).toBeUndefined()
   })
 
-  it('prefers replacement candidates that preserve the target slot duty', async () => {
+  it('asks for editorial selection when replacement duty still leaves multiple candidates', async () => {
     const dataGateway = buildGateway([
       buildItem({
         id: 'target-news-slot',
@@ -2461,34 +2453,17 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
       date,
     })
 
-    expect(result.status).toBe('executed')
+    expect(result.status).toBe('needs_selection')
     expect(result.decision.candidateSelection).toMatchObject({
       method: 'candidate_judge',
       source: 'fallback',
-      selectedCandidateId: 'candidate-replacement-news',
+      candidateOptionIds: ['candidate-replacement-drama', 'candidate-replacement-news'],
     })
-    expect(result.decision.candidateSelection?.professionalAssessment?.signals).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: 'replacement_duty_fit', verdict: 'prefer', sourceKeys: ['today', 'candidates'] }),
-      ]),
-    )
-    expect(result.decision.auditSummary).toMatchObject({
-      outcome: 'executed',
-      candidate: {
-        candidateId: 'candidate-replacement-news',
-        method: 'candidate_judge',
-      },
+    expect(result.decision.pendingTask).toMatchObject({
+      intent: 'replace',
+      phase: 'needs_selection',
+      missingSlots: ['candidateId'],
     })
-    expect(result.decision.auditSummary?.professionalSignals).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: 'replacement_duty_fit', verdict: 'prefer', sourceKeys: ['today', 'candidates'] }),
-      ]),
-    )
-    expect(result.decision.auditSummary?.signalSourceSummary).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('today:'),
-        expect.stringContaining('candidates:'),
-      ]),
-    )
+    expect(result.executionResult).toBeUndefined()
   })
 })

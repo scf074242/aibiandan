@@ -15,7 +15,23 @@ import { loadLLMConfig, validateLLMConfig } from './llmConfig'
 import { createLocalDemoLlmResponse, isPlaceholderApiKey } from './localDemoLlm'
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000
-const MAX_REQUEST_TIMEOUT_MS = 30000
+const MAX_REQUEST_TIMEOUT_MS = 60000
+
+type BrowserLlmMockInput = {
+  messages: ChatMessage[]
+  options?: ChatOptions
+  config: LLMConfig
+}
+
+type BrowserLlmMockResult = LLMResponse | string | null | undefined
+
+type BrowserLlmMock = (input: BrowserLlmMockInput) => BrowserLlmMockResult | Promise<BrowserLlmMockResult>
+
+declare global {
+  interface Window {
+    __AIBIANDAN_LLM_MOCK__?: BrowserLlmMock
+  }
+}
 
 export class LLMClient {
   private client: OpenAI | null = null
@@ -65,6 +81,17 @@ export class LLMClient {
    * 发送聊天请求
    */
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<LLMResponse> {
+    const requestTimeout = Math.min(
+      options?.timeout ?? this.config.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      MAX_REQUEST_TIMEOUT_MS,
+    )
+    const traceLabel = options?.traceLabel ?? 'chat'
+    const startedAt = Date.now()
+    const browserMockResponse = await this.tryBrowserMockChat(messages, options, requestTimeout, traceLabel, startedAt)
+    if (browserMockResponse) {
+      return browserMockResponse
+    }
+
     if (!this.client && isPlaceholderApiKey(this.config.apiKey)) {
       const localResponse = createLocalDemoLlmResponse(messages)
       if (localResponse) {
@@ -78,13 +105,7 @@ export class LLMClient {
       throw this.cachedFatalConfigError
     }
 
-    const requestTimeout = Math.min(
-      options?.timeout ?? this.config.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS,
-      MAX_REQUEST_TIMEOUT_MS,
-    )
     const maxRetries = Math.max(1, options?.maxRetries ?? 1)
-    const traceLabel = options?.traceLabel ?? 'chat'
-    const startedAt = Date.now()
     let lastError: Error | null = null
     let attempts = 0
 
@@ -163,6 +184,64 @@ export class LLMClient {
     throw new Error(
       `LLM request failed after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${lastError?.message}`,
     )
+  }
+
+  private async tryBrowserMockChat(
+    messages: ChatMessage[],
+    options: ChatOptions | undefined,
+    requestTimeout: number,
+    traceLabel: string,
+    startedAt: number,
+  ): Promise<LLMResponse | null> {
+    if (!import.meta.env.DEV || typeof window === 'undefined') return null
+    const mock = window.__AIBIANDAN_LLM_MOCK__
+    if (typeof mock !== 'function') return null
+
+    try {
+      const rawResponse = await this.withTimeout(
+        Promise.resolve(mock({
+          messages,
+          options,
+          config: { ...this.config },
+        })),
+        requestTimeout,
+      )
+      if (rawResponse === null || rawResponse === undefined) return null
+
+      const response: LLMResponse = typeof rawResponse === 'string'
+        ? { content: rawResponse }
+        : rawResponse
+
+      if (response.usage) {
+        this.tokenUsage.totalPromptTokens += response.usage.promptTokens
+        this.tokenUsage.totalCompletionTokens += response.usage.completionTokens
+        this.tokenUsage.totalTokens += response.usage.totalTokens
+        this.tokenUsage.requestCount++
+      }
+
+      this.recordRequestTrace({
+        label: traceLabel,
+        attemptCount: 1,
+        durationMs: Date.now() - startedAt,
+        timeoutMs: requestTimeout,
+        success: true,
+        startedAt: new Date(startedAt).toISOString(),
+      })
+
+      return response
+    } catch (error) {
+      const normalized = this.normalizeError(error)
+      this.recordRequestTrace({
+        label: traceLabel,
+        attemptCount: 1,
+        durationMs: Date.now() - startedAt,
+        timeoutMs: requestTimeout,
+        success: false,
+        error: normalized.message,
+        startedAt: new Date(startedAt).toISOString(),
+      })
+      throw normalized
+    }
   }
 
   /**

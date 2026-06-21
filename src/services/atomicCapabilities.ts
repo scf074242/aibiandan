@@ -55,6 +55,8 @@ const DEFAULT_CONFIG: AtomicCapabilitiesConfig = {
   maxSnapshotsPerItem: 10,
 }
 
+let nextReplaceAllItemsFailure: string | null = null
+
 /** 原子能力服务 */
 export class AtomicCapabilities {
   private items: Map<string, ScheduleItemSnapshot> = new Map()
@@ -594,6 +596,15 @@ export class AtomicCapabilities {
     items: ScheduleItemSnapshot[],
     options?: { skipValidation?: boolean },
   ): Promise<AtomicOperationResult<{ items: ScheduleItemSnapshot[] }>> {
+    if (nextReplaceAllItemsFailure) {
+      const error = nextReplaceAllItemsFailure
+      nextReplaceAllItemsFailure = null
+      return {
+        success: false,
+        error,
+      }
+    }
+
     try {
       const previousItems = new Map(this.items)
       if (this.config.enableSnapshot) {
@@ -731,4 +742,9 @@ export function getAtomicCapabilities(
 
 export function resetAtomicCapabilities(): void {
   globalAtomicCapabilities = null
+  nextReplaceAllItemsFailure = null
+}
+
+export function failNextAtomicReplaceAllItemsForHarness(message = '浏览器回归模拟整体写入失败'): void {
+  nextReplaceAllItemsFailure = message
 }

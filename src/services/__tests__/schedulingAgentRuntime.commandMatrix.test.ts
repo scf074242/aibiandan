@@ -4072,65 +4072,22 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       },
     })
 
-    expect(result.status).toBe('needs_confirmation')
+    expect(result.status).toBe('needs_selection')
     expect(result.decision.pendingTask).toMatchObject({
       intent: 'insert',
-      phase: 'needs_confirmation',
-      missingSlots: ['confirmation'],
+      phase: 'needs_selection',
+      missingSlots: ['candidateId'],
+      recommendations: [
+        expect.objectContaining({ candidateId: 'candidate-low' }),
+        expect.objectContaining({ candidateId: 'candidate-high' }),
+      ],
     })
-    expect(result.decision.auditSummary).toMatchObject({
-      outcome: 'pending',
-      operation: {
-        committed: false,
-        commandIntent: 'insert',
-        affectedItemIds: [],
-        affectedCount: 0,
-        previewAffectedCount: 1,
-        reason: expect.stringContaining('等待确认'),
-      },
-      pendingTask: {
-        intent: 'insert',
-        phase: 'needs_confirmation',
-        missingSlots: ['confirmation'],
-        allowedActions: ['confirm', 'reject', 'start_new_task', 'cancel_pending'],
-        recommendationCount: 2,
-      },
-      candidate: {
-        candidateId: 'candidate-high',
-      },
-      contextSources: {
-        candidates: {
-          source: 'in_memory_seed',
-          recordCount: 2,
-        },
-        policy: {
-          source: 'in_memory_seed',
-          recordCount: 1,
-        },
-      },
-      playlistPolicy: {
-        playlistType: 'rotation',
-        rotationStrategy: 'rating',
-        commandIntent: 'insert',
-        executionMode: 'confirm_before_commit',
-        policyAction: 'confirm',
-        requiresConfirmation: true,
-        reason: expect.stringContaining('轮播单 insert 使用rating priority策略'),
-      },
+    expect(result.decision.candidateSelection).toMatchObject({
+      method: 'candidate_judge',
+      source: 'fallback',
+      candidateOptionIds: ['candidate-low', 'candidate-high'],
     })
-    expect(result.decision.auditSummary?.keyPoints).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('写入状态：未写入'),
-        expect.stringContaining('播单策略：类型=rotation, 策略=rating, 命令=insert, 执行模式=confirm_before_commit, 动作=confirm, 需确认=是'),
-        expect.stringContaining('待处理任务：阶段=needs_confirmation'),
-        expect.stringContaining('policy=in_memory_seed:1'),
-      ]),
-    )
-    const catalogRuleIds = runtime.describeCapabilities().professionalRules.map((rule) => rule.id)
-    const emittedRuleIds = result.decision.auditSummary?.professionalSignals.map((signal) => signal.code) ?? []
-    expect(emittedRuleIds).toEqual(expect.arrayContaining(['rotation_priority']))
-    expect(emittedRuleIds.filter((ruleId) => !catalogRuleIds.includes(ruleId))).toEqual([])
-    expect(result.decision.auditSummary?.professionalRuleSummary?.total).toBe(emittedRuleIds.length)
+    expect(result.executionResult).toBeUndefined()
 
     const context = await dataGateway.loadContext({ userInput: '', channelId, date })
     expect(context.scheduleItems).toHaveLength(0)
@@ -4156,8 +4113,34 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       },
     })
 
-    expect(first.status).toBe('needs_confirmation')
+    expect(first.status).toBe('needs_selection')
     expect(first.decision.pendingTask).toMatchObject({
+      intent: 'insert',
+      phase: 'needs_selection',
+      recommendations: [
+        expect.objectContaining({ candidateId: 'candidate-low' }),
+        expect.objectContaining({ candidateId: 'candidate-high' }),
+      ],
+    })
+
+    const selected = await runtime.submit({
+      userInput: 'use the higher-rated one',
+      channelId,
+      date,
+      pendingTask: first.decision.pendingTask,
+      interpretation: {
+        intent: 'insert',
+        pendingAction: 'select_candidate',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          candidateId: 'candidate-high',
+        },
+      },
+    })
+
+    expect(selected.status).toBe('needs_confirmation')
+    expect(selected.decision.pendingTask).toMatchObject({
       intent: 'insert',
       phase: 'needs_confirmation',
       collectedSlots: {
@@ -4165,17 +4148,13 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
           value: 'candidate-high',
         },
       },
-      recommendations: [
-        expect.objectContaining({ candidateId: 'candidate-high' }),
-        expect.objectContaining({ candidateId: 'candidate-low' }),
-      ],
     })
 
     const differentRecommendedCandidate = await runtime.submit({
       userInput: 'confirm the lower-rated one instead',
       channelId,
       date,
-      pendingTask: first.decision.pendingTask,
+      pendingTask: selected.decision.pendingTask,
       interpretation: {
         intent: 'insert',
         pendingAction: 'confirm',
@@ -4193,7 +4172,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       code: 'program_ambiguous',
       detail: {
         candidateId: 'candidate-low',
-        allowedCandidateIds: ['candidate-high', 'candidate-low'],
+        allowedCandidateIds: ['candidate-high'],
         plannedCandidateId: 'candidate-high',
       },
     })
@@ -4202,7 +4181,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       userInput: 'confirm candidate outsider',
       channelId,
       date,
-      pendingTask: first.decision.pendingTask,
+      pendingTask: selected.decision.pendingTask,
       interpretation: {
         intent: 'insert',
         pendingAction: 'confirm',
@@ -4220,7 +4199,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       code: 'program_ambiguous',
       detail: {
         candidateId: 'candidate-outsider',
-        allowedCandidateIds: ['candidate-high', 'candidate-low'],
+        allowedCandidateIds: ['candidate-high'],
         plannedCandidateId: 'candidate-high',
       },
     })
@@ -5079,7 +5058,42 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     })
   })
 
-  it('prefers TV replacement candidates that preserve the target slot responsibility', async () => {
+  it('explains the remaining gap when a TV replacement is shorter than the original slot', async () => {
+    const { dataGateway, runtime } = buildRuntime({
+      playlistType: 'tv',
+      items: [buildItem({
+        endTime: '09:45:00',
+        duration: 2700,
+      })],
+      candidates: [buildCandidate({
+        duration: 1800,
+      })],
+    })
+
+    const result = await submit(runtime, 'replace 09:00 with Replacement News', {
+      intent: 'replace',
+      confidence: 1,
+      source: 'test',
+      slots: {
+        targetTime: '09:00:00',
+        replacementHint: 'Replacement News',
+      },
+    })
+
+    expect(result.status).toBe('executed')
+    expect(result.explanation).toContain('短15分钟')
+    expect(result.explanation).toContain('电视播单会留下15分钟空窗')
+
+    const context = await dataGateway.loadContext({ userInput: '', channelId, date })
+    expect(context.scheduleItems[0]).toMatchObject({
+      id: 'item-0900',
+      programName: 'Replacement News',
+      endTime: '2026-03-25T09:30:00+08:00',
+      duration: 1800,
+    })
+  })
+
+  it('asks for selection before replacing when multiple non-sequential TV candidates remain', async () => {
     const { dataGateway, runtime } = buildRuntime({
       playlistType: 'tv',
       items: [buildItem({
@@ -5121,17 +5135,53 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       },
     })
 
-    expect(result.status).toBe('executed')
-    expect(result.decision.command).toMatchObject({
+    expect(result.status).toBe('needs_selection')
+    expect(result.decision.command).toBeUndefined()
+    expect(result.decision.candidateSelection).toMatchObject({
+      method: 'candidate_judge',
+      source: 'fallback',
+      candidateOptionIds: ['candidate-drama-replacement', 'candidate-news-replacement'],
+    })
+    expect(result.decision.pendingTask).toMatchObject({
+      intent: 'replace',
+      phase: 'needs_selection',
+      missingSlots: ['candidateId'],
+    })
+
+    let context = await dataGateway.loadContext({ userInput: '', channelId, date })
+    expect(context.scheduleItems[0]).toMatchObject({
+      id: 'item-0900',
+      programName: 'Morning News',
+      columnId: 'morning-news',
+    })
+
+    const selected = await runtime.submit({
+      userInput: 'use the news replacement',
+      channelId,
+      date,
+      pendingTask: result.decision.pendingTask,
+      interpretation: {
+        intent: 'replace',
+        pendingAction: 'select_candidate',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          candidateId: 'candidate-news-replacement',
+        },
+      },
+    })
+
+    expect(selected.status).toBe('executed')
+    expect(selected.decision.command).toMatchObject({
       intent: 'replace',
       itemId: 'item-0900',
       candidateId: 'candidate-news-replacement',
     })
-    expect(result.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
+    expect(selected.decision.candidateSelection).toMatchObject({
+      method: 'explicit',
       selectedCandidateId: 'candidate-news-replacement',
     })
-    expect(result.decision.candidateSelection?.professionalAssessment?.signals).toEqual(
+    expect(selected.decision.candidateSelection?.professionalAssessment?.signals).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           code: 'replacement_duty_fit',
@@ -5140,7 +5190,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       ]),
     )
 
-    const context = await dataGateway.loadContext({ userInput: '', channelId, date })
+    context = await dataGateway.loadContext({ userInput: '', channelId, date })
     expect(context.scheduleItems[0]).toMatchObject({
       id: 'item-0900',
       programName: 'Replacement Bulletin',
@@ -5408,6 +5458,64 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
 
     const context = await dataGateway.loadContext({ userInput: '', channelId, date })
     expect(context.scheduleItems[0]?.programName).toBe('Morning News')
+  })
+
+  it('keeps rotation replacements confirmed while explaining total-duration change', async () => {
+    const { dataGateway, runtime } = buildRuntime({
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+      items: [buildItem({
+        startTime: '00:00:00',
+        endTime: '00:45:00',
+        duration: 2700,
+        programName: '城市宣传片45分钟版',
+      })],
+      candidates: [buildCandidate({
+        duration: 1800,
+        programName: '城市宣传片30分钟版',
+        instanceName: '城市宣传片30分钟版',
+      })],
+    })
+
+    const first = await submit(runtime, 'replace 00:00 with 城市宣传片30分钟版', {
+      intent: 'replace',
+      confidence: 1,
+      source: 'test',
+      slots: {
+        targetTime: '00:00:00',
+        replacementHint: '城市宣传片30分钟版',
+      },
+    })
+
+    expect(first.status).toBe('needs_confirmation')
+    expect(first.explanation).toContain('替换《城市宣传片30分钟版》前需要确认')
+    expect(first.explanation).toContain('总时长会减少15分钟')
+
+    const confirmed = await runtime.submit({
+      userInput: '确认',
+      channelId,
+      date,
+      pendingTask: first.decision.pendingTask,
+      interpretation: {
+        intent: 'replace',
+        pendingAction: 'confirm',
+        confidence: 1,
+        source: 'test',
+      },
+    })
+
+    expect(confirmed.status).toBe('executed')
+    expect(confirmed.explanation).toContain('轮播队列会继续串联')
+    expect(confirmed.explanation).toContain('总时长会减少15分钟')
+
+    const context = await dataGateway.loadContext({ userInput: '', channelId, date })
+    expect(context.scheduleItems[0]).toMatchObject({
+      id: 'item-0900',
+      programName: '城市宣传片30分钟版',
+      startTime: '2026-03-25T00:00:00+08:00',
+      endTime: '2026-03-25T00:30:00+08:00',
+      duration: 1800,
+    })
   })
 
   it('gates sensitive delete commands behind confirmation for TV playlists', async () => {

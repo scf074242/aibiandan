@@ -1,6 +1,7 @@
 import type { LayoutDraft, PlaylistType, ScheduleState } from '@/types/orchestration'
 import type { RuntimePendingCommand, RuntimeScheduleItem } from './demoRuntimeFacade'
 import type { RuntimePendingAtomicContext } from './pendingAtomicContext'
+import type { ReactTaskRun } from './reactTaskTypes'
 import { buildScheduleWorkspaceSummary, resolveForegroundWorkspaceKey } from './foregroundWorkspaceState'
 import { evaluateLayoutDraftCompleteness, type LayoutDraftCompleteness } from '@/services/layoutDraftCompleteness'
 
@@ -17,6 +18,8 @@ export type PendingReviewKind =
   | 'command'
   | 'candidate_selection'
   | 'layout_commit'
+  | 'layout_draft_update'
+  | 'formal_rebuild'
   | 'parameter_clarification'
 
 export interface PendingReviewSnapshot {
@@ -26,6 +29,7 @@ export interface PendingReviewSnapshot {
   allowedResponses: Array<'confirm' | 'cancel' | 'select' | 'clarify'>
   expiresOnNextNonAnswer: true
   summary: string
+  continueAsConfirm?: boolean
 }
 
 export interface ForegroundAgentContextPackage {
@@ -70,6 +74,31 @@ export interface ForegroundAgentContextPackage {
     }>
   }
   review: PendingReviewSnapshot | null
+  reactTask: {
+    active: boolean
+    id?: string
+    objective?: string
+    status?: ReactTaskRun['status']
+    loopCount?: number
+    maxTurns?: number
+    pendingStepCount?: number
+    pendingSteps?: Array<{
+      type?: string
+      targetTime?: string
+      semanticLabel?: string
+      targetSegmentIndex?: number
+      targetSegmentLabel?: string
+      queries?: string[]
+      reason?: string
+    }>
+    observationCount?: number
+    lastObservation?: {
+      type: string
+      summary: string
+      risk?: string
+    }
+    recovery?: ReactTaskRun['recovery']
+  }
   allowedActions: string[]
   injectionProfile: {
     scheduleItemLimit: number
@@ -96,6 +125,7 @@ export interface BuildForegroundAgentContextPackageInput {
   currentLayoutDraft?: LayoutDraft | null
   pendingCommand?: RuntimePendingCommand | null
   pendingAtomicContext?: RuntimePendingAtomicContext | null
+  activeReactTaskRun?: ReactTaskRun | null
 }
 
 export type PendingReviewLifecycleExpireReason = 'workspace_changed' | 'next_non_answer'
@@ -129,6 +159,8 @@ export const buildForegroundAgentContextPackage = (
   input: BuildForegroundAgentContextPackageInput,
 ): ForegroundAgentContextPackage => {
   const review = buildPendingReviewSnapshot(input.pendingCommand, input.pendingAtomicContext)
+  const activeReactTaskRun = input.activeReactTaskRun ?? null
+  const lastObservation = activeReactTaskRun?.observations.at(-1)
   const scenario = inferScenario(input.latestUserInput, review)
   const normalizedInput = normalizeText(input.latestUserInput)
   const referencedByCurrentTask = DRAFT_REFERENCE_PATTERN.test(normalizedInput)
@@ -205,6 +237,36 @@ export const buildForegroundAgentContextPackage = (
       segments: layoutSegments,
     },
     review,
+    reactTask: activeReactTaskRun
+      ? {
+          active: !['completed', 'failed', 'cancelled'].includes(activeReactTaskRun.status),
+          id: activeReactTaskRun.id,
+          objective: compactText(activeReactTaskRun.objective, 120),
+          status: activeReactTaskRun.status,
+          loopCount: activeReactTaskRun.loopCount,
+          maxTurns: activeReactTaskRun.limits.maxTurns,
+          pendingStepCount: activeReactTaskRun.steps.filter((step) => step.status === 'pending' || step.status === 'running').length,
+          pendingSteps: activeReactTaskRun.steps
+            .filter((step) =>
+              step.status === 'pending'
+              || step.status === 'running'
+              || (step.status === 'failed' && activeReactTaskRun.recovery?.canRetry === true),
+            )
+            .slice(0, 3)
+            .map((step) => compactReactTaskStep(step)),
+          observationCount: activeReactTaskRun.observations.length,
+          lastObservation: lastObservation
+            ? {
+                type: lastObservation.type,
+                summary: compactText(lastObservation.summary, 160),
+                risk: lastObservation.risk,
+              }
+            : undefined,
+          recovery: activeReactTaskRun.recovery,
+        }
+      : {
+          active: false,
+        },
     allowedActions: resolveAllowedActions(input.scheduleState.playlistType ?? 'none', scenario, draftCompleteness.status),
     injectionProfile: profile,
   }
@@ -271,6 +333,9 @@ const buildBusinessContextForPrompt = (contextPackage: ForegroundAgentContextPac
         expiresOnNextNonAnswer: contextPackage.review.expiresOnNextNonAnswer,
         summary: contextPackage.review.summary,
       }
+    : null,
+  activeReactTask: contextPackage.reactTask.active || contextPackage.reactTask.recovery?.canRetry
+    ? contextPackage.reactTask
     : null,
   allowedActions: contextPackage.allowedActions,
   contextNotes: {
@@ -354,6 +419,26 @@ const buildPendingReviewSnapshot = (
   }
 
   if (!pendingAtomicContext) return null
+  if (pendingAtomicContext.formalRebuildConfirmation || pendingAtomicContext.phase === 'formal_rebuild_confirmation') {
+    return {
+      kind: 'formal_rebuild',
+      action: 'formal_rebuild',
+      riskLevel: 'high',
+      allowedResponses: ['confirm', 'cancel'],
+      expiresOnNextNonAnswer: true,
+      summary: pendingAtomicContext.summary,
+    }
+  }
+  if (pendingAtomicContext.layoutDraftSuggestion) {
+    return {
+      kind: 'layout_draft_update',
+      action: 'update_layout_draft',
+      riskLevel: 'low',
+      allowedResponses: ['confirm', 'cancel'],
+      expiresOnNextNonAnswer: true,
+      summary: pendingAtomicContext.summary,
+    }
+  }
   if (pendingAtomicContext.compositeTaskRun?.status === 'waiting_confirm') {
     return {
       kind: 'command',
@@ -362,6 +447,7 @@ const buildPendingReviewSnapshot = (
       allowedResponses: ['confirm', 'cancel'],
       expiresOnNextNonAnswer: true,
       summary: pendingAtomicContext.summary,
+      continueAsConfirm: true,
     }
   }
   if (pendingAtomicContext.agentPendingTask?.phase === 'needs_confirmation') {
@@ -467,6 +553,29 @@ const compactText = (value: string, limit: number): string => {
 const compactOptionalText = (value: string | undefined, limit: number): string | undefined =>
   value === undefined ? undefined : compactText(value, limit)
 
+const compactReactTaskStep = (
+  step: ReactTaskRun['steps'][number],
+): NonNullable<ForegroundAgentContextPackage['reactTask']['pendingSteps']>[number] => {
+  const action = typeof step.action === 'object' && step.action !== null
+    ? step.action as Record<string, unknown>
+    : {}
+  const queries = Array.isArray(action.queries)
+    ? action.queries
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => compactText(item, 60))
+      .slice(0, 5)
+    : undefined
+  return {
+    type: typeof action.type === 'string' ? action.type : undefined,
+    targetTime: typeof action.targetTime === 'string' ? action.targetTime : undefined,
+    semanticLabel: typeof action.semanticLabel === 'string' ? compactText(action.semanticLabel, 80) : undefined,
+    targetSegmentIndex: typeof action.targetSegmentIndex === 'number' ? action.targetSegmentIndex : undefined,
+    targetSegmentLabel: typeof action.targetSegmentLabel === 'string' ? compactText(action.targetSegmentLabel, 80) : undefined,
+    queries,
+    reason: step.reason ? compactText(step.reason, 100) : undefined,
+  }
+}
+
 const isOverTextLimit = (value: string | undefined, limit: number): boolean =>
   typeof value === 'string' && value.length > limit
 
@@ -564,6 +673,18 @@ const resolveAllowedActions = (
 }
 
 const isStrongReviewResponse = (normalized: string, review: PendingReviewSnapshot): boolean => {
+  if (
+    review.kind === 'formal_rebuild'
+    && /^(确认重新编排|确认重排|重新编排|重排|确认覆盖|覆盖吧|开始重新编排|开始重排|开始编排|按这个重新编排|按草案重新编排|按当前草案重新编排|按这个开始编排|可以重新编排|可以重排)$/iu.test(normalized)
+  ) return review.allowedResponses.includes('confirm')
+  if (
+    review.kind === 'layout_draft_update'
+    && /^(可以|好的|好|确认|确定|更新|更新草案|更新到草案|写入草案|改到草案|改进草案|就按这个|就这个|用这个|用这个方向|按这个方向|没问题|ok|yes)$/iu.test(normalized)
+  ) return review.allowedResponses.includes('confirm')
+  if (
+    review.continueAsConfirm
+    && /^(继续|继续执行|继续处理|下一批|重试|再试一次|retry|continue)$/iu.test(normalized)
+  ) return review.allowedResponses.includes('confirm')
   if (/^(确认|确定|执行|可以|好的|好|ok|yes)$/iu.test(normalized)) return review.allowedResponses.includes('confirm')
   if (/^(取消|不用了|算了|先不用|no|cancel)$/iu.test(normalized)) return review.allowedResponses.includes('cancel')
   if (/^(第?[一二三四五六七八九十123456789]|选.+|用.+)$/iu.test(normalized)) return review.allowedResponses.includes('select')

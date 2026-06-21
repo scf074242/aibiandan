@@ -198,6 +198,18 @@ describe('foreground Agent verification matrix', () => {
     expect(context.layoutDraft.available).toBe(true)
     expect(context.layoutDraft.referencedByCurrentTask).toBe(false)
     expect(context.allowedActions).not.toContain('prepare_layout')
+    if (item.expectedMode === 'full_generate' && item.state.itemCount > 0) {
+      expect(decision.kind).toBe('pending_atomic_context')
+      if (decision.kind !== 'pending_atomic_context') throw new Error('expected formal rebuild confirmation')
+      expect(decision.pendingAtomicContext.phase).toBe('formal_rebuild_confirmation')
+      expect(decision.pendingAtomicContext.formalRebuildConfirmation).toMatchObject({
+        mode: 'full_generate',
+        existingItemCount: item.state.itemCount,
+        playlistType: 'tv',
+      })
+      expect(decision.feedback.details?.noMutationBeforeConfirm).toBe(true)
+      return
+    }
     expect(decision.kind).toBe('orchestration')
     if (decision.kind !== 'orchestration') throw new Error('expected formal orchestration')
     expect(decision.orchestrationRequest.mode).toBe(item.expectedMode)

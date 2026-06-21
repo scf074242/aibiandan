@@ -177,4 +177,26 @@ describe('useBroadcastPlanOrchestration', () => {
       },
     )
   })
+
+  it('starts full orchestration with the draft coverage after a layout draft commit', async () => {
+    const { hook } = createHarness()
+    const draft = createLayoutDraft()
+
+    await hook.handleChatOrchestrateRequested({
+      userInput: '按这个版面开始编排',
+      mode: 'full_generate',
+      layoutDraft: draft,
+    })
+
+    expect(getRuntimeLayoutEntry('dragon', '2026-03-25')).toMatchObject({
+      layoutReference: draft.layoutReference,
+      columns: draft.columns,
+    })
+    expect(orchestratorMock.startFullGeneration).toHaveBeenCalledWith(
+      'dragon',
+      '2026-03-25',
+      draft.coverage.start,
+      draft.coverage.end,
+    )
+  })
 })

@@ -1,13 +1,16 @@
 import type { ChatMessage } from '@/types/llm'
-import type { LayoutDraft, LayoutDraftSpec, LayoutDraftSpecSegment, LayoutIntentSegment } from '@/types/orchestration'
+import type { LayoutDraft, LayoutDraftSpec, LayoutDraftSpecSegment, LayoutIntentSegment, PlaylistType } from '@/types/orchestration'
 import type { LLMClient } from '@/services/llm/llmClient'
 import { cleanLayoutDraftActionNoise, cleanLayoutDraftSemanticLabel } from '@/services/layoutDraftSemanticCleaner'
+import { createRecoverableLlmError } from '@/services/llm/llmFailure'
 
 export interface LayoutDraftGenerationInput {
   channelId: string
   channelName: string
   date: string
   userInput: string
+  playlistType?: PlaylistType
+  targetDurationSeconds?: number
   coverage?: { start: string; end: string }
   semanticLabel?: string
   programTypeHint?: string
@@ -23,9 +26,32 @@ const DEFAULT_COVERAGE = {
   end: '23:59:59',
 }
 
+const MAX_RELATIVE_COVERAGE_SECONDS = 24 * 60 * 60 - 1
+
+const secondsToRelativeClock = (value: number): string => {
+  const bounded = Math.max(1, Math.min(MAX_RELATIVE_COVERAGE_SECONDS, Math.floor(value)))
+  const hours = Math.floor(bounded / 3600)
+  const minutes = Math.floor((bounded % 3600) / 60)
+  const seconds = bounded % 60
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+}
+
+const resolveInputCoverage = (input: LayoutDraftGenerationInput): { start: string; end: string } => {
+  if (input.coverage) return input.coverage
+  if (input.playlistType === 'rotation' && input.targetDurationSeconds && input.targetDurationSeconds > 0) {
+    return { start: '00:00:00', end: secondsToRelativeClock(input.targetDurationSeconds) }
+  }
+  return { ...DEFAULT_COVERAGE }
+}
+
 type ProgramTypeGuess = Pick<LayoutDraftSpecSegment, 'label' | 'programType' | 'queryHints' | 'sequential'>
 
 const normalizeInput = (value: string) => value.trim().toLowerCase().replace(/\s+/g, '')
+
+const shouldSurfaceDraftLlmFailure = (input: string): boolean => {
+  const normalized = normalizeInput(input)
+  return /(?:第[一二三四五六七八九十\d]+个?小时|第[一二三四五六七八九十\d]+段|第一小时|第二小时|第三小时|每条|每段|拆成|拆分|分成|策划|规划|不知道怎么排|怎么排|帮我排|帮我规划|优化一下)/u.test(normalized)
+}
 
 const DEFAULT_LABEL_BY_PROGRAM_TYPE: Record<string, string> = {
   drama: '电视剧',
@@ -44,6 +70,12 @@ const normalizeClock = (clock: string) => {
   const minute = Math.max(0, Math.min(59, Number(parts[1] ?? '00')))
   const second = Math.max(0, Math.min(59, Number(parts[2] ?? '00')))
   return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`
+}
+
+const toSlotClock = (value: string | undefined, fallback: string) => {
+  if (!value) return normalizeClock(fallback)
+  const clockText = value.includes('T') ? value.split('T')[1]?.slice(0, 8) : value
+  return normalizeClock(clockText ?? fallback)
 }
 
 const hasDramaEpisodeCue = (value: string): boolean =>
@@ -571,6 +603,42 @@ const extractRefineSemanticLabel = (input: string, semanticLabel?: string): stri
   return cleaned || undefined
 }
 
+const parseChineseOrdinalIndex = (value: string): number | null => {
+  if (/^\d+$/.test(value)) {
+    const index = Number(value) - 1
+    return index >= 0 ? index : null
+  }
+  const map: Record<string, number> = {
+    一: 0,
+    二: 1,
+    两: 1,
+    三: 2,
+    四: 3,
+    五: 4,
+    六: 5,
+    七: 6,
+    八: 7,
+    九: 8,
+    十: 9,
+  }
+  return Object.prototype.hasOwnProperty.call(map, value) ? map[value]! : null
+}
+
+const extractOrdinalRefineRequest = (input: string): { index: number; label: string } | null => {
+  const normalized = input.replace(/\s+/g, '')
+  const ordinalMatch = normalized.match(/第([一二两三四五六七八九十\d]+)(?:个)?(?:小时|时段|段|块|内容块)/u)
+    ?? normalized.match(/([一二两三四五六七八九十\d]+)(?:个)?(?:小时|时段|段|块|内容块)/u)
+  const index = ordinalMatch?.[1] ? parseChineseOrdinalIndex(ordinalMatch[1]) : null
+  if (index === null) return null
+
+  const targetMatch = normalized.match(/(?:改成|换成|调整为|调整成|改为|变成|替换成|替换为)(.+)$/u)
+  const label = cleanLayoutDraftSemanticLabel(
+    targetMatch?.[1]?.replace(/(?:再|然后|并且|，|。|；|;).*$/u, ''),
+    { stripLeadingPoliteCue: true },
+  )
+  return label ? { index, label } : null
+}
+
 const segmentMatchesLabel = (segment: LayoutDraftSpecSegment, semanticLabel?: string) => {
   if (!semanticLabel) {
     return undefined
@@ -709,13 +777,16 @@ export class LayoutDraftService {
       const response = await this.llmClient.chat(this.buildGeneratePrompt(input), {
         temperature: 0.2,
         maxTokens: 1200,
-        timeout: 8000,
+        timeout: 60000,
         maxRetries: 1,
         traceLabel: 'layout_draft_generate',
       })
 
       return this.parseSpecResponse(response.content, fallback)
-    } catch {
+    } catch (error) {
+      if (shouldSurfaceDraftLlmFailure(input.userInput)) {
+        throw createRecoverableLlmError('layout_draft_generate', error)
+      }
       return fallback
     }
   }
@@ -734,7 +805,7 @@ export class LayoutDraftService {
       const response = await this.llmClient.chat(this.buildRefinePrompt(input), {
         temperature: 0.2,
         maxTokens: 1400,
-        timeout: 8000,
+        timeout: 60000,
         maxRetries: 1,
         traceLabel: 'layout_draft_refine',
       })
@@ -744,7 +815,10 @@ export class LayoutDraftService {
         return fallback
       }
       return parsed
-    } catch {
+    } catch (error) {
+      if (shouldSurfaceDraftLlmFailure(input.userInput)) {
+        throw createRecoverableLlmError('layout_draft_refine', error)
+      }
       return fallback
     }
   }
@@ -786,7 +860,7 @@ export class LayoutDraftService {
     }
 
     const normalized = normalizeInput(input.userInput)
-    const coverage = input.coverage ?? extractTimeRange(normalized) ?? { ...DEFAULT_COVERAGE }
+    const coverage = extractTimeRange(normalized) ?? resolveInputCoverage(input)
     const guess = resolveProgramGuess(normalized, {
       semanticLabel: input.semanticLabel,
       programTypeHint: input.programTypeHint,
@@ -818,13 +892,49 @@ export class LayoutDraftService {
       return {
         id: slot.id,
         label: column?.semanticLabel ?? column?.columnName ?? slot.id,
-        startTime: slot.startTime.split('T')[1]?.slice(0, 8) ?? input.currentDraft.coverage.start,
-        endTime: slot.endTime.split('T')[1]?.slice(0, 8) ?? input.currentDraft.coverage.end,
+        startTime: toSlotClock(slot.startTime, input.currentDraft.coverage.start),
+        endTime: toSlotClock(slot.endTime, input.currentDraft.coverage.end),
         programType: column?.defaultProgramType ?? 'news_magazine',
         queryHints: column?.queryHints,
         sequential: column?.isSequential,
       }
     })
+
+    if ((input.segments?.length ?? 0) > 1) {
+      const replacements = this.buildSpecSegmentsFromStructuredIntent(input.segments ?? [])
+      return {
+        coverage: expandCoverageToSegments(input.currentDraft.coverage, replacements),
+        segments: replacements,
+      }
+    }
+
+    const ordinalRefine = extractOrdinalRefineRequest(input.userInput)
+    if (ordinalRefine) {
+      const orderedSegments = [...existingSegments].sort((left, right) => left.startTime.localeCompare(right.startTime))
+      const target = orderedSegments[ordinalRefine.index]
+      if (target) {
+        const guess = resolveProgramGuess(normalized, {
+          semanticLabel: ordinalRefine.label,
+          programTypeHint: input.programTypeHint,
+        })
+        const nextSegments = replaceRange(existingSegments, {
+          start: target.startTime,
+          end: target.endTime,
+        }, {
+          id: target.id,
+          label: ordinalRefine.label,
+          startTime: target.startTime,
+          endTime: target.endTime,
+          programType: guess.programType,
+          queryHints: guess.queryHints,
+          sequential: guess.sequential,
+        })
+        return {
+          coverage: expandCoverageToSegments(input.currentDraft.coverage, nextSegments),
+          segments: nextSegments,
+        }
+      }
+    }
 
     if (input.segments?.length) {
       let nextSegments = [...existingSegments]
@@ -886,7 +996,7 @@ export class LayoutDraftService {
   }
 
   private buildGeneratePrompt(input: LayoutDraftGenerationInput): ChatMessage[] {
-    const coverage = input.coverage ?? (input.segments?.length ? this.resolveStructuredCoverage(input, input.segments) : DEFAULT_COVERAGE)
+    const coverage = input.segments?.length ? this.resolveStructuredCoverage(input, input.segments) : resolveInputCoverage(input)
     return [
       {
         role: 'system',
@@ -898,12 +1008,17 @@ export class LayoutDraftService {
 - coverage 内的时段必须连续覆盖。
 - programType 使用英文枚举值，例如 news、news_magazine、drama、health、commentary、entertainment、kids、documentary。
 - 如果用户提到了语义栏目，例如黄金剧场，请写到 label，并在 queryHints 中保留关键词。
+- 如果是轮播草案，HH:mm:ss 表示从 00:00:00 起算的相对位置，不表示电视播出日期时间。
+- 用户给出多个阶段、多个小时、每条固定时长、拆成 N 条，或者让你帮忙策划怎么排时，必须由你输出多条 segments；不要把这些要求合并成一个大段描述。
+- 用户不知道怎么排但给了主题和总时长时，请根据编排经验先提出一版可审看的结构化草案；正式节目不会在这里写入。
 - 只返回 JSON，不要输出解释文字。`,
       },
       {
         role: 'user',
         content: `频道：${input.channelName} (${input.channelId})
 日期：${input.date}
+当前播单类型：${input.playlistType ?? 'tv'}
+${input.playlistType === 'rotation' && input.targetDurationSeconds ? `轮播目标总时长：${input.targetDurationSeconds} 秒` : ''}
 默认覆盖范围：${coverage.start} - ${coverage.end}
 用户需求：${input.userInput}
 ${input.segments?.length ? `结构化时段需求：${JSON.stringify(input.segments)}` : ''}
@@ -922,6 +1037,8 @@ ${input.programTypeHint ? `LLM 识别出的类型提示：${input.programTypeHin
 要求：
 - 所有时段都必须保留显式的 HH:mm:ss 开始结束时间。
 - 不要出现时段重叠或覆盖空洞。
+- 如果用户要求拆分、分段、按每条时长细化，或者说第一小时/第二小时/第三小时，请由你返回更新后的多条 segments；不要把修改需求合并成一个大段描述。
+- 如果当前草案是轮播草案，HH:mm:ss 表示从 00:00:00 起算的相对位置。
 - 只返回 JSON，不要输出解释文字。`,
       },
       {
@@ -935,8 +1052,8 @@ ${JSON.stringify(
               return {
                 id: slot.id,
                 label: column?.semanticLabel ?? column?.columnName ?? slot.id,
-                startTime: slot.startTime.split('T')[1]?.slice(0, 8),
-                endTime: slot.endTime.split('T')[1]?.slice(0, 8),
+                startTime: toSlotClock(slot.startTime, input.currentDraft.coverage.start),
+                endTime: toSlotClock(slot.endTime, input.currentDraft.coverage.end),
                 programType: column?.defaultProgramType,
                 queryHints: column?.queryHints,
               }

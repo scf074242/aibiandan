@@ -1,9 +1,10 @@
-import type { ColumnDefinition, DeleteCommand, DraftFeasibilityReport, InsertCommand, LayoutDraft, LayoutReference, MoveCommand, OrchestrationCommand, ReplaceCommand, ScheduleItemSnapshot, ScheduleState, TaskClassification, TaskMode, ValidationReport } from '@/types/orchestration'
+import type { ColumnDefinition, DeleteCommand, DraftFeasibilityReport, InsertCommand, LayoutDraft, LayoutReference, LlmFailureInfo, MoveCommand, OrchestrationCommand, ReplaceCommand, ScheduleItemSnapshot, ScheduleState, TaskClassification, TaskMode, ValidationReport } from '@/types/orchestration'
 import { getLLMClient } from '@/services/llm/llmClient'
 import type { LayoutIntentSegment } from '@/types/orchestration'
 import type { PlaylistType, ProgramCandidate, RotationPlaylistStrategy } from '@/types/orchestration'
 import type { DraftSegmentSelectionPolicy, DraftSelectionPriority, LayoutDraftStrategyBasis, LayoutDraftStrategyKind, LayoutDraftStrategyProfile } from '@/types/orchestration'
 import { getTaskClassifier } from '@/services/llm/taskClassifier'
+import { getAgentPlanner, type AgentPlan, type AgentPlannerAction } from '@/services/llm/agentPlanner'
 import { buildDialogueContext } from '@/services/dialogueContext'
 import { getIntentRecognizer } from '@/services/intentRecognizer'
 import type { MicroEditIntent } from '@/services/intentRecognizer'
@@ -20,6 +21,7 @@ import { getScheduleCommandBus } from '@/services/scheduleCommandBus'
 import { getScheduleTargetResolver } from '@/services/scheduleTargetResolver'
 import { getEffectiveColumnDefinition, getEffectiveLayoutReference, getRuntimeLayoutEntry } from '@/services/orchestration/runtimeLayoutRegistry'
 import { getLayoutDraftService } from '@/services/layoutDraftService'
+import { cleanLayoutDraftSemanticLabel } from '@/services/layoutDraftSemanticCleaner'
 import { getLayoutDraftCompiler } from '@/services/layoutDraftCompiler'
 import { getLayoutDraftValidator } from '@/services/layoutDraftValidator'
 import { getLayoutDraftFeasibilityService } from '@/services/layoutDraftFeasibilityService'
@@ -52,6 +54,8 @@ import {
   type RuntimePendingAtomicContext,
   type RuntimePendingAtomicPhase,
   type RuntimeAtomicSlotBag,
+  type RuntimeDraftResearchSuggestion,
+  type RuntimeFormalRebuildConfirmation,
   type RuntimeResumeCompositeTask,
 } from './pendingAtomicContext'
 import {
@@ -63,6 +67,8 @@ import {
   type SchedulingTaskRun,
   type SchedulingTaskStage,
 } from './schedulingTaskPlan'
+import { getSchedulingReactTaskRuntime } from './reactTaskRuntime'
+import type { ReactTaskObservationType, ReactTaskRun } from './reactTaskTypes'
 import {
   buildBatchDeleteSchedulingTaskRun,
   buildInsertWithShiftSchedulingTaskRun,
@@ -78,9 +84,10 @@ import {
 } from './foregroundAgentContextPackage'
 import { resolveFormalOrchestrationSearchKeywords } from '@/services/retrievalConstraintCompiler'
 import { evaluateLayoutDraftCompleteness, type LayoutDraftCompleteness } from '@/services/layoutDraftCompleteness'
+import { isRecoverableLlmError } from '@/services/llm/llmFailure'
 
 export type RuntimeDetailMap = Record<string, unknown>
-export type RuntimeProcessType = 'planning' | 'selection' | 'execution' | 'validation' | 'general'
+export type RuntimeProcessType = 'planning' | 'selection' | 'execution' | 'validation' | 'general' | 'error'
 export interface RuntimeFeedback { content: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; processType: RuntimeProcessType; processTypeLabel: string }
 export interface RuntimeScheduleItem { id: string; programCode?: string; programName?: string; startTime: string; endTime: string; duration?: number; programType?: string }
 export interface RuntimePendingCommand { command: OrchestrationCommand; commands?: OrchestrationCommand[]; summary: string; successMessage?: string; reasoning: string; details?: RuntimeDetailMap }
@@ -100,7 +107,28 @@ export interface RuntimePlaylistFactPack {
   items: RuntimePlaylistFactItem[]
   typeDurations: Array<{ programType: string; itemCount: number; durationSeconds: number }>
   timeBands: Array<{ label: string; itemCount: number; durationSeconds: number }>
-  layoutDraftState: { exists: boolean; coverage?: { start: string; end: string }; segmentCount?: number }
+  layoutDraftState: {
+    exists: boolean
+    coverage?: { start: string; end: string }
+    segmentCount?: number
+    userIntent?: string
+    purpose?: string
+    targetDurationSeconds?: number
+    strategyLabel?: string
+    strategySummary?: string
+    warnings?: string[]
+    segments?: Array<{
+      label: string
+      startTime?: string
+      endTime?: string
+      programType?: string
+      contentHint?: string
+      targetDurationSeconds?: number
+      selectionPriority?: DraftSelectionPriority
+      constraintKind?: LayoutDraft['columns'][number]['draftConstraintKind']
+      queryHints?: string[]
+    }>
+  }
 }
 export interface RuntimeAnalysisContext {
   kind: 'playlist_analysis' | 'optimization_suggestion'
@@ -114,7 +142,7 @@ export interface RuntimeAnalysisContext {
 }
 export interface RuntimeExecutionPlan { command: OrchestrationCommand; successMessage?: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap }
 export interface RuntimeExecutedResult { success: boolean; command: OrchestrationCommand; message: string; error?: string; summary: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; data?: unknown; affectedTimeRanges?: { start: string; end: string }[]; validationReport?: ValidationReport; validationSummary?: RuntimeDetailMap }
-export interface RuntimeSubmitInput { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[]; currentLayoutDraft?: LayoutDraft | null; currentLayoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'> | null; analysisContext?: RuntimeAnalysisContext | null; pendingTargetSelection?: RuntimePendingTargetSelection | null; pendingInsertRecommendation?: RuntimePendingInsertRecommendation | null; pendingAtomicClarification?: RuntimePendingAtomicClarification | null; pendingAtomicContext?: RuntimePendingAtomicContext | null; foregroundContextPackage?: ForegroundAgentContextPackage; history?: string[]; agentCoreEnabled?: boolean; layoutDraftEnabled?: boolean; preferDraftFirstFormalOrchestration?: boolean; preferLayoutDraftRefine?: boolean }
+export interface RuntimeSubmitInput { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[]; currentLayoutDraft?: LayoutDraft | null; currentLayoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'> | null; analysisContext?: RuntimeAnalysisContext | null; pendingTargetSelection?: RuntimePendingTargetSelection | null; pendingInsertRecommendation?: RuntimePendingInsertRecommendation | null; pendingAtomicClarification?: RuntimePendingAtomicClarification | null; pendingAtomicContext?: RuntimePendingAtomicContext | null; activeReactTaskRun?: ReactTaskRun | null; foregroundContextPackage?: ForegroundAgentContextPackage; history?: string[]; agentCoreEnabled?: boolean; layoutDraftEnabled?: boolean; preferDraftFirstFormalOrchestration?: boolean; preferLayoutDraftRefine?: boolean; inputSource?: 'user' | 'quick_action' | 'system' }
 export interface RuntimeResolveTargetSelectionInput { channelId: string; date: string; pendingTargetSelection: RuntimePendingTargetSelection; scheduleState?: ScheduleState }
 export interface RuntimeResolveInsertRecommendationInput { scheduleState: ScheduleState; pendingInsertRecommendation: RuntimePendingInsertRecommendation; currentSchedule?: RuntimeScheduleItem[]; userInput?: string }
 export interface RuntimeExecutePendingCommandInput { pendingCommand: RuntimePendingCommand; scheduleDate: string; channelId: string }
@@ -150,6 +178,11 @@ type RuntimeFormalOrchestrationBasis = {
   shouldUseLayoutDraft: boolean
   layoutDraft?: LayoutDraft
   completeness: LayoutDraftCompleteness
+}
+type RuntimeLinkedLayoutDraft = {
+  layoutDraft: LayoutDraft
+  layoutDraftFeasibility: DraftFeasibilityReport
+  layoutDraftMode: Extract<TaskMode, 'full_generate' | 'partial_generate'>
 }
 
 type RuntimeMicroEditBuildResult = { command: OrchestrationCommand | null; message?: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; successMessage?: string; pendingTargetSelection?: RuntimePendingTargetSelection; pendingInsertRecommendation?: RuntimePendingInsertRecommendation; forceDirectExecution?: boolean; suppressClarificationFallback?: boolean }
@@ -204,6 +237,7 @@ const asScheduleSnapshot = (item: RuntimeScheduleItem, date: string, sequence: n
 
 export class DemoRuntimeFacade {
   private readonly llmClient = getLLMClient()
+  private readonly agentPlanner = getAgentPlanner(this.llmClient)
   private readonly taskClassifier = getTaskClassifier(this.llmClient)
   private readonly intentRecognizer = getIntentRecognizer(this.llmClient)
   private readonly layoutIntentRecognizer = getLayoutIntentRecognizer(this.llmClient)
@@ -223,6 +257,7 @@ export class DemoRuntimeFacade {
   private readonly layoutDraftFeasibilityService = getLayoutDraftFeasibilityService()
   private readonly dataService = getDataService()
   private readonly layoutAnalysisService = getLayoutAnalysisService(this.llmClient)
+  private readonly reactTaskRuntime = getSchedulingReactTaskRuntime()
   private playlistDocumentSequence = 0
 
   private buildTaskClassifierHistory(input: RuntimeSubmitInput): string[] | undefined {
@@ -319,13 +354,13 @@ export class DemoRuntimeFacade {
         }
       }
       const durationText = rotationDurationSeconds
-        ? `，总时长 ${this.formatRotationDurationText(rotationDurationSeconds)}，按 0 点起算`
+        ? `，总时长 ${this.formatRotationDurationText(rotationDurationSeconds)}`
         : ''
       const structureHint = rotationDurationSeconds
         ? '你可以继续补充主要内容、栏目类型或上传轮播草案。'
         : '当前还不知道轮播要排多长，也没有轮播草案，很难直接编排；建议先说明总时长、主要内容、选择策略，或上传/生成轮播草案。'
       return this.buildPlaylistStateChangedDecision(
-        `已新建轮播单${durationText}，${rotationStrategy === 'content_match' ? '默认按内容匹配优先选择节目' : `本次按${this.describeRotationStrategy(rotationStrategy)}选择节目`}。轮播单按时长制处理，不绑定具体日期和电视频道时段。${structureHint}`,
+        `已新建轮播单${durationText}，${rotationStrategy === 'content_match' ? '默认按内容匹配优先选择节目' : `本次按${this.describeRotationStrategy(rotationStrategy)}选择节目`}。轮播单按时长制处理，从 0 点起算，不绑定具体日期和电视频道时段。${structureHint}`,
         'rotation',
         rotationStrategy,
         rotationDurationSeconds ?? undefined,
@@ -403,6 +438,20 @@ export class DemoRuntimeFacade {
     return createVerbPattern.test(normalized) && new RegExp(targetPattern).test(normalized)
   }
 
+  private isBarePlaylistCreationInstruction(userInput: string): boolean {
+    const normalized = userInput.replace(/\s+/g, '')
+    const hasPlanningPayload = /(?:第[一二两三四五六七八九十\d]+|第一|第二|第三|第四|小时|分钟|总时长|时长|主要|主题|涵盖|用于|内容|草案|版面|按|安排|编排|排满|排成|规划|设计|整理|生成|制作|,|，|。|；|;)/u.test(normalized)
+    if (hasPlanningPayload) return false
+    return this.isPurePlaylistCreationInstruction(normalized, 'tv')
+      || this.isPurePlaylistCreationInstruction(normalized, 'rotation')
+  }
+
+  private isExplicitNewPlaylistWorkspaceInstruction(userInput: string): boolean {
+    const normalized = userInput.replace(/\s+/g, '')
+    return this.isPurePlaylistCreationInstruction(normalized, 'tv')
+      || this.isPurePlaylistCreationInstruction(normalized, 'rotation')
+  }
+
   private buildPlaylistStateChangedDecision(
     content: string,
     playlistType: PlaylistType,
@@ -413,11 +462,7 @@ export class DemoRuntimeFacade {
     channelName?: string,
     date?: string,
     extraDetails?: RuntimeDetailMap,
-    linkedDraft?: {
-      layoutDraft: LayoutDraft
-      layoutDraftFeasibility: DraftFeasibilityReport
-      layoutDraftMode: Extract<TaskMode, 'full_generate' | 'partial_generate'>
-    },
+    linkedDraft?: RuntimeLinkedLayoutDraft,
   ): RuntimeDecision {
     const playlistState: Record<string, unknown> = {
       playlistId,
@@ -545,10 +590,1053 @@ export class DemoRuntimeFacade {
     }
   }
 
+  private buildRecoverableLlmFailureDecision(
+    input: RuntimeSubmitInput,
+    llmFailure: LlmFailureInfo,
+    reasoning?: string,
+  ): RuntimeDecision {
+    const retryHint = '你可以直接说“重试”或“继续”，我会按刚才这句话再试一次。'
+    const content = llmFailure.reason === 'timeout'
+      ? `这次模型没有及时返回，我还没有修改草案或播单。${retryHint}`
+      : `这次模型服务没有正常返回，我还没有修改草案或播单。${retryHint}`
+
+    return {
+      kind: 'message',
+      statusHint: 'failed',
+      feedback: createFeedback(
+        content,
+        'error',
+        '模型未返回',
+        {
+          explanation: reasoning || llmFailure.message,
+          details: {
+            llmFailure,
+            recoverableUserInput: input.userInput,
+            canRetry: llmFailure.canRetry,
+            noMutation: true,
+          },
+        },
+      ),
+    }
+  }
+
+  private async tryHandleAgentPlannerInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision> {
+    const plan = await this.agentPlanner.plan({
+      scheduleState: input.scheduleState,
+      userInput: input.userInput,
+      currentSchedule: input.currentSchedule,
+      currentLayoutDraft: input.currentLayoutDraft,
+      history: input.history,
+      contextPackage: input.foregroundContextPackage,
+    })
+    if (plan.llmFailure) {
+      return this.buildRecoverableLlmFailureDecision(input, plan.llmFailure, plan.reasoning)
+    }
+    return await this.executeAgentPlan(input, plan)
+  }
+
+  private buildMissingPlaylistWorkspaceDecision(reasoning?: string): RuntimeDecision {
+    return {
+      kind: 'message',
+      statusHint: 'needs_clarification',
+      feedback: createFeedback(
+        '请先创建或打开一张电视播单或轮播单，我才知道这条指令要写到哪里。你可以直接说“新建电视播单”或“新建轮播单”。',
+        'general',
+        '先选播单',
+        {
+          explanation: reasoning || '当前没有活动播单工作区，不能执行会写入播单的原子命令。',
+          details: {
+            playlistType: 'none',
+            noMutation: true,
+            suggestedActions: ['新建电视播单', '新建轮播单', '打开已有播单'],
+          },
+        },
+      ),
+    }
+  }
+
+  private async executeAgentPlan(input: RuntimeSubmitInput, plan: AgentPlan): Promise<RuntimeDecision> {
+    const actions = plan.actions
+    if (plan.mode === 'react' && plan.reactTask && actions.length === 0) {
+      return this.executeReactAgentPlan(input, plan)
+    }
+    if (!actions.length) {
+      const unsafeReplyDecision = this.buildUnsafePlannerReplyDecision(input, plan)
+      if (unsafeReplyDecision) return unsafeReplyDecision
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          plan.assistantReplyDraft || '我还没能把这句话整理成可执行步骤，请换一种说法。',
+          'general',
+          '需要澄清',
+          { explanation: plan.reasoning },
+        ),
+      }
+    }
+
+    const createAction = actions.find((action): action is Extract<AgentPlannerAction, { type: 'create_playlist' }> => action.type === 'create_playlist')
+    const draftAction = actions.find((action): action is Extract<AgentPlannerAction, { type: 'prepare_layout_draft' | 'refine_layout_draft' }> =>
+      action.type === 'prepare_layout_draft' || action.type === 'refine_layout_draft',
+    )
+
+    if (
+      input.scheduleState.playlistType === 'none'
+      && draftAction
+      && !this.hasExplicitPlannerPlaylistTypeCue(input.userInput)
+    ) {
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          '你是想建电视播单草案，还是轮播单草案？先告诉我播单类型，我再继续整理草案。',
+          'planning',
+          '需要确认播单类型',
+          {
+            explanation: plan.reasoning || '当前还没有打开播单，用户只提到草案，不能替用户默认选择电视播单或轮播单。',
+            details: {
+              plannerActions: plan.actions.map((action) => action.type),
+              noMutation: true,
+            },
+          },
+        ),
+      }
+    }
+
+    if (createAction) {
+      const decision = await this.executePlannerCreatePlaylist(input, plan, createAction, draftAction)
+      return this.withReactTaskBoundary(
+        input,
+        plan,
+        this.withAgentPlannerTrace(decision, plan),
+        'preflight',
+      )
+    }
+
+    const researchAction = actions.find((action): action is Extract<AgentPlannerAction, { type: 'research_check' }> => action.type === 'research_check')
+    if (researchAction) {
+      const decision = await this.executePlannerResearchCheck(input, plan, researchAction)
+      return this.withAgentPlannerTrace(decision, plan)
+    }
+
+    if (draftAction) {
+      const decision = await this.executePlannerLayoutDraftAction(input, draftAction, plan.reasoning)
+      return this.withReactTaskBoundary(
+        input,
+        plan,
+        this.withAgentPlannerTrace(decision, plan),
+        'preflight',
+      )
+    }
+
+    const commitAction = actions.find((action): action is Extract<AgentPlannerAction, { type: 'commit_layout_draft' }> => action.type === 'commit_layout_draft')
+    if (commitAction) {
+      return await this.commitLayoutDraft(input, {
+        mode: 'layout_commit',
+        confidence: 0.9,
+        reasoning: plan.reasoning || 'LLM planner 判断用户正在确认草案进入正式编排。',
+        suggestedParams: {
+          orchestrationMode: commitAction.mode,
+        },
+      })
+    }
+
+    const formalAction = actions.find((action): action is Extract<AgentPlannerAction, { type: 'formal_orchestration' }> => action.type === 'formal_orchestration')
+    if (formalAction) {
+      return this.buildFormalOrchestrationDecision(
+        input,
+        formalAction.mode,
+        plan.reasoning || 'LLM planner 判断用户正在发起正式编排。',
+      )
+    }
+
+    if (actions.some((action) => action.type === 'read_only_analysis')) {
+      const decision = await this.tryHandleReadOnlyPlaylistDiscussion(input)
+      if (decision) return decision
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          plan.assistantReplyDraft || '我可以分析当前编单，但还需要看到当前播单或草案内容。',
+          'general',
+          '需要澄清',
+          { explanation: plan.reasoning },
+        ),
+      }
+    }
+
+    if (actions.some((action) => action.type === 'validate')) {
+      return this.buildValidationDecision({
+        mode: 'validate_only',
+        confidence: 0.9,
+        reasoning: plan.reasoning || 'LLM planner 判断用户正在要求校验。',
+      }, input)
+    }
+
+    if (actions.some((action) => action.type === 'atomic_command')) {
+      if (input.scheduleState.playlistType === 'none') {
+        return this.buildMissingPlaylistWorkspaceDecision(plan.reasoning)
+      }
+      if (input.agentCoreEnabled) {
+        const agentCoreDecision = await this.tryHandleAgentCoreInstruction(input)
+        if (agentCoreDecision) return agentCoreDecision
+      }
+      const atomicDecision = await this.tryHandleAtomicInstruction(input)
+      if (atomicDecision) return atomicDecision
+    }
+
+    const clarifyAction = actions.find((action): action is Extract<AgentPlannerAction, { type: 'clarify' }> => action.type === 'clarify')
+    const unsafeReplyDecision = this.buildUnsafePlannerReplyDecision(input, plan)
+    if (unsafeReplyDecision) return unsafeReplyDecision
+    return {
+      kind: 'message',
+      statusHint: 'needs_clarification',
+      feedback: createFeedback(
+        plan.assistantReplyDraft || clarifyAction?.question || '我还需要你再补充一下具体想怎么编排。',
+        'general',
+        '需要澄清',
+        { explanation: plan.reasoning },
+      ),
+    }
+  }
+
+  private async executeReactAgentPlan(input: RuntimeSubmitInput, plan: AgentPlan): Promise<RuntimeDecision> {
+    const reactTask = plan.reactTask
+    if (!reactTask) {
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          plan.assistantReplyDraft || '这个长程任务还缺少第一步要查证或执行的内容，请再补充一下。',
+          'planning',
+          '需要补充任务步骤',
+          {
+            explanation: plan.reasoning,
+            details: {
+              noMutation: true,
+              plannerMode: plan.mode,
+            },
+          },
+        ),
+      }
+    }
+    const taskRun = this.prepareReactTaskRun(input, reactTask, plan.reasoning)
+    const firstStep = taskRun.steps.find((step) => step.status === 'pending' || step.status === 'running')
+    const firstAction = firstStep?.action ?? reactTask.nextActions[0]
+    if (taskRun.status === 'failed') {
+      return {
+        kind: 'message',
+        statusHint: 'failed',
+        feedback: createFeedback(
+          taskRun.recovery?.lastFailure || '这个长程任务已经达到处理上限，我先停下来，避免继续误操作。',
+          'error',
+          '任务已暂停',
+          {
+            explanation: plan.reasoning,
+            details: {
+              noMutation: true,
+              reactTaskRun: taskRun,
+              reactTaskBoundary: {
+                mode: 'react',
+                serverMigratable: true,
+                stateOwner: 'SchedulingReactTaskRuntime',
+                stoppedByLimit: true,
+              },
+            },
+          },
+        ),
+      }
+    }
+    if (!firstAction) {
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          plan.assistantReplyDraft || '我理解这是一个长程编排目标，但还没有明确第一步要查什么或做什么。',
+          'planning',
+          '需要补充任务步骤',
+          {
+            explanation: plan.reasoning,
+            details: {
+              noMutation: true,
+              reactTaskRun: taskRun,
+            },
+          },
+        ),
+      }
+    }
+
+    const decision = await this.executeAgentPlan(input, {
+      mode: 'single',
+      actions: [firstAction],
+      assistantReplyDraft: plan.assistantReplyDraft,
+      reasoning: plan.reasoning,
+    })
+    if (!('feedback' in decision)) return decision
+    const observedRun = this.reactTaskRuntime.recordObservation({
+      run: taskRun,
+      type: this.resolveReactObservationType(firstAction),
+      summary: decision.feedback.content,
+      data: decision.feedback.details,
+    })
+    return {
+      ...decision,
+      feedback: {
+        ...decision.feedback,
+        details: {
+          ...(decision.feedback.details ?? {}),
+          reactTaskRun: observedRun,
+          reactTaskBoundary: {
+            mode: 'react',
+            serverMigratable: true,
+            stateOwner: 'SchedulingReactTaskRuntime',
+            nextDecisionRequiresObservation: true,
+          },
+        },
+      },
+    } as RuntimeDecision
+  }
+
+  private prepareReactTaskRun(
+    input: RuntimeSubmitInput,
+    reactTask: NonNullable<AgentPlan['reactTask']>,
+    reason?: string,
+  ): ReactTaskRun<AgentPlannerAction> {
+    const activeRun = input.activeReactTaskRun as ReactTaskRun<AgentPlannerAction> | null | undefined
+    if (
+      activeRun
+      && activeRun.status !== 'completed'
+      && activeRun.status !== 'cancelled'
+      && (activeRun.status !== 'failed' || activeRun.recovery?.canRetry === true)
+    ) {
+      const baseRun = activeRun.status === 'failed'
+        ? this.reactTaskRuntime.markRetry(activeRun)
+        : activeRun
+      return this.reactTaskRuntime.continueWithActions({
+        run: baseRun,
+        nextActions: reactTask.nextActions,
+        reason,
+      })
+    }
+    return this.reactTaskRuntime.startTask({
+      originalUserInput: input.userInput,
+      plannerTask: reactTask,
+    })
+  }
+
+  private resolveReactObservationType(action: AgentPlannerAction): ReactTaskObservationType {
+    if (action.type === 'research_check') return 'asset_search'
+    if (action.type === 'formal_orchestration' || action.type === 'commit_layout_draft') return 'formal_execution'
+    if (action.type === 'atomic_command') return 'atomic_execution'
+    if (action.type === 'validate') return 'validation'
+    if (action.type === 'prepare_layout_draft' || action.type === 'refine_layout_draft') return 'draft_check'
+    return 'user_feedback'
+  }
+
+  private withReactTaskBoundary(
+    input: RuntimeSubmitInput,
+    plan: AgentPlan,
+    decision: RuntimeDecision,
+    stage: 'preflight' | 'observed',
+  ): RuntimeDecision {
+    if (plan.mode !== 'react' || !plan.reactTask || !('feedback' in decision)) {
+      return decision
+    }
+    const taskRun = this.reactTaskRuntime.startTask({
+      originalUserInput: input.userInput,
+      plannerTask: plan.reactTask,
+    })
+    return {
+      ...decision,
+      feedback: {
+        ...decision.feedback,
+        details: {
+          ...(decision.feedback.details ?? {}),
+          reactTaskRun: taskRun,
+          reactTaskBoundary: {
+            mode: 'react',
+            stage,
+            serverMigratable: true,
+            stateOwner: 'SchedulingReactTaskRuntime',
+            nextDecisionRequiresObservation: stage === 'observed',
+            preflightActions: plan.actions.map((action) => action.type),
+          },
+        },
+      },
+    } as RuntimeDecision
+  }
+
+  private buildUnsafePlannerReplyDecision(input: RuntimeSubmitInput, plan: AgentPlan): RuntimeDecision | null {
+    const reply = plan.assistantReplyDraft ?? ''
+    if (!reply) return null
+    const hasExecutableAction = plan.actions.some((action) => (
+      action.type === 'create_playlist'
+      || action.type === 'prepare_layout_draft'
+      || action.type === 'refine_layout_draft'
+      || action.type === 'commit_layout_draft'
+      || action.type === 'formal_orchestration'
+      || action.type === 'atomic_command'
+      || action.type === 'research_check'
+      || action.type === 'validate'
+    ))
+    if (hasExecutableAction) return null
+    const claimsExecution = /(?:已|正在|开始|马上|准备)(?:[^。；;，,]{0,18})(?:编排|写入|修改|更新|删除|插入|移动|替换|执行)/u.test(reply)
+    if (!claimsExecution) return null
+    return {
+      kind: 'message',
+      statusHint: 'needs_clarification',
+      feedback: createFeedback(
+        input.currentLayoutDraft
+          ? '我还没有进入正式编排。请直接确认是否按当前草案开始编排，或继续告诉我要怎么微调草案。'
+          : '我还没有执行修改。请再明确你要创建草案、进入编排，还是做单条插入、删除、移动。',
+        'planning',
+        '需要确认',
+        {
+          explanation: plan.reasoning || 'LLM 没有返回可执行动作，本地不会把主回复里的执行语气当成真实写入结果。',
+          details: {
+            plannerActions: plan.actions.map((action) => action.type),
+            assistantReplyDraft: reply,
+            noMutation: true,
+          },
+        },
+      ),
+    }
+  }
+
+  private withAgentPlannerTrace(decision: RuntimeDecision, plan: AgentPlan): RuntimeDecision {
+    if (!('feedback' in decision)) return decision
+    return {
+      ...decision,
+      feedback: {
+        ...decision.feedback,
+        details: {
+          ...(decision.feedback.details ?? {}),
+          agentPlannerTrace: {
+            actions: plan.actions,
+            reasoning: plan.reasoning,
+            assistantReplyDraft: plan.assistantReplyDraft,
+          },
+        },
+      },
+    } as RuntimeDecision
+  }
+
+  private async executePlannerResearchCheck(
+    input: RuntimeSubmitInput,
+    plan: AgentPlan,
+    action: Extract<AgentPlannerAction, { type: 'research_check' }>,
+  ): Promise<RuntimeDecision> {
+    const draftSegment = this.resolveResearchDraftSegment(input.currentLayoutDraft, action)
+    const queries = this.buildResearchQueries(input, action, draftSegment)
+    const candidateGroups = await Promise.all(queries.map(async (query) => ({
+      query,
+      candidates: await this.candidateService.searchPrograms({
+        channelId: input.scheduleState.channelId,
+        programName: query,
+        programTypes: this.normalizeResearchProgramTypes(action.programTypeHint),
+        limit: 8,
+        columnStrategy: 'prefer_channel',
+      }),
+    })))
+    const mergedCandidates = this.mergeResearchCandidates(candidateGroups.flatMap((group) => group.candidates)).slice(0, 12)
+    const observation = {
+      reactTask: {
+        loopTurn: 1,
+        status: 'observed',
+        tools: ['read_current_draft', 'search_asset_library'],
+        next: 'assistant_synthesize',
+      },
+      noMutation: true,
+      purpose: action.purpose ?? 'draft_precheck',
+      draftSegment,
+      queries,
+      candidateCount: mergedCandidates.length,
+      topCandidates: mergedCandidates.map((candidate) => ({
+        id: candidate.id,
+        programName: candidate.programName,
+        programCode: candidate.programCode,
+        duration: candidate.duration,
+        durationText: this.formatDurationText(candidate.duration),
+        programType: candidate.programType,
+        columnName: candidate.columnName,
+        contentTags: candidate.contentTags?.slice(0, 6),
+        estimatedRating: candidate.estimatedRating,
+        playCount: candidate.playCount,
+        popularityScore: candidate.popularityScore,
+      })),
+      queryResults: candidateGroups.map((group) => ({
+        query: group.query,
+        count: group.candidates.length,
+        topNames: group.candidates.slice(0, 3).map((candidate) => candidate.programName),
+      })),
+    }
+    const synthesizedReply = await this.synthesizeResearchCheckReply(input, plan, action, observation)
+    const safeContent = this.sanitizeResearchCheckReply(
+      synthesizedReply || this.buildResearchCheckFallbackReply(action, observation),
+      observation.candidateCount,
+    )
+    const feedback = createFeedback(
+      safeContent,
+      'planning',
+      '素材核验',
+      {
+        explanation: plan.reasoning,
+        details: observation,
+      },
+    )
+
+    if (observation.candidateCount > 0) {
+      if (action.purpose === 'candidate_precheck' && action.targetTime) {
+        return this.buildResearchInsertRecommendationDecision(input, plan, action, observation, safeContent)
+      }
+      const suggestion = this.buildDraftResearchSuggestion(input, plan, action, observation)
+      return {
+        kind: 'pending_atomic_context',
+        feedback,
+        pendingAtomicContext: this.buildDraftResearchPendingContext(input, suggestion),
+      }
+    }
+
+    return {
+      kind: 'message',
+      statusHint: 'needs_clarification',
+      feedback,
+    }
+  }
+
+  private buildResearchInsertRecommendationDecision(
+    input: RuntimeSubmitInput,
+    plan: AgentPlan,
+    action: Extract<AgentPlannerAction, { type: 'research_check' }>,
+    observation: {
+      candidateCount: number
+      topCandidates: Array<{
+        id: string
+        programName: string
+        programCode?: string
+        duration: number
+        programType: string
+        popularityScore?: number
+      }>
+    },
+    safeContent: string,
+  ): RuntimeDecision {
+    if (input.scheduleState.playlistType === 'none') {
+      return this.buildMissingPlaylistWorkspaceDecision(plan.reasoning)
+    }
+    const targetTime = action.targetTime
+    if (!targetTime) {
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          '我已经查到了一些素材方向，但还不知道要插入到哪个时间点。请补一句例如“放到9点”。',
+          'selection',
+          '缺少插入时间',
+          {
+            explanation: plan.reasoning,
+            details: {
+              noMutation: true,
+              candidateCount: observation.candidateCount,
+            },
+          },
+        ),
+      }
+    }
+    const recommendedCandidates: RuntimeInsertRecommendationCandidate[] = observation.topCandidates.slice(0, 5).map((candidate, index) => ({
+      candidateId: candidate.id,
+      programName: candidate.programName,
+      programCode: candidate.programCode ?? candidate.id,
+      duration: candidate.duration,
+      programType: candidate.programType,
+      score: candidate.popularityScore ?? Math.max(1, 5 - index),
+      confidence: Math.max(0.55, 0.9 - index * 0.08),
+      reasonTags: ['素材查证', action.semanticLabel ?? '内容匹配'],
+    }))
+    const pendingInsertRecommendation = this.buildPendingInsertRecommendation(
+      {
+        targetTime,
+        semanticLabel: action.semanticLabel,
+        rawProgramText: action.semanticLabel,
+        programTypeHint: action.programTypeHint,
+      },
+      input.userInput,
+      plan.reasoning || 'LLM planner 先查证素材，再进入插入候选选择。',
+      recommendedCandidates,
+    )
+    return this.buildPendingInsertRecommendationDecision(
+      pendingInsertRecommendation,
+      `${safeContent} 我先不替你自动选节目，请从下面候选里选一个，再确认是否插入 ${targetTime}。`,
+    )
+  }
+
+  private buildDraftResearchSuggestion(
+    input: RuntimeSubmitInput,
+    plan: AgentPlan,
+    action: Extract<AgentPlannerAction, { type: 'research_check' }>,
+    observation: {
+      draftSegment: RuntimeDetailMap | null
+      queries: string[]
+      candidateCount: number
+      topCandidates: Array<{
+        id: string
+        programName: string
+        programCode?: string
+        duration: number
+        programType: string
+        columnName?: string
+        contentTags?: string[]
+        popularityScore?: number
+      }>
+    },
+  ): RuntimeDraftResearchSuggestion {
+    const draftSegment = observation.draftSegment
+    const targetSegmentIndex = typeof draftSegment?.index === 'number'
+      ? draftSegment.index
+      : action.targetSegmentIndex
+    const targetSegmentLabel = typeof draftSegment?.label === 'string'
+      ? draftSegment.label
+      : action.targetSegmentLabel
+    const topCandidateNames = observation.topCandidates.slice(0, 3).map((candidate) => candidate.programName)
+    const semanticLabel = action.semanticLabel
+      || topCandidateNames[0]
+      || targetSegmentLabel
+      || '待核验内容'
+    return {
+      purpose: action.purpose ?? 'draft_precheck',
+      targetSegmentIndex,
+      targetSegmentLabel,
+      semanticLabel,
+      programTypeHint: action.programTypeHint,
+      queries: observation.queries,
+      candidateCount: observation.candidateCount,
+      topCandidates: observation.topCandidates.map((candidate) => ({
+        id: candidate.id,
+        programName: candidate.programName,
+        programCode: candidate.programCode,
+        duration: candidate.duration,
+        programType: candidate.programType,
+        columnName: candidate.columnName,
+        contentTags: candidate.contentTags,
+        popularityScore: candidate.popularityScore,
+      })),
+      userInput: input.userInput,
+      reasoning: plan.reasoning,
+    }
+  }
+
+  private buildDraftResearchPendingContext(
+    input: RuntimeSubmitInput,
+    suggestion: RuntimeDraftResearchSuggestion,
+  ): RuntimePendingAtomicContext {
+    const now = new Date().toISOString()
+    const targetText = suggestion.targetSegmentIndex
+      ? `第 ${suggestion.targetSegmentIndex} 段`
+      : suggestion.targetSegmentLabel ?? '当前草案段'
+    return this.pendingAtomicContextService.initialize({
+      action: null,
+      phase: 'draft_research_confirmation',
+      summary: `是否把“${suggestion.semanticLabel}”更新到${targetText}草案`,
+      reasoning: '我已经按你的要求查过草案段和素材库；如果你确认，只会更新版面草案，不会写入正式播单。',
+      confirmationNote: '请确认是否把这个方向更新到草案。确认后我只改草案，不会开始正式编排。',
+      originalUserInput: input.userInput,
+      collectedUserInput: input.userInput,
+      slots: {
+        semanticLabel: suggestion.semanticLabel,
+        programTypeHint: suggestion.programTypeHint,
+        rawProgramText: suggestion.topCandidates[0]?.programName,
+      },
+      missingFields: ['selection'],
+      followUpQuestion: '需要我把这个方向更新到草案吗？',
+      layoutDraftSuggestion: suggestion,
+      attemptCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    })
+  }
+
+  private resolveResearchDraftSegment(
+    draft: LayoutDraft | null | undefined,
+    action: Extract<AgentPlannerAction, { type: 'research_check' }>,
+  ): RuntimeDetailMap | null {
+    if (!draft) return null
+    const slots = draft.layoutReference.slots
+    const normalizedLabel = (action.targetSegmentLabel ?? action.semanticLabel ?? '').replace(/\s+/g, '').toLowerCase()
+    let index = action.targetSegmentIndex ? action.targetSegmentIndex - 1 : -1
+    if (index < 0 && normalizedLabel) {
+      index = slots.findIndex((slot, slotIndex) => {
+        const column = draft.columns.find((item) => item.columnId === slot.columnId)
+        const segment = draft.durationSegments?.[slotIndex]
+        const haystack = [
+          column?.semanticLabel,
+          column?.columnName,
+          segment?.label,
+          ...(column?.queryHints ?? []),
+        ].filter(Boolean).join('').replace(/\s+/g, '').toLowerCase()
+        return haystack.includes(normalizedLabel) || normalizedLabel.includes(haystack)
+      })
+    }
+    if (index < 0 || index >= slots.length) return null
+    const slot = slots[index]!
+    const column = draft.columns.find((item) => item.columnId === slot.columnId)
+    const durationSegment = draft.durationSegments?.[index]
+    return {
+      index: index + 1,
+      start: toClockText(slot.startTime),
+      end: toClockText(slot.endTime),
+      label: column?.semanticLabel ?? column?.columnName ?? durationSegment?.label ?? slot.columnId,
+      programType: column?.defaultProgramType,
+      queryHints: column?.queryHints?.slice(0, 8) ?? [],
+      targetDurationSeconds: durationSegment?.targetDurationSeconds,
+      targetDurationText: durationSegment?.targetDurationSeconds ? this.formatDurationText(durationSegment.targetDurationSeconds) : undefined,
+      selectionPriority: durationSegment?.selectionPriority,
+    }
+  }
+
+  private buildResearchQueries(
+    input: RuntimeSubmitInput,
+    action: Extract<AgentPlannerAction, { type: 'research_check' }>,
+    draftSegment: RuntimeDetailMap | null,
+  ): string[] {
+    const queries = dedupeStrings([
+      ...(action.queries ?? []),
+      action.semanticLabel ?? '',
+      action.targetSegmentLabel ?? '',
+      ...((draftSegment?.queryHints as string[] | undefined) ?? []),
+      typeof draftSegment?.label === 'string' ? draftSegment.label : '',
+      input.userInput,
+    ].map((item) => item.trim()).filter(Boolean))
+    return queries.slice(0, 8)
+  }
+
+  private mergeResearchCandidates(candidates: ProgramCandidate[]): ProgramCandidate[] {
+    const merged = new Map<string, ProgramCandidate>()
+    candidates.forEach((candidate) => {
+      const key = candidate.id || candidate.programCode || candidate.programId
+      if (!merged.has(key)) merged.set(key, candidate)
+    })
+    return [...merged.values()].sort((a, b) => this.scoreResearchCandidate(b) - this.scoreResearchCandidate(a))
+  }
+
+  private normalizeResearchProgramTypes(programTypeHint?: string): string[] | undefined {
+    if (!programTypeHint) return undefined
+    const normalized = programTypeHint.trim().toLowerCase()
+    const knownTypes = new Set([
+      'news',
+      'news_magazine',
+      'drama',
+      'entertainment',
+      'health',
+      'commentary',
+      'kids',
+      'documentary',
+      'tv',
+      'short_video',
+    ])
+    return knownTypes.has(normalized) ? [normalized] : undefined
+  }
+
+  private scoreResearchCandidate(candidate: ProgramCandidate): number {
+    return (candidate.popularityScore ?? 0)
+      + (candidate.playCount ? Math.log10(candidate.playCount + 1) * 10 : 0)
+      + (candidate.estimatedRating ? candidate.estimatedRating * 10 : 0)
+  }
+
+  private async synthesizeResearchCheckReply(
+    input: RuntimeSubmitInput,
+    plan: AgentPlan,
+    action: Extract<AgentPlannerAction, { type: 'research_check' }>,
+    observation: RuntimeDetailMap,
+  ): Promise<string | null> {
+    try {
+      const response = await this.llmClient.chat([
+        {
+          role: 'system',
+          content: [
+            '你是 AI 编审助手。根据工具观察结果，用编排员听得懂的话回复。',
+            '你只能说已经检查草案或查过素材库；不能说已经更新草案、不能说已经写入正式播单。',
+            '如果素材看起来够用，给出你建议选哪些方向，并在结尾问“需要我把这个方向更新到草案吗？”',
+            '如果素材不足，说明缺什么，并建议用户换关键词、补充主题或上传素材。',
+            '不要输出 JSON、runtime、taskPlan、置信度、候选数这类技术词。',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            userInput: input.userInput,
+            playlistType: input.scheduleState.playlistType,
+            plannerReasoning: plan.reasoning,
+            plannerAssistantReplyDraft: plan.assistantReplyDraft,
+            researchAction: action,
+            observation,
+          }),
+        },
+      ], {
+        temperature: 0.2,
+        maxTokens: 900,
+        timeout: 60000,
+        maxRetries: 0,
+        traceLabel: 'agent_react_synthesize',
+      })
+      return response.content.trim()
+    } catch {
+      return null
+    }
+  }
+
+  private sanitizeResearchCheckReply(content: string, candidateCount: number): string {
+    const trimmed = content.trim()
+    if (
+      trimmed.startsWith('{')
+      || /"reactTask"|"actions"|"assistantReplyDraft"|"reasoning"|taskPlan|runtime/u.test(trimmed)
+    ) {
+      return candidateCount > 0
+        ? '我先查了当前草案段和素材库，找到了一些可以继续核验的素材方向。确认前我不会更新草案，也不会写入节目。需要我把这个方向更新到草案吗？'
+        : '我先查了当前草案段和素材库，但还没有找到足够合适的素材。确认前我不会更新草案，也不会写入节目。你可以换一个关键词，或补充更具体的主题。'
+    }
+    if (/(已经|已|正在|开始|马上).{0,16}(写入|更新草案|修改草案|正式编排|排入节目|生成节目)/u.test(content)) {
+      return candidateCount > 0
+        ? '我先查了当前草案段和素材库，找到了一些可以继续核验的素材方向。确认前我不会更新草案，也不会写入节目。需要我把这个方向更新到草案吗？'
+        : '我先查了当前草案段和素材库，但还没有找到足够合适的素材。确认前我不会更新草案，也不会写入节目。你可以换一个关键词，或补充更具体的主题。'
+    }
+    return content
+  }
+
+  private buildResearchCheckFallbackReply(
+    action: Extract<AgentPlannerAction, { type: 'research_check' }>,
+    observation: RuntimeDetailMap,
+  ): string {
+    const label = action.semanticLabel
+      ?? action.targetSegmentLabel
+      ?? (typeof (observation.draftSegment as RuntimeDetailMap | null)?.label === 'string' ? (observation.draftSegment as RuntimeDetailMap).label as string : '这个草案块')
+    return observation.candidateCount
+      ? `我先按“${label}”查了素材库，已经有一些可以继续核验的方向。确认前我不会更新草案，也不会写入节目。需要我把这个方向更新到草案吗？`
+      : `我先按“${label}”查了素材库，暂时没找到足够合适的素材。你可以换一个关键词，或补充更具体的主题。`
+  }
+
+  private hasExplicitPlannerPlaylistTypeCue(userInput: string): boolean {
+    const normalized = userInput.replace(/\s+/g, '')
+    return /(电视播单|电视频道播单|频道播单|电视节目单|频道节目单|电视编排单|频道编排单|电视播出单|频道播出单|轮播单|轮播表|轮播节目单|新媒体轮播单|新媒体播单|直播轮播单|直播轮播表)/u.test(normalized)
+  }
+
+  private async executePlannerCreatePlaylist(
+    input: RuntimeSubmitInput,
+    plan: AgentPlan,
+    createAction: Extract<AgentPlannerAction, { type: 'create_playlist' }>,
+    draftAction?: Extract<AgentPlannerAction, { type: 'prepare_layout_draft' | 'refine_layout_draft' }>,
+  ): Promise<RuntimeDecision> {
+    const playlistId = this.nextPlaylistDocumentId(createAction.playlistType)
+    const rotationStrategy = createAction.playlistType === 'rotation'
+      ? createAction.rotationStrategy ?? 'content_match'
+      : undefined
+    const effectiveInput: RuntimeSubmitInput = {
+      ...input,
+      scheduleState: {
+        ...input.scheduleState,
+        playlistId,
+        playlistType: createAction.playlistType,
+        rotationStrategy,
+        rotationDurationSeconds: createAction.rotationDurationSeconds ?? input.scheduleState.rotationDurationSeconds,
+      },
+      currentLayoutDraft: createAction.playlistType === 'rotation' ? null : input.currentLayoutDraft,
+    }
+
+    let linkedDraft: RuntimeLinkedLayoutDraft | undefined
+    if (draftAction && this.isLayoutDraftFlowEnabled(effectiveInput)) {
+      const draftDecision = await this.executePlannerLayoutDraftAction(effectiveInput, draftAction, plan.reasoning)
+      if (draftDecision.kind !== 'layout_draft') return draftDecision
+      linkedDraft = {
+        layoutDraft: draftDecision.draft,
+        layoutDraftFeasibility: draftDecision.feasibilityReport,
+        layoutDraftMode: draftDecision.orchestrationMode,
+      }
+    }
+
+    if (createAction.playlistType === 'tv') {
+      const defaultLayout = getOrchestrationDemoLayout(input.scheduleState.channelId, input.scheduleState.date)
+      return this.buildPlaylistStateChangedDecision(
+        plan.assistantReplyDraft || (defaultLayout
+          ? '已新建电视播单，并加载当前频道日期的版面草案。'
+          : '已新建电视播单，但当前没有读取到该频道日期的版面草案。'),
+        'tv',
+        undefined,
+        undefined,
+        playlistId,
+        input.scheduleState.channelId,
+        input.scheduleState.channelName,
+        input.scheduleState.date,
+        defaultLayout
+          ? {
+              layoutDraftStatus: 'loaded',
+              layoutDraftSource: 'channel_default',
+              layoutDraftSlotCount: defaultLayout.slots.length,
+              plannerActions: plan.actions.map((action) => action.type),
+            }
+          : {
+              layoutDraftStatus: 'missing',
+              plannerActions: plan.actions.map((action) => action.type),
+            },
+        linkedDraft,
+      )
+    }
+
+    return this.buildPlaylistStateChangedDecision(
+      plan.assistantReplyDraft || (linkedDraft
+        ? '已新建轮播单，并按你的描述整理了一份轮播草案。确认前不会写入正式节目。'
+        : '已新建轮播单。你可以继续说明主题、总时长或上传轮播草案。'),
+      'rotation',
+      rotationStrategy,
+      createAction.rotationDurationSeconds,
+      playlistId,
+      undefined,
+      undefined,
+      undefined,
+      {
+        layoutDraftStatus: linkedDraft ? 'loaded' : 'missing',
+        layoutDraftSource: linkedDraft?.layoutDraft.source,
+        layoutDraftSegmentCount: linkedDraft?.layoutDraft.durationSegments?.length ?? linkedDraft?.layoutDraft.layoutReference.slots.length,
+        plannerActions: plan.actions.map((action) => action.type),
+      },
+      linkedDraft,
+    )
+  }
+
+  private async executePlannerLayoutDraftAction(
+    input: RuntimeSubmitInput,
+    action: Extract<AgentPlannerAction, { type: 'prepare_layout_draft' | 'refine_layout_draft' }>,
+    reasoning?: string,
+  ): Promise<RuntimeDecision> {
+    if (!this.isLayoutDraftFlowEnabled(input)) {
+      return this.buildLayoutDraftDisabledDecision(reasoning)
+    }
+    const rotationDurationSeconds = action.rotationDurationSeconds ?? input.scheduleState.rotationDurationSeconds
+    const targetTimeRange = action.targetTimeRange
+      ?? (action.type === 'prepare_layout_draft' && input.scheduleState.playlistType === 'rotation' && rotationDurationSeconds && rotationDurationSeconds > 0 && rotationDurationSeconds < 24 * 3600
+        ? { start: '00:00:00', end: secondsToClockText(rotationDurationSeconds) }
+        : undefined)
+    const structuredSegments = this.resolvePlannerLayoutDraftSegments(input, action, targetTimeRange)
+    return this.prepareLayoutDraft(
+      input,
+      {
+        mode: action.type === 'refine_layout_draft' ? 'layout_refine' : 'layout_prepare',
+        confidence: 0.9,
+        reasoning: reasoning || 'LLM planner 已把用户需求整理成版面草案动作。',
+        suggestedParams: {
+          userIntent: action.userIntent ?? action.semanticLabel ?? input.userInput,
+          semanticLabel: action.semanticLabel,
+          programTypeHint: action.programTypeHint,
+          targetTimeRange,
+          rotationDurationSeconds,
+          ignoreExistingLayout: action.ignoreExistingLayout ?? action.type === 'prepare_layout_draft',
+          segments: structuredSegments,
+        },
+      },
+      this.resolvePreferredOrchestrationMode(input),
+    )
+  }
+
+  private resolvePlannerLayoutDraftSegments(
+    input: RuntimeSubmitInput,
+    action: Extract<AgentPlannerAction, { type: 'prepare_layout_draft' | 'refine_layout_draft' }>,
+    targetTimeRange?: { start: string; end: string },
+  ): LayoutIntentSegment[] | undefined {
+    const semanticLabel = action.semanticLabel?.trim()
+    const normalizedSegments = this.normalizeStructuredSegments(action.segments)
+    if ((normalizedSegments?.length ?? 0) > 1) return normalizedSegments
+    const explicitTargetLabel = this.extractExplicitDraftRefineTargetLabel(input.userInput)
+    const ordinalLabel = explicitTargetLabel
+      ?? (normalizedSegments?.length === 1
+      ? normalizedSegments[0]?.semanticLabel
+      : semanticLabel)
+    const ordinalSegment = ordinalLabel
+      ? this.resolveOrdinalDraftRefineSegment(input, action, ordinalLabel)
+      : undefined
+    if (ordinalSegment) return [ordinalSegment]
+    if (normalizedSegments?.length) return normalizedSegments
+    if (!semanticLabel) return undefined
+    if (targetTimeRange) {
+      return [{
+        start: targetTimeRange.start,
+        end: targetTimeRange.end,
+        semanticLabel,
+        programTypeHint: action.programTypeHint,
+      }]
+    }
+    return undefined
+  }
+
+  private resolveOrdinalDraftRefineSegment(
+    input: RuntimeSubmitInput,
+    action: Extract<AgentPlannerAction, { type: 'prepare_layout_draft' | 'refine_layout_draft' }>,
+    semanticLabel: string,
+  ): LayoutIntentSegment | undefined {
+    if (
+      action.type !== 'refine_layout_draft'
+      && action.type !== 'prepare_layout_draft'
+      || input.scheduleState.playlistType !== 'rotation'
+      || !input.currentLayoutDraft
+    ) return undefined
+    const ordinalIndex = this.resolveDraftOrdinalIndex(input.userInput)
+    if (ordinalIndex === null) return undefined
+    const slots = [...input.currentLayoutDraft.layoutReference.slots]
+      .sort((left, right) => toClockText(left.startTime).localeCompare(toClockText(right.startTime)))
+    const slot = slots[ordinalIndex]
+    if (!slot) return undefined
+    const explicitTargetLabel = this.extractExplicitDraftRefineTargetLabel(input.userInput)
+    const resolvedLabel = explicitTargetLabel ?? semanticLabel
+    return {
+      start: toClockText(slot.startTime),
+      end: toClockText(slot.endTime),
+      semanticLabel: resolvedLabel,
+      programTypeHint: action.programTypeHint,
+    }
+  }
+
+  private extractExplicitDraftRefineTargetLabel(userInput: string): string | undefined {
+    const normalized = userInput.replace(/\s+/g, '')
+    const match = normalized.match(/(?:改成|换成|调整为|调整成|改为|变成|替换成|替换为)(.+)$/u)
+    const rawTarget = match?.[1]
+      ?.replace(/(?:再|然后|并且|，|。|；|;).*$/u, '')
+      .trim()
+    return cleanLayoutDraftSemanticLabel(rawTarget, { stripLeadingPoliteCue: true })
+  }
+
+  private resolveDraftOrdinalIndex(userInput: string): number | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    const match = normalized.match(/第([一二两三四五六七八九十\d]+)(?:个)?(?:小时|时段|段|块|内容块)/u)
+      ?? normalized.match(/([一二两三四五六七八九十\d]+)(?:个)?(?:小时|时段|段|块|内容块)/u)
+    const token = match?.[1]
+    if (!token) return null
+    const map: Record<string, number> = {
+      一: 0,
+      二: 1,
+      两: 1,
+      三: 2,
+      四: 3,
+      五: 4,
+      六: 5,
+      七: 6,
+      八: 7,
+      九: 8,
+      十: 9,
+    }
+    if (/^\d+$/.test(token)) {
+      const index = Number(token) - 1
+      return index >= 0 ? index : null
+    }
+    return Object.prototype.hasOwnProperty.call(map, token) ? map[token]! : null
+  }
+
   async submitInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision> {
     input = this.withUploadedLayoutDraftContext(input)
-    const playlistStateDecision = await this.tryHandlePlaylistStateInstruction(input)
-    if (playlistStateDecision) return playlistStateDecision
+
+    if (
+      input.pendingAtomicContext
+      && this.isExplicitNewPlaylistWorkspaceInstruction(input.userInput)
+      && !this.isExplicitPendingConfirm(input.userInput.replace(/\s+/g, ''))
+    ) {
+      return this.submitInstruction(this.clearPendingAtomicState(input))
+    }
 
     if (input.pendingAtomicContext?.compositeTaskRun) {
       const continuedCompositeDecision = await this.continueCompositeTaskRun(input, input.pendingAtomicContext.compositeTaskRun)
@@ -561,6 +1649,24 @@ export class DemoRuntimeFacade {
       }
       return this.continueAgentCorePendingTask(input, input.pendingAtomicContext.agentPendingTask)
     }
+
+    const pendingAtomicContextContinuation = await this.tryContinuePendingAtomicContext(input)
+    if (pendingAtomicContextContinuation) {
+      if (pendingAtomicContextContinuation.kind === 'decision') return pendingAtomicContextContinuation.decision
+      input = pendingAtomicContextContinuation.input
+    }
+
+    if (input.agentCoreEnabled && input.inputSource === 'quick_action' && this.isBarePlaylistCreationInstruction(input.userInput)) {
+      const playlistStateDecision = await this.tryHandlePlaylistStateInstruction(input)
+      if (playlistStateDecision) return playlistStateDecision
+    }
+
+    if (input.agentCoreEnabled && (input.inputSource === 'user' || input.inputSource === 'quick_action')) {
+      return await this.tryHandleAgentPlannerInstruction(input)
+    }
+
+    const playlistStateDecision = await this.tryHandlePlaylistStateInstruction(input)
+    if (playlistStateDecision) return playlistStateDecision
 
     const rawConflictDecision = this.tryBuildRawCompositeConflictDecision(input)
     if (rawConflictDecision) return rawConflictDecision
@@ -589,16 +1695,6 @@ export class DemoRuntimeFacade {
     const deterministicScheduleQuery = this.tryHandleDeterministicScheduleQuery(input)
     if (deterministicScheduleQuery) return deterministicScheduleQuery
 
-    const earlySequentialDurationLayoutClassification = this.tryClassifySequentialDurationLayoutInstruction(input.userInput, input.scheduleState.playlistType)
-    if (earlySequentialDurationLayoutClassification) {
-      if (!this.isLayoutDraftFlowEnabled(input)) return this.buildLayoutDraftDisabledDecision(earlySequentialDurationLayoutClassification.reasoning)
-      return this.prepareLayoutDraft(
-        input,
-        earlySequentialDurationLayoutClassification,
-        this.resolvePreferredOrchestrationMode(input),
-      )
-    }
-
     const earlyRotationThemeDurationLayoutClassification = this.tryClassifyRotationThemeDurationLayoutInstruction(input)
     if (earlyRotationThemeDurationLayoutClassification) {
       if (!this.isLayoutDraftFlowEnabled(input)) return this.buildLayoutDraftDisabledDecision(earlyRotationThemeDurationLayoutClassification.reasoning)
@@ -615,6 +1711,7 @@ export class DemoRuntimeFacade {
     if (
       input.currentLayoutDraft
       && input.preferLayoutDraftRefine
+      && !this.isFormalOrchestrationInstruction(input.userInput.replace(/\s+/g, ''))
       && (
         this.shouldRouteToLayoutDraftRefine(input.userInput)
         || this.shouldRouteToLayoutDraftContinuation(input.userInput)
@@ -647,12 +1744,6 @@ export class DemoRuntimeFacade {
     }
 
     let effectiveInput = input
-    const pendingAtomicContextContinuation = await this.tryContinuePendingAtomicContext(input)
-    if (pendingAtomicContextContinuation) {
-      if (pendingAtomicContextContinuation.kind === 'decision') return pendingAtomicContextContinuation.decision
-      effectiveInput = pendingAtomicContextContinuation.input
-    }
-
     const normalizedEffectiveInput = effectiveInput.userInput.replace(/\s+/g, '')
     const earlyLayoutDraftSwitchDecision = this.isLayoutDraftFlowEnabled(effectiveInput)
       ? await this.trySwitchLayoutDraft(effectiveInput)
@@ -693,16 +1784,6 @@ export class DemoRuntimeFacade {
     if (this.shouldTryDirectFormalOrchestration(effectiveInput)) {
       const earlyFormalOrchestrationDecision = this.tryBuildFormalOrchestrationDecision(effectiveInput)
       if (earlyFormalOrchestrationDecision) return earlyFormalOrchestrationDecision
-    }
-
-    const sequentialDurationLayoutClassification = this.tryClassifySequentialDurationLayoutInstruction(effectiveInput.userInput, effectiveInput.scheduleState.playlistType)
-    if (sequentialDurationLayoutClassification) {
-      if (!this.isLayoutDraftFlowEnabled(effectiveInput)) return this.buildLayoutDraftDisabledDecision(sequentialDurationLayoutClassification.reasoning)
-      return this.prepareLayoutDraft(
-        effectiveInput,
-        sequentialDurationLayoutClassification,
-        this.resolvePreferredOrchestrationMode(effectiveInput),
-      )
     }
 
     const rotationThemeDurationLayoutClassification = this.tryClassifyRotationThemeDurationLayoutInstruction(effectiveInput)
@@ -750,7 +1831,9 @@ export class DemoRuntimeFacade {
       )
     }
 
-    const atomicDecision = await this.tryHandleAtomicInstruction(effectiveInput)
+    const atomicDecision = effectiveInput.scheduleState.playlistType === 'none'
+      ? this.buildMissingPlaylistWorkspaceDecision()
+      : await this.tryHandleAtomicInstruction(effectiveInput)
     if (atomicDecision) return atomicDecision
 
     if (this.shouldTryDirectFormalOrchestration(effectiveInput)) {
@@ -805,6 +1888,13 @@ export class DemoRuntimeFacade {
       history: this.buildTaskClassifierHistory(effectiveInput),
       contextPackage: effectiveInput.foregroundContextPackage,
     })
+    if (classification.suggestedParams?.llmFailure) {
+      return this.buildRecoverableLlmFailureDecision(
+        effectiveInput,
+        classification.suggestedParams.llmFailure,
+        classification.reasoning,
+      )
+    }
     if (classification.mode === 'micro_edit') {
       const result = await this.buildMicroEditCommand(effectiveInput, classification.reasoning)
       return this.buildMicroEditDecisionWithContinuationFallback(
@@ -1607,6 +2697,34 @@ export class DemoRuntimeFacade {
       && targetTimeRange.end === DEFAULT_BROADCAST_WINDOW.end
   }
   private normalizeStructuredSegments(segments?: LayoutIntentSegment[]): LayoutIntentSegment[] | undefined { return segments?.filter((segment) => Boolean(segment.start && segment.end)) }
+
+  private resolveRotationStructuredSegments(
+    input: RuntimeSubmitInput,
+    suggested: TaskClassification['suggestedParams'],
+  ): LayoutIntentSegment[] | undefined {
+    const normalizedSegments = this.normalizeStructuredSegments(suggested?.segments)
+    if ((normalizedSegments?.length ?? 0) > 1) return normalizedSegments
+    const explicitTargetLabel = this.extractExplicitDraftRefineTargetLabel(input.userInput)
+    const ordinalIndex = explicitTargetLabel ? this.resolveDraftOrdinalIndex(input.userInput) : null
+    if (
+      input.scheduleState.playlistType === 'rotation'
+      && input.currentLayoutDraft
+      && ordinalIndex !== null
+    ) {
+      const slots = [...input.currentLayoutDraft.layoutReference.slots]
+        .sort((left, right) => toClockText(left.startTime).localeCompare(toClockText(right.startTime)))
+      const slot = slots[ordinalIndex]
+      if (slot) {
+        return [{
+          start: toClockText(slot.startTime),
+          end: toClockText(slot.endTime),
+          semanticLabel: explicitTargetLabel,
+          programTypeHint: suggested?.programTypeHint,
+        }]
+      }
+    }
+    return normalizedSegments
+  }
   private resolvePreferredOrchestrationMode(input: RuntimeSubmitInput): Extract<TaskMode, 'full_generate' | 'partial_generate'> {
     return input.currentLayoutDraftMode ?? (input.scheduleState.isEmpty || input.scheduleState.itemCount === 0 ? 'full_generate' : 'partial_generate')
   }
@@ -1910,13 +3028,41 @@ export class DemoRuntimeFacade {
       items,
       typeDurations: Array.from(typeMap.values()).sort((left, right) => right.durationSeconds - left.durationSeconds),
       timeBands: Array.from(bandMap.values()).sort((left, right) => this.factTimeBandOrder(left.label) - this.factTimeBandOrder(right.label)),
-      layoutDraftState: input.currentLayoutDraft
-        ? {
-            exists: true,
-            coverage: input.currentLayoutDraft.coverage,
-            segmentCount: input.currentLayoutDraft.layoutReference.slots.length,
-          }
-        : { exists: false },
+      layoutDraftState: this.buildLayoutDraftFactState(input.currentLayoutDraft ?? null),
+    }
+  }
+
+  private buildLayoutDraftFactState(draft: LayoutDraft | null): RuntimePlaylistFactPack['layoutDraftState'] {
+    if (!draft) return { exists: false }
+    const durationSegments = draft.durationSegments?.map((segment) => ({
+      label: segment.label,
+      contentHint: segment.contentHint,
+      targetDurationSeconds: segment.targetDurationSeconds,
+      selectionPriority: segment.selectionPriority,
+    }))
+    const timeSegments = draft.layoutReference.slots.map((slot, index) => {
+      const column = draft.columns[index]
+      return {
+        label: column?.semanticLabel ?? column?.columnName ?? `时段${index + 1}`,
+        startTime: toClockText(slot.startTime),
+        endTime: toClockText(slot.endTime),
+        programType: column?.defaultProgramType,
+        constraintKind: column?.draftConstraintKind,
+        queryHints: column?.queryHints?.slice(0, 5),
+      }
+    })
+
+    return {
+      exists: true,
+      coverage: draft.coverage,
+      segmentCount: draft.durationSegments?.length ?? draft.layoutReference.slots.length,
+      userIntent: draft.userIntent,
+      purpose: draft.purpose,
+      targetDurationSeconds: draft.targetDurationSeconds,
+      strategyLabel: draft.strategyProfile?.label,
+      strategySummary: draft.strategyProfile?.selectionSummary,
+      warnings: draft.warnings?.slice(0, 5),
+      segments: (durationSegments?.length ? durationSegments : timeSegments).slice(0, 12),
     }
   }
 
@@ -1946,6 +3092,8 @@ export class DemoRuntimeFacade {
             '你是电视台 AI 编审助手。用户是编排员，请用简单中文回答。',
             '这是只读问答：只能分析、解释、建议，不能说已经写入、正在写入、会直接修改播单。',
             '本地会把真实编单事实给你；你可以自己统计和分析，不要拘泥于字段名。',
+            'currentPlaylistFacts 同时包含正式播单事实和当前激活草案事实。正式播单为空但 layoutDraftState.exists=true 时，不能说“还没有草案”或“给我一份草案”，要说明正式播单还空、但已有草案，并围绕草案内容分析。',
+            '轮播单是内容队列，不是电视时间格。轮播草案通常描述主题、总时长和内容块；如果草案 warnings 提示关键词没有命中节目库，要建议细化关键词、放宽主题、补充可选栏目或换选择策略，而不是直接要求重新给草案。',
             '如果用户问怎么优化，默认只给建议；只有用户明确说执行/按这个做，后续系统才会生成待确认计划。',
             '如果用户问优化建议，可以在末尾自然追问是否需要更新到草案或整理成待确认修改计划；但不能说已经更新。',
             '不要输出 JSON，不要使用技术词。',
@@ -1986,13 +3134,18 @@ export class DemoRuntimeFacade {
   private decoratePlaylistAnalysisReply(answer: string, kind: RuntimeAnalysisContext['kind']): string {
     const trimmed = answer.trim()
     if (kind !== 'optimization_suggestion' || !trimmed) return trimmed
-    if (/(更新到草案|写入草案|整理成.*草案|草案.*待确认)/u.test(trimmed)) return trimmed
+    if (/(更新到草案|写入草案|整理成.*草案|草案.*待确认|待确认.*草案)/u.test(trimmed)) return trimmed
     const ending = /[。！？!?]$/u.test(trimmed) ? '' : '。'
     return `${trimmed}${ending}如果你觉得这个方向可以，需要我更新到草案或整理成待确认的修改计划，也可以直接告诉我。`
   }
 
   private buildFallbackPlaylistAnalysis(facts: RuntimePlaylistFactPack): string {
-    if (facts.itemCount === 0) return '当前编单还没有节目，我只能先看到它是空的。你可以先创建节目，或者给我一份草案后再让我看整体风格。'
+    if (facts.itemCount === 0 && facts.layoutDraftState.exists) {
+      const draftSummary = this.describeLayoutDraftFacts(facts)
+      const issueText = this.describeLayoutDraftWarnings(facts)
+      return `当前正式播单还没有节目，但已经有一份草案。${draftSummary}${issueText}你可以继续让我优化草案，我会先给建议，不会直接写入正式播单。`
+    }
+    if (facts.itemCount === 0) return '当前编单还没有节目，我只能先看到它是空的。你可以先告诉我主要内容、总时长或上传草案，我再帮你分析整体风格。'
     const dominant = facts.typeDurations[0]
     const dominantText = dominant
       ? `目前占比最高的是 ${this.describeProgramType(dominant.programType)}，共 ${this.formatDurationText(dominant.durationSeconds)}。`
@@ -2001,6 +3154,12 @@ export class DemoRuntimeFacade {
   }
 
   private buildFallbackOptimizationSuggestion(facts: RuntimePlaylistFactPack, previousContext: RuntimeAnalysisContext | null): string {
+    if (facts.itemCount === 0 && facts.layoutDraftState.exists) {
+      const draftSummary = this.describeLayoutDraftFacts(facts)
+      const issueText = this.describeLayoutDraftWarnings(facts)
+      const contextText = previousContext ? '接着刚才的分析看，' : ''
+      return `${contextText}${draftSummary}${issueText}建议先把草案里的主题词拆成更容易检索的节目线索，补充可接受的栏目、节目类型或替代关键词；如果候选太少，可以放宽内容匹配优先，改为热播或收视表现兜底。如果你觉得这个方向可以，我可以帮你整理成待确认的草案更新。`
+    }
     if (facts.itemCount === 0) return '当前编单还是空的，优化前需要先确定主要内容、总时长和草案。'
     const dominant = facts.typeDurations[0]
     const mainSuggestion = dominant
@@ -2008,6 +3167,34 @@ export class DemoRuntimeFacade {
       : '可以先按时段检查内容是否单一，再补一些节奏不同的节目。'
     const contextText = previousContext ? '接着刚才的分析看，' : ''
     return `${contextText}${mainSuggestion} 如果你要我真正调整，需要再说“按这个做”，我会先生成待确认的修改计划。`
+  }
+
+  private describeLayoutDraftFacts(facts: RuntimePlaylistFactPack): string {
+    const draft = facts.layoutDraftState
+    const durationText = draft.targetDurationSeconds
+      ? `目标总时长 ${this.formatDurationText(draft.targetDurationSeconds)}，`
+      : draft.coverage
+        ? `覆盖 ${draft.coverage.start}-${draft.coverage.end}，`
+        : ''
+    const purposeText = draft.purpose || draft.userIntent
+      ? `主题是“${draft.purpose ?? draft.userIntent}”，`
+      : ''
+    const segmentsText = draft.segments?.length
+      ? `已有 ${draft.segments.length} 个内容块：${draft.segments.slice(0, 3).map((segment) =>
+          segment.contentHint
+            ? `${segment.label}（${segment.contentHint}）`
+            : segment.label,
+        ).join('、')}。`
+      : draft.segmentCount
+        ? `已有 ${draft.segmentCount} 个内容块。`
+        : ''
+    return `${purposeText}${durationText}${segmentsText}`
+  }
+
+  private describeLayoutDraftWarnings(facts: RuntimePlaylistFactPack): string {
+    const warnings = facts.layoutDraftState.warnings?.filter(Boolean) ?? []
+    if (!warnings.length) return ''
+    return `现在主要问题是：${warnings.slice(0, 2).join('；')}。`
   }
 
   private async buildTaskPlanFromAnalysisAuthorization(
@@ -2975,9 +4162,10 @@ export class DemoRuntimeFacade {
       : filteredAfter
 
     const replaceResult = await getAtomicCapabilities().replaceAllItems(after, { skipValidation: true })
+    const observedAfter = replaceResult.success ? after : before
     const observation = observeBatchDeleteSchedulingTask({
       before,
-      after,
+      after: observedAfter,
       taskRun,
       stage: activeStage,
       writeSucceeded: replaceResult.success,
@@ -2988,6 +4176,7 @@ export class DemoRuntimeFacade {
     const targetText = observation.targetText
     const previousRemaining = observation.previousRemaining
     const committed = observation.committed
+    const processedThisBatch = committed ? affectedItems.length : 0
     const now = new Date().toISOString()
     const nextBatchItems = committed && remaining.length > 0
       ? remaining.slice(0, DEFAULT_SCHEDULING_TASK_LIMITS.maxStepsPerStage)
@@ -2999,7 +4188,7 @@ export class DemoRuntimeFacade {
           targetLabel,
           matchedItems: nextBatchItems,
           totalMatched: taskRun.batch?.totalMatched ?? previousRemaining,
-          processedCount: (taskRun.batch?.processedCount ?? 0) + affectedItems.length,
+          processedCount: (taskRun.batch?.processedCount ?? 0) + processedThisBatch,
           remainingCount: remaining.length,
           batchIndex: (taskRun.batch?.batchIndex ?? 1) + 1,
           includeDraftRefillAfterFinalBatch: taskRun.batch?.includeDraftRefillAfterFinalBatch ?? this.hasDraftRefillCompositeCue(taskRun.originalUserInput),
@@ -3019,7 +4208,7 @@ export class DemoRuntimeFacade {
       batch: taskRun.batch
         ? {
             ...taskRun.batch,
-            processedCount: taskRun.batch.processedCount + affectedItems.length,
+            processedCount: taskRun.batch.processedCount + processedThisBatch,
             remainingCount: remaining.length,
             batchIndex: taskRun.batch.batchIndex,
           }
@@ -3032,8 +4221,21 @@ export class DemoRuntimeFacade {
         return stage
       }),
     }
+    const retryTaskRun: SchedulingTaskRun | null = !committed && updatedTaskRun.loopCount < updatedTaskRun.limits.maxLoopTurns
+      ? {
+          ...updatedTaskRun,
+          status: 'waiting_confirm',
+          stages: updatedTaskRun.stages.map((stage, index) => {
+            if (index === taskRun.currentStageIndex) return { ...stage, status: 'waiting_confirm' }
+            if (stage.type === 'verify') return { ...stage, status: 'pending' }
+            return stage
+          }),
+        }
+      : null
     const nextPendingContext = nextTaskRun
       ? this.buildCompositePendingContext(input, nextTaskRun)
+      : retryTaskRun
+        ? this.buildCompositePendingContext(input, retryTaskRun)
       : undefined
 
     const rotationPolicyText = taskRun.playlistPolicy?.playlistType === 'rotation'
@@ -3050,7 +4252,9 @@ export class DemoRuntimeFacade {
       ? nextTaskRun
         ? `已先删除 ${affectedItems.length} 条${targetText}。我复查后还剩 ${remaining.length} 条，可以继续分批处理；你说“继续”或点确认，我再删下一批。`
         : `已删除 ${affectedItems.length} 条${targetText}。我又检查了一遍，当前播单里已经没有这些目标节目了。${rotationPolicyText}${refillText}`
-      : `我尝试删除这些节目，但复查后仍有 ${remaining.length} 条残留，先停在这里。`
+      : retryTaskRun
+        ? `这批没有写入成功，我已经停下来了。前面已完成 ${taskRun.batch?.processedCount ?? 0} 条，本批原计划处理 ${affectedItems.length} 条，当前还剩 ${remaining.length} 条${targetText}。你可以说“继续”重试这一批，或缩小范围后重新发起。`
+        : `这批没有写入成功，而且任务已经达到连续处理上限。我先停下，避免继续误改；你可以缩小范围后重新发起。`
 
     return {
       kind: 'agent_execution',
@@ -3063,8 +4267,21 @@ export class DemoRuntimeFacade {
           details: {
             taskRun: updatedTaskRun,
             nextTaskRun,
+            retryTaskRun,
             affectedItems,
             remainingCount: remaining.length,
+            recovery: committed
+              ? undefined
+              : {
+                  completedCount: taskRun.batch?.processedCount ?? 0,
+                  attemptedCount: affectedItems.length,
+                  remainingCount: remaining.length,
+                  canRetry: Boolean(retryTaskRun),
+                  failedBatchIndex: taskRun.batch?.batchIndex ?? 1,
+                  suggestedActions: retryTaskRun
+                    ? ['继续重试本批', '缩小范围后重新发起', '停止任务']
+                    : ['缩小范围后重新发起', '停止任务'],
+                },
             nextStage: nextDraftStage,
             playlistPolicy: taskRun.playlistPolicy,
           },
@@ -3119,7 +4336,7 @@ export class DemoRuntimeFacade {
           committed,
           operationId: updatedTaskRun.id,
           affectedItemIds: affectedItems.map((item) => item.id),
-          scheduleItems: replaceResult.data?.items ?? after,
+          scheduleItems: committed ? replaceResult.data?.items ?? after : before,
         },
         explanation: message,
         trace: [{
@@ -3128,6 +4345,7 @@ export class DemoRuntimeFacade {
           detail: {
             taskRun: updatedTaskRun,
             nextTaskRun,
+            retryTaskRun,
             deletedCount: affectedItems.length,
             remainingCount: remaining.length,
           },
@@ -4853,6 +6071,9 @@ export class DemoRuntimeFacade {
   private async tryContinuePendingAtomicContext(input: RuntimeSubmitInput): Promise<RuntimePendingAtomicContinuationResult | null> {
     const pendingContext = input.pendingAtomicContext
     if (!pendingContext) return null
+    if (pendingContext.phase === 'formal_rebuild_confirmation' || pendingContext.formalRebuildConfirmation) {
+      return this.continuePendingFormalRebuildConfirmation(input, pendingContext)
+    }
     if (this.shouldBypassPendingAtomicClarification(input.userInput) || this.shouldInterruptPendingAtomicWithRangeScheduling(input.userInput)) {
       return {
         kind: 'clear_pending_and_continue',
@@ -4883,6 +6104,19 @@ export class DemoRuntimeFacade {
       return {
         kind: 'decision',
         decision: this.buildPendingAtomicLifecycleBlockedDecision(pendingContext, lifecycleBlockReason),
+      }
+    }
+
+    if (pendingContext.phase === 'draft_research_confirmation' || pendingContext.layoutDraftSuggestion) {
+      if (this.isDraftResearchSuggestionConfirm(input.userInput)) {
+        return {
+          kind: 'decision',
+          decision: await this.continuePendingDraftResearchSuggestion(input, pendingContext),
+        }
+      }
+      return {
+        kind: 'clear_pending_and_continue',
+        input: this.clearPendingAtomicState(input),
       }
     }
 
@@ -5083,6 +6317,246 @@ export class DemoRuntimeFacade {
       selectedCandidateId: pending.selectedCandidateId ?? null,
       resumeCompositeTask: pending.resumeCompositeTask,
     }
+  }
+
+  private isDraftResearchSuggestionConfirm(userInput: string): boolean {
+    const normalized = userInput.replace(/\s+/g, '')
+    return this.isExplicitPendingConfirm(normalized)
+      || /^(更新|更新草案|更新到草案|写入草案|改到草案|改进草案|采用|采纳|采用这个|采纳这个|就按这个|就这个|用这个|用这个方向|按这个方向|把这个更新到草案|把它更新到草案|没问题)$/iu.test(normalized)
+  }
+
+  private async continuePendingFormalRebuildConfirmation(
+    input: RuntimeSubmitInput,
+    pendingContext: RuntimePendingAtomicContext,
+  ): Promise<RuntimePendingAtomicContinuationResult> {
+    const normalized = input.userInput.replace(/\s+/g, '')
+    if (this.isExplicitPendingCancel(normalized) || this.isExplicitPendingReject(normalized)) {
+      return {
+        kind: 'decision',
+        decision: this.buildPendingAtomicCancelledDecision(pendingContext),
+      }
+    }
+    if (!this.isFormalRebuildConfirmationReply(normalized)) {
+      return {
+        kind: 'clear_pending_and_continue',
+        input: this.clearPendingAtomicState(input),
+      }
+    }
+
+    const confirmation = pendingContext.formalRebuildConfirmation
+    if (!confirmation) {
+      return {
+        kind: 'decision',
+        decision: {
+          kind: 'message',
+          statusHint: 'needs_clarification',
+          feedback: createFeedback(
+            '这次重新编排确认已经失效，请重新告诉我要按草案编排，还是重新排整张播单。',
+            'planning',
+            '重新编排确认',
+            {
+              details: {
+                noMutation: true,
+                pendingContext,
+              },
+            },
+          ),
+        },
+      }
+    }
+
+    const resumedInput: RuntimeSubmitInput = {
+      ...this.clearPendingAtomicState(input),
+      userInput: confirmation.userInput,
+    }
+
+    if (confirmation.actionKind === 'commit_layout_draft') {
+      return {
+        kind: 'decision',
+        decision: await this.commitLayoutDraft(resumedInput, {
+          mode: 'layout_commit',
+          confidence: 0.9,
+          reasoning: confirmation.reasoning || pendingContext.reasoning,
+          suggestedParams: {
+            orchestrationMode: confirmation.mode,
+          },
+        }, { skipFormalRebuildGate: true }),
+      }
+    }
+
+    return {
+      kind: 'decision',
+      decision: this.buildFormalOrchestrationDecision(
+        resumedInput,
+        confirmation.mode,
+        confirmation.reasoning || pendingContext.reasoning,
+        { skipFormalRebuildGate: true },
+      ),
+    }
+  }
+
+  private isFormalRebuildConfirmationReply(normalized: string): boolean {
+    return this.isExplicitPendingConfirm(normalized)
+      || /^(确认重新编排|确认重排|重新编排|重排|确认覆盖|覆盖吧|开始重新编排|开始重排|开始编排|按这个重新编排|按草案重新编排|按当前草案重新编排|按这个开始编排|可以重新编排|可以重排)$/iu.test(normalized)
+  }
+
+  private async continuePendingDraftResearchSuggestion(
+    input: RuntimeSubmitInput,
+    pendingContext: RuntimePendingAtomicContext,
+  ): Promise<RuntimeDecision> {
+    const suggestion = pendingContext.layoutDraftSuggestion
+    const draft = input.currentLayoutDraft
+    if (!suggestion || !draft) {
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          '刚才那条草案建议已经没有可用的草案上下文了。你可以重新告诉我要调整哪一段草案。',
+          'planning',
+          '草案建议失效',
+          {
+            details: {
+              noMutation: true,
+              pendingContext,
+            },
+          },
+        ),
+      }
+    }
+
+    const updatedDraft = this.applyDraftResearchSuggestion(draft, suggestion)
+    if (!updatedDraft) {
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          '我还不能确定要把这条建议写到草案的哪一段。你可以说“更新到第一段”或直接重新说明要调整的段落。',
+          'planning',
+          '需要确认草案段',
+          {
+            details: {
+              noMutation: true,
+              suggestion,
+              draftSegments: draft.layoutReference.slots.map((slot, index) => {
+                const column = draft.columns.find((item) => item.columnId === slot.columnId)
+                return {
+                  index: index + 1,
+                  start: toClockText(slot.startTime),
+                  end: toClockText(slot.endTime),
+                  label: column?.semanticLabel ?? column?.columnName ?? slot.columnId,
+                }
+              }),
+            },
+          },
+        ),
+      }
+    }
+
+    const feasibilityReport = await this.buildLayoutDraftFeasibilityReport(input, updatedDraft)
+    const targetText = suggestion.targetSegmentIndex
+      ? `第 ${suggestion.targetSegmentIndex} 段`
+      : suggestion.targetSegmentLabel ?? '对应段落'
+    return {
+      kind: 'layout_draft',
+      feedback: createFeedback(
+        `已把“${suggestion.semanticLabel}”更新到草案的${targetText}。正式播单还没有开始编排；如果这版草案可以了，你可以直接说“按这个开始编排”。`,
+        'planning',
+        '版面草案',
+        {
+          explanation: pendingContext.reasoning,
+          details: {
+            draftId: updatedDraft.id,
+            updatedSegment: {
+              targetSegmentIndex: suggestion.targetSegmentIndex,
+              targetSegmentLabel: suggestion.targetSegmentLabel,
+              semanticLabel: suggestion.semanticLabel,
+              queryHints: suggestion.queries,
+              candidateNames: suggestion.topCandidates.slice(0, 5).map((candidate) => candidate.programName),
+            },
+            noFormalPlaylistWrite: true,
+            feasibilitySummary: feasibilityReport.summary,
+          },
+        },
+      ),
+      draft: updatedDraft,
+      feasibilityReport,
+      orchestrationMode: input.currentLayoutDraftMode ?? this.resolvePreferredOrchestrationMode(input),
+    }
+  }
+
+  private applyDraftResearchSuggestion(
+    draft: LayoutDraft,
+    suggestion: RuntimeDraftResearchSuggestion,
+  ): LayoutDraft | null {
+    const slotIndex = this.resolveDraftResearchSuggestionSlotIndex(draft, suggestion)
+    if (slotIndex < 0) return null
+    const slot = draft.layoutReference.slots[slotIndex]
+    if (!slot) return null
+    const columnIndex = draft.columns.findIndex((column) => column.columnId === slot.columnId)
+    if (columnIndex < 0) return null
+    const candidateNames = suggestion.topCandidates.map((candidate) => candidate.programName)
+    const candidateTags = suggestion.topCandidates.flatMap((candidate) => candidate.contentTags ?? [])
+    const queryHints = dedupeStrings([
+      ...suggestion.queries,
+      ...candidateNames,
+      ...candidateTags,
+    ]).slice(0, 12)
+    const columns = draft.columns.map((column, index) => {
+      if (index !== columnIndex) return column
+      const knownProgramType = this.normalizeResearchProgramTypes(suggestion.programTypeHint)?.[0]
+      return {
+        ...column,
+        columnName: suggestion.semanticLabel,
+        semanticLabel: suggestion.semanticLabel,
+        defaultProgramType: knownProgramType ?? column.defaultProgramType,
+        queryHints,
+        draftConstraintKind: column.draftConstraintKind ?? 'unspecified',
+        source: 'generated' as const,
+      }
+    })
+    const durationSegments = draft.durationSegments?.map((segment, index) => (
+      index === slotIndex
+        ? {
+            ...segment,
+            label: suggestion.semanticLabel,
+            contentHint: queryHints.length ? queryHints.join('、') : suggestion.semanticLabel,
+          }
+        : segment
+    ))
+    return {
+      ...draft,
+      version: (draft.version ?? 1) + 1,
+      userIntent: suggestion.userInput || draft.userIntent,
+      columns,
+      durationSegments,
+      warnings: draft.warnings,
+    }
+  }
+
+  private resolveDraftResearchSuggestionSlotIndex(
+    draft: LayoutDraft,
+    suggestion: RuntimeDraftResearchSuggestion,
+  ): number {
+    if (suggestion.targetSegmentIndex && suggestion.targetSegmentIndex >= 1 && suggestion.targetSegmentIndex <= draft.layoutReference.slots.length) {
+      return suggestion.targetSegmentIndex - 1
+    }
+    const label = (suggestion.targetSegmentLabel ?? suggestion.semanticLabel ?? '').replace(/\s+/g, '').toLowerCase()
+    if (label) {
+      const matchedIndex = draft.layoutReference.slots.findIndex((slot, index) => {
+        const column = draft.columns.find((item) => item.columnId === slot.columnId)
+        const segment = draft.durationSegments?.[index]
+        const haystack = [
+          column?.semanticLabel,
+          column?.columnName,
+          segment?.label,
+          segment?.contentHint,
+          ...(column?.queryHints ?? []),
+        ].filter(Boolean).join('').replace(/\s+/g, '').toLowerCase()
+        return Boolean(haystack && (haystack.includes(label) || label.includes(haystack)))
+      })
+      if (matchedIndex >= 0) return matchedIndex
+    }
+    return draft.layoutReference.slots.length === 1 ? 0 : -1
   }
 
   private async continuePendingAtomicClarifyingContext(input: RuntimeSubmitInput, pendingContext: RuntimePendingAtomicContext): Promise<RuntimeDecision> {
@@ -5476,7 +6950,7 @@ export class DemoRuntimeFacade {
     const hasExplicitDraftReference = /(草案|版面草案|当前版面|这个版面|该版面|刚才.*版面|刚才.*草案|这个草案|该草案|按草案|参考草案|基于草案|照草案|用草案|按版面|参考版面|基于版面|照版面|用版面)/.test(normalized)
     if (!hasExplicitDraftReference) return false
     const hasDraftCue = /(草案|版面草案|当前版面|版面|时段)/.test(normalized)
-    const hasDraftRefineVerb = /(删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉|替换|换成|换播|换掉|替换成|替换为|改成|改为|改播|调整为)/.test(normalized)
+    const hasDraftRefineVerb = /(删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉|替换|换成|换播|换掉|替换成|替换为|改成|改为|改播|调整为|拆分|拆成|分成|分为|切成|规划成)/.test(normalized)
     const hasTimeOrDaypartCue = Boolean(parseAtomicClockExpression(normalized))
       || /(全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨)/.test(normalized)
     return hasDraftRefineVerb && (hasDraftCue || hasTimeOrDaypartCue || normalized.length <= 32)
@@ -5492,6 +6966,8 @@ export class DemoRuntimeFacade {
       || /(全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|黄金时段|黄金档)/.test(normalized)
     const hasSupplementVerb = /(补充|补上|补一段|补一个|补一下|增加|新增|加上|加一段|再加|再补|继续补|继续加)/.test(normalized)
     const hasContentCue = /(栏目|节目|剧场|新闻|电视剧|综艺|专题|少儿|动画|纪录|体育|资讯|评论|健康|娱乐|短片|轮播|直播|看东方|东方|ShanghaiEye)/i.test(normalized)
+    const hasStructureCue = /(拆分|拆成|分成|分为|切成|规划成|每条|每段|每块|各条|各段|第[一二两三四五六七八九十\d]+个?小时|第一小时|第二小时|第三小时)/.test(normalized)
+    if (hasStructureCue) return true
     return hasScopeCue && (hasSupplementVerb || hasContentCue)
   }
 
@@ -5613,48 +7089,11 @@ export class DemoRuntimeFacade {
     return finalLabel.length >= 2 ? finalLabel : undefined
   }
 
-  private tryClassifySequentialDurationLayoutInstruction(userInput: string, playlistType?: PlaylistType): TaskClassification | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    if (!this.looksLikeSequentialDurationSegments(normalized)) return null
-
-    const anchor = parseAtomicClockExpression(userInput)
-      ?? this.parseSequentialAnchorClock(userInput)
-      ?? (playlistType === 'rotation'
-        ? { targetTime: '00:00:00', matchedText: '', index: 0 }
-        : null)
-    if (!anchor) return null
-
-    const tail = normalized.slice(anchor.index + anchor.matchedText.length)
-    const segments = this.extractSequentialDurationSegments(tail, anchor.targetTime)
-    if (segments.length < 2) return null
-
-    const first = segments[0]!
-    const last = segments.at(-1)!
-    const semanticLabel = segments
-      .map((segment) => segment.semanticLabel)
-      .filter(Boolean)
-      .join('、')
-
-    return {
-      mode: 'layout_prepare',
-      confidence: 0.92,
-      reasoning: '用户给出了连续时长段落，应按每个段落生成独立版面草案，并在正式编排时分别检索和命中节目。',
-      suggestedParams: {
-        userIntent: semanticLabel || userInput,
-        targetTimeRange: { start: first.start, end: last.end },
-        semanticLabel: semanticLabel || first.semanticLabel,
-        programTypeHint: first.programTypeHint,
-        segments,
-      },
-    }
-  }
-
   private tryClassifyRotationThemeDurationLayoutInstruction(input: RuntimeSubmitInput): TaskClassification | null {
     if (input.scheduleState.playlistType !== 'rotation') return null
     if (input.currentLayoutDraft) return null
 
     const normalized = input.userInput.replace(/\s+/g, '')
-    if (this.looksLikeSequentialDurationSegments(normalized)) return null
     const hasAtomicMutationVerb = /(插入|插个|插一|插播|加播|添加|删除|删掉|移除|去掉|移动|移到|调到|调整到|放到|挪到|后移|前移|顺延|替换|换成|换播)/.test(normalized)
     if (hasAtomicMutationVerb) return null
 
@@ -5700,59 +7139,6 @@ export class DemoRuntimeFacade {
   private isGenericRotationDraftTopic(topic: string): boolean {
     const normalized = topic.replace(/\s+/g, '')
     return /^(轮播|轮播内容|主要内容|宣传片|短片|节目|内容|素材|垫片)$/.test(normalized)
-  }
-
-  private extractSequentialDurationSegments(tail: string, startTime: string): LayoutIntentSegment[] {
-    const durationToken = '(?:一刻钟|三刻钟|半个?小时|(?:(?:\\d+(?:\\.\\d+)?)|[零〇一二两三四五六七八九十]{1,3})(?:个)?小时|(?:(?:\\d+)|[零〇一二两三四五六七八九十]{1,3})(?:分钟|分))'
-    const pattern = new RegExp(`(?:先|首先|顺次|依次|再|然后|接着|随后)?(?:来一段|来|做一段|做|安排|排入|放入|排|垫一段|垫|加一段|加|补一段|补)?(${durationToken})(?:时长)?([\\s\\S]*?)(?=(?:再|然后|接着|随后)(?:来一段|来|做一段|做|安排|排入|放入|排|垫一段|垫|加一段|加|补一段|补)?${durationToken}|$)`, 'gu')
-    const segments: LayoutIntentSegment[] = []
-    let cursor = clockToSeconds(startTime)
-    let match: RegExpExecArray | null = null
-
-    while ((match = pattern.exec(tail)) !== null) {
-      const duration = this.parseSequentialDurationSeconds(match[1] ?? '')
-      const semanticLabel = this.cleanSequentialSegmentLabel(match[2] ?? '')
-      if (!duration || !semanticLabel) continue
-      const segmentStart = cursor
-      const segmentEnd = cursor + duration
-      cursor = segmentEnd
-      segments.push({
-        start: secondsToClockText(segmentStart),
-        end: secondsToClockText(segmentEnd),
-        semanticLabel,
-        programTypeHint: this.inferInsertProgramTypeHint(semanticLabel),
-        sequential: this.inferInsertProgramTypeHint(semanticLabel) === 'tv_drama',
-      })
-    }
-
-    return segments
-  }
-
-  private parseSequentialAnchorClock(userInput: string): { targetTime: string; matchedText: string; index: number } | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    const match = /(?:上午|早上|清晨|下午|午后|傍晚|晚上|晚间)?(\d{1,2})(?:点|:|：)(?:(\d{1,2})分?)?/.exec(normalized)
-    if (!match?.[1] || typeof match.index !== 'number') return null
-    const cue = match[0]
-    let hour = Number(match[1])
-    const minute = Number(match[2] ?? '0')
-    if (Number.isNaN(hour) || Number.isNaN(minute) || minute < 0 || minute > 59) return null
-    if (hour < 12 && /(?:下午|午后|傍晚|晚上|晚间)/.test(cue)) hour += 12
-    if (hour < 0 || hour > 23) return null
-    return {
-      targetTime: `${`${hour}`.padStart(2, '0')}:${`${minute}`.padStart(2, '0')}:00`,
-      matchedText: cue,
-      index: match.index,
-    }
-  }
-
-  private cleanSequentialSegmentLabel(value: string): string {
-    return value
-      .replace(/^[，,。！？!?；;：:、]+|[，,。！？!?；;：:、]+$/g, '')
-      .replace(/^(?:先|首先|顺次|依次|再|然后|接着|随后|来一段|来|做一段|做|安排|排入|放入|排|垫一段|加一段|加|补一段|补)+/g, '')
-      .replace(/^(?:时长|的时长|总时长)+/g, '')
-      .replace(/[，,。！？!?；;：:、]*(?:内容匹配优先|内容优先|匹配优先|收视率优先|收视优先|热度优先|热播优先)$/g, '')
-      .replace(/(?:节目|内容|片子|视频)$/g, '')
-      .trim()
   }
 
   private parseSequentialDurationSeconds(value: string): number | null {
@@ -6433,6 +7819,7 @@ export class DemoRuntimeFacade {
     input: RuntimeSubmitInput,
     mode: Extract<TaskMode, 'full_generate' | 'partial_generate'>,
     reasoning: string,
+    options?: { skipFormalRebuildGate?: boolean },
   ): RuntimeDecision {
     const basis = this.resolveFormalOrchestrationBasis(input, mode)
     const missingBasisBlock = this.buildMissingFormalOrchestrationBasisBlock(input, mode, reasoning, basis)
@@ -6443,6 +7830,20 @@ export class DemoRuntimeFacade {
     const searchKeywords = resolveFormalOrchestrationSearchKeywords(input.userInput)
     const modeLabel = mode === 'partial_generate' ? '补齐当前空窗' : '全天编排'
     const lifecycle = this.buildFormalOrchestrationLifecycle(basis)
+    if (!options?.skipFormalRebuildGate && this.shouldRequireFormalRebuildConfirmation(input, mode)) {
+      return this.buildFormalRebuildConfirmationDecision(input, {
+        actionKind: 'formal_orchestration',
+        mode,
+        useLayoutDraft: Boolean(layoutDraft),
+        targetTimeRange,
+        existingItemCount: this.resolveExistingFormalItemCount(input),
+        playlistType: input.scheduleState.playlistType,
+        userInput: input.userInput,
+        reasoning,
+        draftId: layoutDraft?.id,
+        draftSource: layoutDraft?.source,
+      })
+    }
     return {
       kind: 'orchestration',
       feedback: createFeedback(
@@ -6477,6 +7878,65 @@ export class DemoRuntimeFacade {
     }
   }
 
+  private shouldRequireFormalRebuildConfirmation(
+    input: RuntimeSubmitInput,
+    mode: Extract<TaskMode, 'full_generate' | 'partial_generate'>,
+  ): boolean {
+    return mode === 'full_generate' && this.resolveExistingFormalItemCount(input) > 0
+  }
+
+  private resolveExistingFormalItemCount(input: RuntimeSubmitInput): number {
+    return Math.max(input.currentSchedule.length, input.scheduleState.itemCount ?? 0)
+  }
+
+  private buildFormalRebuildConfirmationDecision(
+    input: RuntimeSubmitInput,
+    confirmation: RuntimeFormalRebuildConfirmation,
+  ): RuntimeDecision {
+    const playlistLabel = confirmation.playlistType === 'rotation' ? '轮播单' : '电视播单'
+    const basisLabel = confirmation.actionKind === 'commit_layout_draft' || confirmation.useLayoutDraft
+      ? '当前草案'
+      : '这次要求'
+    const now = new Date().toISOString()
+    const pendingContext = this.pendingAtomicContextService.initialize({
+      action: null,
+      phase: 'formal_rebuild_confirmation',
+      summary: `待确认重新编排${playlistLabel}`,
+      reasoning: `当前${playlistLabel}已经有 ${confirmation.existingItemCount} 条节目。确认后我会按${basisLabel}重新写入正式播单；取消则不改动。`,
+      confirmationNote: `确认后会按${basisLabel}重新生成正式播单，已有节目可能被替换；取消则保留当前播单。`,
+      originalUserInput: input.userInput,
+      collectedUserInput: input.userInput,
+      slots: {},
+      missingFields: ['selection'],
+      followUpQuestion: `请确认是否重新编排这张${playlistLabel}。`,
+      formalRebuildConfirmation: confirmation,
+      attemptCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    return this.buildPendingAtomicContextDecision(
+      pendingContext,
+      createFeedback(
+        `当前${playlistLabel}已经有 ${confirmation.existingItemCount} 条节目。我可以按${basisLabel}重新编排，但这会改动正式播单；请先确认。`,
+        'selection',
+        '重新编排确认',
+        {
+          explanation: confirmation.reasoning,
+          details: {
+            playlistType: confirmation.playlistType,
+            mode: confirmation.mode,
+            usesLayoutDraft: confirmation.useLayoutDraft,
+            existingItemCount: confirmation.existingItemCount,
+            draftId: confirmation.draftId,
+            draftSource: confirmation.draftSource,
+            noMutationBeforeConfirm: true,
+          },
+        },
+      ),
+    )
+  }
+
   private resolveFormalOrchestrationBasis(
     input: RuntimeSubmitInput,
     mode: Extract<TaskMode, 'full_generate' | 'partial_generate'>,
@@ -6490,7 +7950,7 @@ export class DemoRuntimeFacade {
     const explicitDraftReference = this.shouldAttachLayoutDraftToOrchestration(input.userInput)
     const requiresLayoutDraft = playlistType === 'rotation'
       ? true
-      : taskKind === 'full_day' || taskKind === 'overall_refill' || explicitDraftReference
+      : taskKind === 'full_day' || explicitDraftReference
     const layoutDraft = playlistType === 'rotation'
       ? input.currentLayoutDraft ?? undefined
       : requiresLayoutDraft || explicitDraftReference
@@ -6588,6 +8048,12 @@ export class DemoRuntimeFacade {
         ),
       }
     }
+
+    if (
+      basis.completeness.status === 'partial'
+      && mode === 'partial_generate'
+      && basis.shouldUseLayoutDraft
+    ) return null
 
     if (basis.completeness.status === 'partial') {
       return {
@@ -6953,6 +8419,10 @@ export class DemoRuntimeFacade {
         return '待选择目标'
       case 'recommending_insert':
         return '插入推荐'
+      case 'draft_research_confirmation':
+        return '草案建议确认'
+      case 'formal_rebuild_confirmation':
+        return '重新编排确认'
     }
   }
 
@@ -7216,21 +8686,26 @@ export class DemoRuntimeFacade {
   }
 
   private async prepareLayoutDraft(input: RuntimeSubmitInput, classification: TaskClassification, orchestrationMode: Extract<TaskMode, 'full_generate' | 'partial_generate'>): Promise<RuntimeDecision> {
+    try {
     const suggested = classification.suggestedParams ?? {}
-    const structuredSegments = this.normalizeStructuredSegments(suggested.segments)
+    const structuredSegments = this.resolveRotationStructuredSegments(input, suggested)
     const rotationDurationSeconds = typeof suggested.rotationDurationSeconds === 'number' && suggested.rotationDurationSeconds > 0
       ? suggested.rotationDurationSeconds
-      : undefined
+      : input.scheduleState.playlistType === 'rotation'
+        ? input.scheduleState.rotationDurationSeconds ?? input.currentLayoutDraft?.targetDurationSeconds
+        : undefined
     const userIntent = typeof suggested.userIntent === 'string' && suggested.userIntent.trim() ? suggested.userIntent.trim() : input.userInput
     const ignoreExistingLayout = suggested.ignoreExistingLayout === true
     let draft: LayoutDraft
     let sourceLabel = '已根据你的要求生成版面草案。'
     let warnings: string[] = []
+    let refinedExistingDraft = false
 
     if (classification.mode === 'layout_refine') {
+      refinedExistingDraft = true
       const baseDraft = input.currentLayoutDraft ?? this.resolveExistingLayoutDraft(input, userIntent, false)?.draft
       if (!baseDraft) return { kind: 'message', feedback: createFeedback('当前还没有可微调的版面草案，请先生成一份草案再继续调整。', 'planning', '版面草案', { explanation: classification.reasoning }) }
-      const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, currentDraft: baseDraft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
+      const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, playlistType: input.scheduleState.playlistType, targetDurationSeconds: rotationDurationSeconds, currentDraft: baseDraft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
       const specValidation = this.layoutDraftValidator.validateSpec(spec)
       const specStructuralErrors = specValidation.errors.filter((issue) => issue.code !== 'segment_gap')
       if (specStructuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('版面草案调整失败，请补充更明确的时段或内容要求。', classification.reasoning, { errors: specStructuralErrors, warnings: specValidation.warnings })
@@ -7248,7 +8723,8 @@ export class DemoRuntimeFacade {
           ? referenceLayout
           : null
       if (existing && this.shouldApplyIntentOnExistingDraft(classification, existing.draft)) {
-        const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, currentDraft: existing.draft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
+        refinedExistingDraft = true
+        const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, playlistType: input.scheduleState.playlistType, targetDurationSeconds: rotationDurationSeconds, currentDraft: existing.draft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
         const specValidation = this.layoutDraftValidator.validateSpec(spec)
         const specStructuralErrors = specValidation.errors.filter((issue) => issue.code !== 'segment_gap')
         if (specStructuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('基于当前版面参考生成调整方案失败，请补充更明确的时段或内容要求。', classification.reasoning, { errors: specStructuralErrors, warnings: specValidation.warnings })
@@ -7263,7 +8739,7 @@ export class DemoRuntimeFacade {
         warnings = existing.draft.warnings ?? []
         sourceLabel = existing.label
       } else {
-        const spec = await this.layoutDraftService.generateSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
+        const spec = await this.layoutDraftService.generateSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, playlistType: input.scheduleState.playlistType, targetDurationSeconds: rotationDurationSeconds, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments })
         const specValidation = this.layoutDraftValidator.validateSpec(spec)
         const specStructuralErrors = specValidation.errors.filter((issue) => issue.code !== 'segment_gap')
         if (specStructuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('版面草案生成失败，请补充更明确的时段或内容要求。', classification.reasoning, { errors: specStructuralErrors, warnings: specValidation.warnings })
@@ -7274,9 +8750,12 @@ export class DemoRuntimeFacade {
     }
 
     draft = this.applyLayoutDraftStrategyProfile(draft, input.userInput, input.scheduleState.playlistType)
+    const durationSourceSegments = refinedExistingDraft && (structuredSegments?.length ?? 0) <= 1
+      ? undefined
+      : structuredSegments
     draft = this.applyRotationDurationSegments(
       draft,
-      structuredSegments,
+      durationSourceSegments,
       input.scheduleState.playlistType,
     )
     draft = this.applyRotationTargetDuration(
@@ -7284,6 +8763,7 @@ export class DemoRuntimeFacade {
       rotationDurationSeconds,
       input.scheduleState.playlistType,
       suggested.semanticLabel ?? userIntent,
+      !durationSourceSegments?.length,
     )
     if (input.scheduleState.playlistType === 'rotation' && rotationDurationSeconds && !structuredSegments?.length) {
       sourceLabel = '我先按主题和总时长整理了一份轮播草案，确认前不会写入正式轮播单。'
@@ -7294,7 +8774,23 @@ export class DemoRuntimeFacade {
     draft.warnings = allWarnings
     if (structuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('版面草案结构校验未通过，请先调整版面后再开始编排。', classification.reasoning, { errors: structuralErrors, warnings: draftValidation.warnings })
     const feasibilityReport = await this.buildLayoutDraftFeasibilityReport(input, draft)
-    return { kind: 'layout_draft', feedback: createFeedback(sourceLabel, 'planning', '版面草案', { explanation: classification.reasoning, details: { draftId: draft.id, layoutSource: draft.source, draftKind: draft.draftKind, coverage: draft.coverage, targetDurationSeconds: draft.targetDurationSeconds, durationSegments: draft.durationSegments, segmentCount: draft.layoutReference.slots.length, warnings: allWarnings, feasibilitySummary: feasibilityReport.summary, orchestrationMode, strategyProfile: draft.strategyProfile } }), draft, feasibilityReport, orchestrationMode }
+    const feedbackContent = this.buildLayoutDraftNextStepFeedback(
+      sourceLabel,
+      draft,
+      input.scheduleState.playlistType,
+      allWarnings,
+    )
+    return { kind: 'layout_draft', feedback: createFeedback(feedbackContent, 'planning', '版面草案', { explanation: classification.reasoning, details: { draftId: draft.id, layoutSource: draft.source, draftKind: draft.draftKind, coverage: draft.coverage, targetDurationSeconds: draft.targetDurationSeconds, durationSegments: draft.durationSegments, segmentCount: draft.layoutReference.slots.length, warnings: allWarnings, feasibilitySummary: feasibilityReport.summary, orchestrationMode, strategyProfile: draft.strategyProfile } }), draft, feasibilityReport, orchestrationMode }
+    } catch (error) {
+      if (isRecoverableLlmError(error)) {
+        return this.buildRecoverableLlmFailureDecision(
+          input,
+          error.llmFailure,
+          classification.reasoning,
+        )
+      }
+      throw error
+    }
   }
 
   private applyRotationDurationSegments(
@@ -7303,6 +8799,17 @@ export class DemoRuntimeFacade {
     playlistType?: PlaylistType,
   ): LayoutDraft {
     if (playlistType !== 'rotation' || !structuredSegments?.length) {
+      const durationSegments = playlistType === 'rotation'
+        ? this.buildRotationDurationSegmentsFromDraftSlots(draft)
+        : []
+      if (durationSegments.length > 0) {
+        return {
+          ...draft,
+          draftKind: 'duration_segments',
+          targetDurationSeconds: draft.targetDurationSeconds ?? durationSegments.reduce((sum, segment) => sum + segment.targetDurationSeconds, 0),
+          durationSegments,
+        }
+      }
       return {
         ...draft,
         draftKind: draft.strategyProfile?.kind === 'carousel' ? draft.draftKind ?? 'duration_segments' : draft.draftKind ?? 'time_slots',
@@ -7332,20 +8839,49 @@ export class DemoRuntimeFacade {
     }
   }
 
+  private buildRotationDurationSegmentsFromDraftSlots(draft: LayoutDraft): NonNullable<LayoutDraft['durationSegments']> {
+    const selectionPriority = draft.strategyProfile?.selectionPriority ?? 'content_match'
+    const durationSegments: NonNullable<LayoutDraft['durationSegments']> = []
+    draft.layoutReference.slots.forEach((slot, index) => {
+      const column = draft.columns.find((item) => item.columnId === slot.columnId)
+      const targetDurationSeconds = Math.max(0, clockToSeconds(slot.endTime) - clockToSeconds(slot.startTime))
+      const label = (column?.semanticLabel ?? column?.columnName ?? `轮播段${index + 1}`).trim()
+      if (!label || targetDurationSeconds <= 0) return
+      durationSegments.push({
+        id: slot.id,
+        label,
+        contentHint: label,
+        targetDurationSeconds,
+        selectionPriority,
+        repeatPolicy: 'avoid_repeat',
+        fallbackPolicy: 'ask_user',
+      })
+    })
+    return durationSegments
+  }
+
   private applyRotationTargetDuration(
     draft: LayoutDraft,
     targetDurationSeconds: number | undefined,
     playlistType?: PlaylistType,
     fallbackLabel?: string,
+    allowSingleSegmentExpansion = false,
   ): LayoutDraft {
     if (playlistType !== 'rotation' || !targetDurationSeconds || targetDurationSeconds <= 0) return draft
 
     if (draft.durationSegments?.length) {
       const plannedDurationSeconds = draft.durationSegments.reduce((sum, segment) => sum + segment.targetDurationSeconds, 0)
+      const durationSegments = allowSingleSegmentExpansion && draft.durationSegments.length === 1 && plannedDurationSeconds !== targetDurationSeconds
+        ? [{
+            ...draft.durationSegments[0]!,
+            targetDurationSeconds,
+          }]
+        : draft.durationSegments
       return {
         ...draft,
         draftKind: 'duration_segments',
-        targetDurationSeconds: plannedDurationSeconds || targetDurationSeconds,
+        targetDurationSeconds: targetDurationSeconds || plannedDurationSeconds,
+        durationSegments,
       }
     }
 
@@ -7367,6 +8903,36 @@ export class DemoRuntimeFacade {
         fallbackPolicy: 'ask_user',
       }],
     }
+  }
+
+  private buildLayoutDraftNextStepFeedback(
+    baseLabel: string,
+    draft: LayoutDraft,
+    playlistType?: PlaylistType,
+    warnings: string[] = [],
+  ): string {
+    const segmentCount = draft.durationSegments?.length ?? draft.layoutReference.slots.length
+    const hasWarnings = warnings.length > 0
+    const durationText = draft.targetDurationSeconds
+      ? `，目标总时长 ${this.formatDurationText(draft.targetDurationSeconds)}`
+      : ''
+    const noWriteText = playlistType === 'rotation'
+      ? '确认前不会写入正式轮播单'
+      : '确认前不会写入正式节目单'
+    const refineHint = playlistType === 'rotation'
+      ? '你可以继续说“拆细一点”“把第二段换成……”，也可以说“按这个开始编排”。'
+      : '你可以继续调整某个时段，也可以说“按这个开始编排”。'
+
+    if (playlistType === 'rotation') {
+      const structureText = segmentCount > 1
+        ? `我先把这张轮播草案整理成 ${segmentCount} 个内容块${durationText}。`
+        : `我先把需求整理成一块轮播草案${durationText}。`
+      const warningText = hasWarnings ? '这版还有空档或边界需要你再看一眼。' : ''
+      return [structureText, noWriteText + '。', warningText, refineHint].filter(Boolean).join('')
+    }
+
+    const warningText = hasWarnings ? '这版还有空档或边界需要你再看一眼。' : ''
+    return [baseLabel, noWriteText + '。', warningText, refineHint].filter(Boolean).join('')
   }
 
   private applyLayoutDraftStrategyProfile(draft: LayoutDraft, userInput: string, playlistType?: PlaylistType): LayoutDraft {
@@ -7411,9 +8977,11 @@ export class DemoRuntimeFacade {
     const eventOrFunctionalCarousel = this.shouldTreatDraftAsEventOrFunctionalCarousel(draft, normalized)
     const kind: LayoutDraftStrategyKind = playlistType === 'tv'
       ? 'tv_channel'
-      : (explicitCarousel || (!explicitTvChannel && eventOrFunctionalCarousel))
+      : playlistType === 'rotation'
         ? 'carousel'
-        : 'tv_channel'
+        : (explicitCarousel || (!explicitTvChannel && eventOrFunctionalCarousel))
+          ? 'carousel'
+          : 'tv_channel'
     const ratingRequested = /(收视率|收视|高收视)/.test(normalized)
     const trendingRequested = /(热播|热度|高热度|热门|话题|舆论|热搜)/.test(normalized)
     const selectionPriority: DraftSelectionPriority = kind === 'tv_channel'
@@ -7607,54 +9175,41 @@ export class DemoRuntimeFacade {
     return `${year}-${month}-${day}`
   }
 
-  private async commitLayoutDraft(input: RuntimeSubmitInput, classification: TaskClassification): Promise<RuntimeDecision> {
+  private async commitLayoutDraft(
+    input: RuntimeSubmitInput,
+    classification: TaskClassification,
+    options?: { skipFormalRebuildGate?: boolean },
+  ): Promise<RuntimeDecision> {
     const draft = input.currentLayoutDraft
       ?? this.resolveExistingLayoutDraft(input, input.userInput, false)?.draft
     if (!draft) return { kind: 'message', feedback: createFeedback('当前还没有可确认的版面草案，请先生成或导入版面后再开始编排。', 'planning', '版面草案', { explanation: classification.reasoning }) }
-    const mode = this.resolveExplicitPreferredOrchestrationMode(input.userInput)
+    const suggestedMode = classification.suggestedParams?.orchestrationMode
+    const mode = suggestedMode
+      ?? this.resolveExplicitPreferredOrchestrationMode(input.userInput)
       ?? this.resolvePreferredOrchestrationMode(input)
-    const feasibilityReport = await this.buildLayoutDraftFeasibilityReport(input, draft)
-    const blockedSegments = feasibilityReport.segments.filter((segment) => segment.status === 'blocked')
-    const mustFixBlockedSegments = blockedSegments.filter((segment) =>
-      segment.blockerKind !== 'keyword' || this.hasConcreteDraftSegmentRequirement(draft, segment.segmentId),
-    )
-    if (mode !== 'partial_generate' && mustFixBlockedSegments.length > 0) {
-      const blockedText = mustFixBlockedSegments
-        .map((segment) => `${segment.startTime}-${segment.endTime} ${segment.label}`)
-        .join('；')
-      return {
-        kind: 'layout_draft',
-        feedback: createFeedback(
-          `当前版面草案还有 ${blockedSegments.length} 个段落没有可用节目支撑，已先保留草案，不会进入正式编排。${blockedText ? `请调整：${blockedText}` : '请调整不可编排段落。'}`,
-          'planning',
-          '版面草案待调整',
-          {
-            explanation: classification.reasoning,
-            details: {
-              draftId: draft.id,
-              layoutSource: draft.source,
-              feasibilitySummary: feasibilityReport.summary,
-              blockedSegments: mustFixBlockedSegments,
-              orchestrationMode: mode,
-            },
-          },
-        ),
-        draft,
-        feasibilityReport,
-        orchestrationMode: mode,
-      }
-    }
     const formalInput = { ...input, currentLayoutDraft: draft }
     const basis = this.resolveFormalOrchestrationBasis(formalInput, mode)
     const missingBasisBlock = this.buildMissingFormalOrchestrationBasisBlock(formalInput, mode, classification.reasoning, basis)
     if (missingBasisBlock) return missingBasisBlock
 
     const lifecycle = this.buildFormalOrchestrationLifecycle(basis)
-    const targetTimeRange = draft.draftKind === 'duration_segments'
-      ? this.resolveFormalOrchestrationTargetTimeRange(input.userInput.replace(/\s+/g, ''))
-      : this.resolveFormalOrchestrationTargetTimeRange(input.userInput.replace(/\s+/g, ''))
-        ?? draft.coverage
+    const explicitTargetTimeRange = this.resolveFormalOrchestrationTargetTimeRange(input.userInput.replace(/\s+/g, ''))
+    const targetTimeRange = explicitTargetTimeRange ?? draft.coverage
     const searchKeywords = resolveFormalOrchestrationSearchKeywords(input.userInput)
+    if (!options?.skipFormalRebuildGate && this.shouldRequireFormalRebuildConfirmation(formalInput, mode)) {
+      return this.buildFormalRebuildConfirmationDecision(formalInput, {
+        actionKind: 'commit_layout_draft',
+        mode,
+        useLayoutDraft: true,
+        targetTimeRange,
+        existingItemCount: this.resolveExistingFormalItemCount(formalInput),
+        playlistType: formalInput.scheduleState.playlistType,
+        userInput: formalInput.userInput,
+        reasoning: classification.reasoning,
+        draftId: draft.id,
+        draftSource: draft.source,
+      })
+    }
     return {
       kind: 'layout_commit',
       feedback: createFeedback(
@@ -7684,27 +9239,6 @@ export class DemoRuntimeFacade {
         lifecycle,
       },
     }
-  }
-
-  private hasConcreteDraftSegmentRequirement(draft: LayoutDraft, segmentId: string): boolean {
-    const index = draft.layoutReference.slots.findIndex((slot) => slot.id === segmentId)
-    const column = index >= 0 ? draft.columns[index] : undefined
-    if (!column) return false
-    const specificKeywords = extractSpecificSearchKeywords(column.queryHints ?? [])
-    const sequenceRequired = hasExplicitSequenceRequirements(column.queryHints ?? [])
-    const editorialRequired = hasEditorialKeywordRequirements(column.queryHints ?? [])
-    const functionalRequired = hasFunctionalSearchKeywords(column.queryHints ?? [])
-    if (specificKeywords.length === 0 && !sequenceRequired && !editorialRequired && !functionalRequired) return false
-    if (!sequenceRequired && !editorialRequired && !functionalRequired && (column.source === 'default' || column.source === 'imported')) {
-      const labelKeywords = extractSpecificSearchKeywords([
-        column.semanticLabel ?? '',
-        column.columnName,
-      ])
-      if (specificKeywords.every((keyword) => labelKeywords.includes(keyword))) {
-        return false
-      }
-    }
-    return true
   }
 
   private buildReferenceQueryHints(

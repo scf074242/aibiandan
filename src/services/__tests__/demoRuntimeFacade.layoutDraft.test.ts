@@ -6,9 +6,12 @@ import { clearRuntimeLayout, setRuntimeLayout } from '@/services/orchestration/r
 const taskClassifierClassifyMock = vi.hoisted(() => vi.fn())
 const layoutIntentRecognizeMock = vi.hoisted(() => vi.fn())
 const previewFeasibilityMock = vi.hoisted(() => vi.fn())
+const llmClientChatMock = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services/llm/llmClient', () => ({
-  getLLMClient: () => ({}),
+  getLLMClient: () => ({
+    chat: llmClientChatMock,
+  }),
 }))
 
 vi.mock('@/services/llm/taskClassifier', () => ({
@@ -55,6 +58,8 @@ afterEach(() => {
 })
 
 beforeEach(() => {
+  llmClientChatMock.mockReset()
+  llmClientChatMock.mockRejectedValue(new Error('LLM not configured for this test'))
   previewFeasibilityMock.mockReturnValue({
     ok: true,
     summary: {
@@ -195,6 +200,52 @@ const uploadedColumns: ColumnDefinition[] = [
 describe('DemoRuntimeFacade explicit range layout routing', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  it('turns LLM timeout into recoverable foreground feedback without mutating draft or playlist', async () => {
+    layoutIntentRecognizeMock.mockResolvedValueOnce({
+      mode: 'clarify',
+      confidence: 0.1,
+      reasoning: 'not enough layout signal',
+    })
+    taskClassifierClassifyMock.mockResolvedValueOnce({
+      mode: 'clarify',
+      confidence: 0,
+      reasoning: '模型这次没有及时返回。',
+      suggestedParams: {
+        llmFailure: {
+          stage: 'task_classification',
+          reason: 'timeout',
+          message: '模型这次没有及时返回。',
+          rawMessage: 'LLM request failed after 1 attempt: LLM 网络请求超时，请检查网络或稍后重试。',
+          canRetry: true,
+        },
+      },
+    })
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState({ playlistType: 'rotation', rotationDurationSeconds: 3 * 60 * 60 }),
+      userInput: '这张轮播单按前面想法继续策划一下',
+      currentSchedule: [],
+      history: [],
+      layoutDraftEnabled: true,
+    })
+
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') {
+      throw new Error('expected recoverable message decision')
+    }
+    expect(result.statusHint).toBe('failed')
+    expect(result.feedback.processType).toBe('error')
+    expect(result.feedback.content).toContain('没有修改草案或播单')
+    expect(result.feedback.content).toContain('重试')
+    expect(result.feedback.details).toMatchObject({
+      canRetry: true,
+      noMutation: true,
+      recoverableUserInput: '这张轮播单按前面想法继续策划一下',
+    })
+    expect(result.layoutDraft).toBeUndefined()
   })
 
   it('routes explicit time-range scheduling intent to formal orchestration unless the user asks for a draft', async () => {
@@ -395,6 +446,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
 
     expect(result.orchestrationRequest.mode).toBe('partial_generate')
     expect(result.orchestrationRequest.layoutDraft).toBe(currentLayoutDraft)
+    expect(result.orchestrationRequest.targetTimeRange).toEqual(currentLayoutDraft.coverage)
     expect(result.feedback.details?.layoutSource).toBe(currentLayoutDraft.source)
   })
 
@@ -1002,6 +1054,29 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
 
   it('builds rotation duration-segment drafts without requiring fixed clock slots', async () => {
     const facade = new DemoRuntimeFacade()
+    llmClientChatMock.mockResolvedValueOnce({
+      content: JSON.stringify({
+        coverage: { start: '00:00:00', end: '06:00:00' },
+        segments: [
+          {
+            id: 'draft-segment-1',
+            label: '景点宣传片',
+            startTime: '00:00:00',
+            endTime: '03:00:00',
+            programType: 'news_magazine',
+            queryHints: ['景点宣传片'],
+          },
+          {
+            id: 'draft-segment-2',
+            label: '垫片',
+            startTime: '03:00:00',
+            endTime: '06:00:00',
+            programType: 'news_magazine',
+            queryHints: ['垫片'],
+          },
+        ],
+      }),
+    })
 
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState({
@@ -1009,7 +1084,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
         channelName: '轮播单',
         rotationStrategy: 'content_match',
       }),
-      userInput: '顺次放入3小时时长景点宣传片，再放入3小时时长垫片，内容匹配优先',
+      userInput: '制作一份总时长6小时的轮播草案，先放景点宣传片，再放垫片，内容匹配优先',
       currentSchedule: [],
       history: [],
     })
@@ -1037,6 +1112,102 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       }),
     ])
     expect(result.feedback.details?.draftKind).toBe('duration_segments')
+    expect(result.feedback.content).toContain('确认前不会写入正式轮播单')
+    expect(result.feedback.content).toContain('按这个开始编排')
+    expect(result.feedback.content).not.toContain('候选')
+  })
+
+  it('does not invent rotation segments when the LLM returns only a broad draft direction', async () => {
+    const facade = new DemoRuntimeFacade()
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState({
+        playlistType: 'rotation',
+        channelName: '轮播单',
+        rotationStrategy: 'content_match',
+        rotationDurationSeconds: 3 * 3600,
+      }),
+      userInput: '生成一个时长3小时，由上海市16个区标志景点组成的轮播单，每个区的时长是10分钟',
+      currentSchedule: [],
+      history: [],
+    })
+
+    if (result.kind !== 'layout_draft') throw new Error(`expected rotation duration draft: ${result.feedback.content}`)
+    expect(result.draft.draftKind).toBe('duration_segments')
+    expect(result.draft.targetDurationSeconds).toBe(3 * 3600)
+    expect(result.draft.durationSegments).toHaveLength(1)
+    expect(result.draft.durationSegments?.[0]?.label).toContain('上海市16个区')
+    expect(result.feedback.content).toContain('一块轮播草案')
+    expect(result.feedback.content).toContain('继续')
+    expect(result.feedback.content).not.toContain('候选')
+  })
+
+  it('applies LLM-generated structured refinements to the current rotation draft', async () => {
+    const facade = new DemoRuntimeFacade()
+    const currentLayoutDraft = createRotationDurationDraft()
+    llmClientChatMock.mockResolvedValueOnce({
+      content: JSON.stringify({
+        actions: [
+          {
+            type: 'refine_layout_draft',
+            rotationDurationSeconds: 3 * 3600,
+            semanticLabel: '静安区静安寺宣传片、闵行区仙鹤墓园、徐汇区天主教堂',
+            segments: [
+              {
+                start: '00:00:00',
+                end: '01:00:00',
+                semanticLabel: '静安区静安寺宣传片',
+                programTypeHint: 'news_magazine',
+              },
+              {
+                start: '01:00:00',
+                end: '02:00:00',
+                semanticLabel: '闵行区仙鹤墓园',
+                programTypeHint: 'news_magazine',
+              },
+              {
+                start: '02:00:00',
+                end: '03:00:00',
+                semanticLabel: '徐汇区天主教堂',
+                programTypeHint: 'news_magazine',
+              },
+            ],
+          },
+        ],
+        assistantReplyDraft: '我按三个小时重新整理草案。',
+        reasoning: '用户明确要求三段轮播草案。',
+      }),
+    })
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState({
+        playlistType: 'rotation',
+        channelName: '轮播单',
+        rotationStrategy: 'content_match',
+        rotationDurationSeconds: 3 * 3600,
+      }),
+      userInput: '草案改成第一小时静安区静安寺宣传片，第二小时闵行区仙鹤墓园，第三小时徐汇区天主教堂',
+      currentSchedule: [],
+      currentLayoutDraft,
+      preferLayoutDraftRefine: true,
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    if (result.kind !== 'layout_draft') throw new Error(`expected rotation draft refine: ${result.feedback.content}`)
+    expect(result.draft.durationSegments).toHaveLength(3)
+    expect(result.draft.durationSegments?.map((segment) => segment.label)).toEqual([
+      '静安区静安寺宣传片',
+      '闵行区仙鹤墓园',
+      '徐汇区天主教堂',
+    ])
+    expect(result.draft.durationSegments?.map((segment) => segment.targetDurationSeconds)).toEqual([
+      3600,
+      3600,
+      3600,
+    ])
   })
 })
 
@@ -1124,6 +1295,33 @@ const createDraft = (): LayoutDraft => ({
 describe('DemoRuntimeFacade layout draft refine', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    llmClientChatMock.mockRejectedValue(new Error('LLM not configured for this test'))
+    previewFeasibilityMock.mockReturnValue({
+      ok: true,
+      summary: {
+        readyCount: 0,
+        warningCount: 0,
+        blockedCount: 0,
+      },
+      segments: [],
+    })
+    taskClassifierClassifyMock.mockResolvedValue({
+      mode: 'clarify',
+      confidence: 0.1,
+      reasoning: 'unused',
+    })
+    layoutIntentRecognizeMock.mockResolvedValue({
+      mode: 'layout_refine',
+      confidence: 0.95,
+      reasoning: 'mock layout refine',
+      ignoreExistingLayout: false,
+      targetTimeRange: {
+        start: '23:00:00',
+        end: '23:30:00',
+      },
+      semanticLabel: '两说',
+      programTypeHint: undefined,
+    })
   })
 
   it('允许在已有空档的草案上删除一个栏目段', async () => {

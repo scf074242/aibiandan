@@ -62,7 +62,7 @@ export const compileSchedulingTaskPlanDraft = (
   if (batchReplace) {
     return batchReplace
   }
-  if (firstStage.type !== 'batch_atomic' || firstStage.action !== 'delete') {
+  if (firstStage.type !== 'batch_atomic' || !['delete', 'batch_delete'].includes(firstStage.action ?? '')) {
     return { status: 'unsupported', reason: 'only_batch_delete_insert_shift_or_batch_replace_supported' }
   }
 

@@ -78,6 +78,53 @@ const currentLayoutDraft: LayoutDraft = {
   }],
 }
 
+const rotationLayoutDraft: LayoutDraft = {
+  id: 'draft-rotation-analysis',
+  channelId: 'rotation-channel',
+  date: '2026-03-25',
+  version: 1,
+  source: 'generated',
+  userIntent: '主要用于世界杯足球精彩画面的回顾',
+  draftKind: 'duration_segments',
+  purpose: '世界杯足球精彩画面的回顾',
+  targetDurationSeconds: 3 * 60 * 60,
+  coverage: { start: '00:00:00', end: '03:00:00' },
+  layoutReference: {
+    id: 'layout-rotation-analysis',
+    name: '轮播草案',
+    slots: [],
+  },
+  columns: [],
+  durationSegments: [{
+    id: 'segment-world-cup',
+    label: '世界杯精彩回顾',
+    contentHint: '世界杯足球精彩画面',
+    targetDurationSeconds: 3 * 60 * 60,
+    selectionPriority: 'content_match',
+    fallbackPolicy: 'ask_user',
+  }],
+  strategyProfile: {
+    kind: 'carousel',
+    label: '轮播单策略',
+    reasoning: '按内容匹配选择轮播素材',
+    requiresPreviousSchedule: false,
+    selectionPriority: 'content_match',
+    strategyBasis: 'content_match',
+    contextSummary: '轮播单按内容队列处理',
+    selectionSummary: '先按节目内容、标题、栏目和关键词贴合度选择，再用收视表现兜底。',
+    constraintSummary: '候选不足时保留空缺并要求人工确认。',
+    selectionRules: ['内容贴合优先', '候选不足留空'],
+    keywordPolicy: 'hard_match',
+    segmentPolicies: {
+      'segment-world-cup': {
+        primary: 'content_match',
+        fallback: ['rating', 'trending'],
+      },
+    },
+  },
+  warnings: ['明确关键词没有命中节目库，正式编排时应保留空缺并中止自动填充。'],
+}
+
 describe('DemoRuntimeFacade read-only playlist analysis', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -107,6 +154,103 @@ describe('DemoRuntimeFacade read-only playlist analysis', () => {
     expect(decision.analysisContext?.factPack.itemCount).toBe(3)
     expect(decision.analysisContext?.factPack.typeDurations.find((item) => item.programType === 'drama')?.durationSeconds).toBe(5400)
     expect(decision.feedback.details?.readOnly).toBe(true)
+    expect(getAtomicCapabilities().getAllItems()).toEqual([])
+  })
+
+  it('uses the active rotation draft when the formal rotation playlist is still empty', async () => {
+    llmMocks.chat.mockRejectedValueOnce(new Error('force fallback'))
+    const facade = new DemoRuntimeFacade()
+
+    const decision = await facade.submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'playlist-rotation-analysis',
+        channelId: 'rotation-channel',
+        channelName: '轮播单',
+        isEmpty: true,
+        itemCount: 0,
+        gapCount: 1,
+        playlistType: 'rotation',
+        rotationStrategy: 'content_match',
+        rotationDurationSeconds: 3 * 60 * 60,
+      }),
+      userInput: '这张轮播单整体怎么样？',
+      currentSchedule: [],
+      currentLayoutDraft: rotationLayoutDraft,
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+    })
+
+    expect(decision.kind).toBe('message')
+    if (decision.kind !== 'message') throw new Error('expected read-only message')
+    expect(decision.feedback.content).toContain('正式播单还没有节目')
+    expect(decision.feedback.content).toContain('已经有一份草案')
+    expect(decision.feedback.content).toContain('世界杯足球精彩画面')
+    expect(decision.feedback.content).toContain('关键词没有命中节目库')
+    expect(decision.feedback.content).not.toContain('给我一份草案')
+    expect(decision.analysisContext?.factPack.layoutDraftState).toMatchObject({
+      exists: true,
+      purpose: '世界杯足球精彩画面的回顾',
+      targetDurationSeconds: 10800,
+      segmentCount: 1,
+    })
+    expect(decision.analysisContext?.factPack.layoutDraftState.segments?.[0]).toMatchObject({
+      label: '世界杯精彩回顾',
+      contentHint: '世界杯足球精彩画面',
+      targetDurationSeconds: 10800,
+      selectionPriority: 'content_match',
+    })
+    expect(getAtomicCapabilities().getAllItems()).toEqual([])
+  })
+
+  it('optimizes an existing empty rotation draft without mutating the draft or formal playlist', async () => {
+    llmMocks.chat
+      .mockRejectedValueOnce(new Error('force analysis fallback'))
+      .mockRejectedValueOnce(new Error('force optimization fallback'))
+    const facade = new DemoRuntimeFacade()
+    const rotationState = createScheduleState({
+      playlistId: 'playlist-rotation-analysis',
+      channelId: 'rotation-channel',
+      channelName: '轮播单',
+      isEmpty: true,
+      itemCount: 0,
+      gapCount: 1,
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: 3 * 60 * 60,
+    })
+
+    const analysis = await facade.submitInstruction({
+      scheduleState: rotationState,
+      userInput: '这张轮播单整体怎么样？',
+      currentSchedule: [],
+      currentLayoutDraft: rotationLayoutDraft,
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+    })
+    if (analysis.kind !== 'message') throw new Error('expected analysis message')
+
+    const optimization = await facade.submitInstruction({
+      scheduleState: rotationState,
+      userInput: '那怎么优化？',
+      currentSchedule: [],
+      currentLayoutDraft: rotationLayoutDraft,
+      analysisContext: analysis.analysisContext,
+      history: [analysis.feedback.content],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      preferLayoutDraftRefine: true,
+    })
+
+    expect(optimization.kind).toBe('message')
+    if (optimization.kind !== 'message') throw new Error('expected optimization message')
+    expect(optimization.feedback.content).toContain('草案')
+    expect(optimization.feedback.content).toContain('关键词')
+    expect(optimization.feedback.content).toContain('待确认的草案更新')
+    expect(optimization.feedback.details?.readOnly).toBe(true)
+    expect(optimization.analysisContext?.kind).toBe('optimization_suggestion')
+    expect(optimization.analysisContext?.factPack.layoutDraftState.exists).toBe(true)
     expect(getAtomicCapabilities().getAllItems()).toEqual([])
   })
 

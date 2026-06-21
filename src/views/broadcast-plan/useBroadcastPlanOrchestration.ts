@@ -106,8 +106,8 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
       await orchestratorRuntime.startFullGeneration(
         options.currentChannelId.value,
         options.scheduleDate.value,
-        '06:00:00',
-        '23:59:59',
+        targetTimeRange?.start ?? '06:00:00',
+        targetTimeRange?.end ?? '23:59:59',
       )
     } catch (error) {
       ElMessage.error(error instanceof Error ? error.message : 'AI 编排失败')
@@ -180,10 +180,11 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
         columns: payload.layoutDraft.columns,
       })
     }
+    const effectiveTargetTimeRange = payload.targetTimeRange ?? payload.layoutDraft?.coverage
     const searchKeywords = payload.searchKeywords?.length
       ? payload.searchKeywords
       : resolveFormalOrchestrationSearchKeywords(payload.userInput)
-    await startOrchestrationRuntime(payload.mode, payload.targetTimeRange, searchKeywords)
+    await startOrchestrationRuntime(payload.mode, effectiveTargetTimeRange, searchKeywords)
   }
 
   const handleCancelOrchestration = async () => {

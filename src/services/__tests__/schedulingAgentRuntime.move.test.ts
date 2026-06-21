@@ -352,7 +352,7 @@ describe('SchedulingAgentRuntime move command', () => {
     })
   })
 
-  it('轮播单插入命令只返回候选确认，不直接落表', async () => {
+  it('轮播单插入命令多候选时先要求选择候选，不直接落表', async () => {
     const { dataGateway, runtime } = buildRuntime({
       playlistType: 'rotation',
       rotationStrategy: 'content_match',
@@ -374,13 +374,13 @@ describe('SchedulingAgentRuntime move command', () => {
       date,
     })
 
-    expect(result.status).toBe('needs_confirmation')
+    expect(result.status).toBe('needs_selection')
     expect(result.decision.intent).toBe('insert')
     expect(result.decision.recommendations?.length).toBeGreaterThan(0)
     expect(result.decision.pendingTask).toMatchObject({
       intent: 'insert',
-      phase: 'needs_confirmation',
-      missingSlots: ['confirmation'],
+      phase: 'needs_selection',
+      missingSlots: ['candidateId'],
     })
 
     const context = await dataGateway.loadContext({
@@ -442,7 +442,7 @@ describe('SchedulingAgentRuntime move command', () => {
     })
   })
 
-  it('轮播单插入候选确认后才事务落表', async () => {
+  it('轮播单插入选择候选并确认后才事务落表', async () => {
     const { dataGateway, runtime } = buildRuntime({
       playlistType: 'rotation',
       rotationStrategy: 'content_match',
@@ -464,18 +464,28 @@ describe('SchedulingAgentRuntime move command', () => {
       date,
     })
 
-    expect(first.status).toBe('needs_confirmation')
-    expect(first.decision.pendingTask?.phase).toBe('needs_confirmation')
+    expect(first.status).toBe('needs_selection')
+    expect(first.decision.pendingTask?.phase).toBe('needs_selection')
 
     const second = await runtime.submit({
-      userInput: '确认',
+      userInput: '第一个',
       channelId: 'dragon',
       date,
       pendingTask: first.decision.pendingTask,
     })
 
-    expect(second.status).toBe('executed')
-    expect(second.explanation).toContain('轮播单已确认')
+    expect(second.status).toBe('needs_confirmation')
+    expect(second.decision.pendingTask?.phase).toBe('needs_confirmation')
+
+    const third = await runtime.submit({
+      userInput: '确认',
+      channelId: 'dragon',
+      date,
+      pendingTask: second.decision.pendingTask,
+    })
+
+    expect(third.status).toBe('executed')
+    expect(third.explanation).toContain('轮播单已确认')
 
     const context = await dataGateway.loadContext({
       userInput: '',

@@ -19,6 +19,17 @@ export type TaskMode =
   | 'layout_refine'
   | 'layout_commit'
 
+export type LlmFailureStage = 'agent_planning' | 'task_classification' | 'layout_draft_generate' | 'layout_draft_refine'
+export type LlmFailureReason = 'timeout' | 'unavailable' | 'network' | 'unknown'
+
+export interface LlmFailureInfo {
+  stage: LlmFailureStage
+  reason: LlmFailureReason
+  message: string
+  rawMessage?: string
+  canRetry: boolean
+}
+
 /** 浠诲姟鍒ゅ埆缁撴灉 */
 export interface TaskClassification {
   mode: TaskMode
@@ -30,10 +41,12 @@ export interface TaskClassification {
     userIntent?: string        // 瑙ｆ瀽鍚庣殑鐢ㄦ埛鎰忓浘
     targetTimeRange?: { start: string; end: string }
     rotationDurationSeconds?: number
+    orchestrationMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'>
     ignoreExistingLayout?: boolean
     semanticLabel?: string
     programTypeHint?: string
     segments?: LayoutIntentSegment[]
+    llmFailure?: LlmFailureInfo
   }
 }
 

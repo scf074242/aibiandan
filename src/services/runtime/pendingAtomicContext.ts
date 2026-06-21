@@ -2,6 +2,7 @@ import type {
   AgentPendingTask,
   AtomicCommandIntent,
 } from '@/services/agent/types'
+import type { PlaylistType, TaskMode } from '@/types/orchestration'
 import type { SchedulingTaskRun } from './schedulingTaskPlan'
 import type {
   RuntimeInsertRecommendationCandidate,
@@ -12,7 +13,7 @@ import type {
 } from './demoRuntimeFacade'
 
 export type RuntimeAtomicAction = 'insert' | 'move' | 'delete' | 'replace'
-export type RuntimePendingAtomicPhase = 'clarifying' | 'selecting_target' | 'recommending_insert'
+export type RuntimePendingAtomicPhase = 'clarifying' | 'selecting_target' | 'recommending_insert' | 'draft_research_confirmation' | 'formal_rebuild_confirmation'
 export type RuntimeAtomicMissingField =
   | 'target_time'
   | 'program_name'
@@ -47,6 +48,43 @@ export type RuntimeResumeCompositeTask =
     targetItems: RuntimeScheduleItem[]
   }
 
+export interface RuntimeDraftResearchSuggestionCandidate {
+  id: string
+  programName: string
+  programCode?: string
+  duration?: number
+  programType?: string
+  columnName?: string
+  contentTags?: string[]
+  popularityScore?: number
+}
+
+export interface RuntimeDraftResearchSuggestion {
+  purpose: 'draft_precheck' | 'candidate_precheck' | 'external_trend_check'
+  targetSegmentIndex?: number
+  targetSegmentLabel?: string
+  semanticLabel: string
+  programTypeHint?: string
+  queries: string[]
+  candidateCount: number
+  topCandidates: RuntimeDraftResearchSuggestionCandidate[]
+  userInput: string
+  reasoning?: string
+}
+
+export interface RuntimeFormalRebuildConfirmation {
+  actionKind: 'commit_layout_draft' | 'formal_orchestration'
+  mode: Extract<TaskMode, 'full_generate' | 'partial_generate'>
+  useLayoutDraft?: boolean
+  targetTimeRange?: { start: string; end: string }
+  existingItemCount: number
+  playlistType?: PlaylistType
+  userInput: string
+  reasoning?: string
+  draftId?: string
+  draftSource?: string
+}
+
 export interface RuntimePendingAtomicContext {
   action: RuntimeAtomicAction | null
   phase: RuntimePendingAtomicPhase
@@ -63,6 +101,8 @@ export interface RuntimePendingAtomicContext {
   selectedItemId?: string | null
   selectedCandidateId?: string | null
   resumeCompositeTask?: RuntimeResumeCompositeTask
+  layoutDraftSuggestion?: RuntimeDraftResearchSuggestion
+  formalRebuildConfirmation?: RuntimeFormalRebuildConfirmation
   agentPendingTask?: AgentPendingTask
   agentIntent?: AtomicCommandIntent
   compositeTaskRun?: SchedulingTaskRun

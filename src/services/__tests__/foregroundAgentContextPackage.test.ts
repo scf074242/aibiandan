@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { LayoutDraft, ScheduleState } from '@/types/orchestration'
 import type { RuntimePendingCommand, RuntimeScheduleItem } from '@/services/runtime/demoRuntimeFacade'
+import type { ReactTaskRun } from '@/services/runtime/reactTaskTypes'
 import {
   buildForegroundAgentContextPackage,
   formatForegroundAgentContextForPrompt,
@@ -549,6 +550,166 @@ describe('foreground agent context package', () => {
     })
   })
 
+  it('keeps a layout-draft research suggestion when the user confirms updating the draft', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '更新到草案',
+      currentWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingAtomicContext: {
+        action: null,
+        phase: 'draft_research_confirmation',
+        slots: {
+          semanticLabel: '金山区最近三年热门景点',
+        },
+        missingFields: ['selection'],
+        summary: '是否把“金山区最近三年热门景点”更新到第 1 段草案',
+        reasoning: '素材核验后等待用户确认是否只更新草案。',
+        originalUserInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
+        collectedUserInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
+        followUpQuestion: '需要我把这个方向更新到草案吗？',
+        layoutDraftSuggestion: {
+          purpose: 'candidate_precheck',
+          targetSegmentIndex: 1,
+          semanticLabel: '金山区最近三年热门景点',
+          queries: ['金山区 近三年 热门景点 宣传片'],
+          candidateCount: 1,
+          topCandidates: [{
+            id: 'candidate-jinshan-legoland',
+            programName: '金山乐高乐园宣传片',
+          }],
+          userInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
+        },
+        attemptCount: 0,
+        createdAt: '2026-03-25T00:00:00.000Z',
+        updatedAt: '2026-03-25T00:00:00.000Z',
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: true,
+      shouldExpire: false,
+    })
+  })
+
+  it('keeps a formal rebuild review only when the user confirms rebuilding the formal playlist', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '确认重新编排',
+      currentWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingAtomicContext: {
+        action: null,
+        phase: 'formal_rebuild_confirmation',
+        slots: {},
+        missingFields: ['selection'],
+        summary: '待确认重新编排轮播单',
+        reasoning: '当前轮播单已有节目，重新编排会覆盖正式播单。',
+        originalUserInput: '按草案重新编排这张轮播单',
+        collectedUserInput: '按草案重新编排这张轮播单',
+        followUpQuestion: '请确认是否重新编排这张轮播单。',
+        formalRebuildConfirmation: {
+          actionKind: 'commit_layout_draft',
+          mode: 'full_generate',
+          useLayoutDraft: true,
+          existingItemCount: 3,
+          playlistType: 'rotation',
+          userInput: '按草案重新编排这张轮播单',
+          reasoning: '用户要求按草案重新编排。',
+        },
+        attemptCount: 0,
+        createdAt: '2026-03-25T00:00:00.000Z',
+        updatedAt: '2026-03-25T00:00:00.000Z',
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: true,
+      shouldExpire: false,
+    })
+  })
+
+  it('expires a formal rebuild review when the user starts another request', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '先查一下现在有哪些节目',
+      currentWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingAtomicContext: {
+        action: null,
+        phase: 'formal_rebuild_confirmation',
+        slots: {},
+        missingFields: ['selection'],
+        summary: '待确认重新编排轮播单',
+        reasoning: '当前轮播单已有节目，重新编排会覆盖正式播单。',
+        originalUserInput: '按草案重新编排这张轮播单',
+        collectedUserInput: '按草案重新编排这张轮播单',
+        followUpQuestion: '请确认是否重新编排这张轮播单。',
+        formalRebuildConfirmation: {
+          actionKind: 'commit_layout_draft',
+          mode: 'full_generate',
+          useLayoutDraft: true,
+          existingItemCount: 3,
+          playlistType: 'rotation',
+          userInput: '按草案重新编排这张轮播单',
+          reasoning: '用户要求按草案重新编排。',
+        },
+        attemptCount: 0,
+        createdAt: '2026-03-25T00:00:00.000Z',
+        updatedAt: '2026-03-25T00:00:00.000Z',
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: false,
+      shouldExpire: true,
+      expireReason: 'next_non_answer',
+    })
+  })
+
+  it('expires a layout-draft research suggestion when the user starts another request', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '第二段也重新查一下',
+      currentWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingAtomicContext: {
+        action: null,
+        phase: 'draft_research_confirmation',
+        slots: {
+          semanticLabel: '金山区最近三年热门景点',
+        },
+        missingFields: ['selection'],
+        summary: '是否把“金山区最近三年热门景点”更新到第 1 段草案',
+        reasoning: '素材核验后等待用户确认是否只更新草案。',
+        originalUserInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
+        collectedUserInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
+        followUpQuestion: '需要我把这个方向更新到草案吗？',
+        layoutDraftSuggestion: {
+          purpose: 'candidate_precheck',
+          targetSegmentIndex: 1,
+          semanticLabel: '金山区最近三年热门景点',
+          queries: ['金山区 近三年 热门景点 宣传片'],
+          candidateCount: 1,
+          topCandidates: [{
+            id: 'candidate-jinshan-legoland',
+            programName: '金山乐高乐园宣传片',
+          }],
+          userInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
+        },
+        attemptCount: 0,
+        createdAt: '2026-03-25T00:00:00.000Z',
+        updatedAt: '2026-03-25T00:00:00.000Z',
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: true,
+      canUsePendingReview: false,
+      shouldExpire: true,
+      expireReason: 'next_non_answer',
+    })
+  })
+
   it('expires a pending review before interpreting a confirmation in another workspace', () => {
     const pendingCommand: RuntimePendingCommand = {
       command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
@@ -697,5 +858,147 @@ describe('foreground agent context package', () => {
     expect(promptBlock).not.toContain('"injectionProfile"')
     expect(promptBlock).not.toContain('"budget"')
     expect(context.budget.estimatedPromptChars).toBe(promptBlock?.length)
+  })
+
+  it('injects only a compact active ReAct task snapshot for long-running scheduling goals', () => {
+    const activeReactTaskRun: ReactTaskRun = {
+      id: 'react-task-jinshan',
+      objective: '先核验金山区热门景点素材，再决定是否更新草案',
+      originalUserInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
+      status: 'observing',
+      loopCount: 1,
+      limits: {
+        maxTurns: 3,
+        batchSize: 4,
+      },
+      stopCondition: '素材方向明确后进入草案确认，不直接写正式播单',
+      steps: [{
+        id: 'step-1',
+        turn: 1,
+        status: 'observed',
+        action: {
+          type: 'research_check',
+          semanticLabel: '金山区最近三年热门景点',
+        },
+      }],
+      observations: [{
+        id: 'observation-1',
+        turn: 1,
+        type: 'asset_search',
+        summary: '查到金山乐高乐园宣传片等候选，确认前没有写入正式播单。',
+        createdAt: '2026-03-25T09:00:00.000Z',
+      }],
+      recovery: {
+        canRetry: true,
+        retryCount: 0,
+      },
+      createdAt: '2026-03-25T09:00:00.000Z',
+      updatedAt: '2026-03-25T09:01:00.000Z',
+    }
+
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '继续核验一下',
+      scheduleState: {
+        ...scheduleState,
+        playlistType: 'rotation',
+        playlistId: 'playlist-rotation-react',
+        rotationStrategy: 'content_match',
+        rotationDurationSeconds: 2 * 60 * 60,
+      },
+      currentSchedule: [],
+      currentLayoutDraft: layoutDraft,
+      activeReactTaskRun,
+    })
+    const promptBlock = formatForegroundAgentContextForPrompt(context) ?? ''
+
+    expect(context.reactTask).toMatchObject({
+      active: true,
+      id: 'react-task-jinshan',
+      objective: '先核验金山区热门景点素材，再决定是否更新草案',
+      status: 'observing',
+      loopCount: 1,
+      maxTurns: 3,
+      observationCount: 1,
+      recovery: {
+        canRetry: true,
+        retryCount: 0,
+      },
+    })
+    expect(context.reactTask.lastObservation?.summary).toContain('确认前没有写入正式播单')
+    expect(promptBlock).toContain('"activeReactTask"')
+    expect(promptBlock).toContain('"objective": "先核验金山区热门景点素材，再决定是否更新草案"')
+    expect(promptBlock).toContain('"lastObservation"')
+    expect(promptBlock).not.toContain('"steps"')
+    expect(promptBlock).not.toContain('"originalUserInput"')
+  })
+
+  it('keeps a failed but retryable ReAct task in the prompt for simple continue recovery', () => {
+    const failedReactTaskRun: ReactTaskRun = {
+      id: 'react-task-retry',
+      objective: '重新核验轮播草案素材',
+      originalUserInput: '模拟一次失败后继续',
+      status: 'failed',
+      loopCount: 1,
+      limits: {
+        maxTurns: 3,
+        batchSize: 2,
+      },
+      stopCondition: '失败后允许用户继续重试上一小步',
+      steps: [{
+        id: 'step-1',
+        turn: 1,
+        status: 'failed',
+        action: {
+          type: 'research_check',
+          semanticLabel: '轮播草案素材',
+        },
+      }],
+      observations: [{
+        id: 'observation-failed',
+        turn: 1,
+        type: 'runtime_failure',
+        summary: '素材库网络超时，本轮没有修改草案或播单。',
+        risk: 'network_timeout',
+        createdAt: '2026-03-25T09:00:00.000Z',
+      }],
+      recovery: {
+        canRetry: true,
+        retryCount: 0,
+        lastFailure: '素材库网络超时',
+      },
+      createdAt: '2026-03-25T09:00:00.000Z',
+      updatedAt: '2026-03-25T09:01:00.000Z',
+    }
+
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '继续',
+      scheduleState: {
+        ...scheduleState,
+        playlistType: 'rotation',
+        playlistId: 'playlist-rotation-retry',
+        rotationStrategy: 'content_match',
+        rotationDurationSeconds: 60 * 60,
+      },
+      currentSchedule: [],
+      currentLayoutDraft: layoutDraft,
+      activeReactTaskRun: failedReactTaskRun,
+    })
+    const promptBlock = formatForegroundAgentContextForPrompt(context) ?? ''
+
+    expect(context.reactTask).toMatchObject({
+      active: false,
+      status: 'failed',
+      recovery: {
+        canRetry: true,
+        retryCount: 0,
+        lastFailure: '素材库网络超时',
+      },
+    })
+    expect(promptBlock).toContain('"activeReactTask"')
+    expect(promptBlock).toContain('"status": "failed"')
+    expect(promptBlock).toContain('"lastFailure": "素材库网络超时"')
+    expect(promptBlock).toContain('"summary": "素材库网络超时，本轮没有修改草案或播单。"')
+    expect(promptBlock).not.toContain('"steps"')
+    expect(promptBlock).not.toContain('"originalUserInput"')
   })
 })

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LayoutDraft, ScheduleState } from '@/types/orchestration'
 import type { RuntimePendingAtomicContext } from '@/services/runtime/pendingAtomicContext'
 
+const llmClientChatMock = vi.hoisted(() => vi.fn())
 const previewFeasibilityMock = vi.hoisted(() => vi.fn(() => ({
   ok: true,
   summary: {
@@ -15,9 +16,7 @@ const previewFeasibilityMock = vi.hoisted(() => vi.fn(() => ({
 
 vi.mock('@/services/llm/llmClient', () => ({
   getLLMClient: () => ({
-    chat: vi.fn(async () => {
-      throw new Error('mock llm unavailable')
-    }),
+    chat: llmClientChatMock,
   }),
 }))
 
@@ -57,6 +56,12 @@ vi.mock('@/services/layoutDraftFeasibilityService', () => ({
 }))
 
 import { DemoRuntimeFacade } from '@/services/runtime/demoRuntimeFacade'
+
+const mockPlanner = (plan: unknown) => {
+  llmClientChatMock.mockResolvedValueOnce({
+    content: JSON.stringify(plan),
+  })
+}
 
 const createScheduleState = (overrides: Partial<ScheduleState> = {}): ScheduleState => ({
   channelId: 'dragon',
@@ -127,6 +132,9 @@ const createPendingAtomicContext = (): RuntimePendingAtomicContext => ({
 describe('DemoRuntimeFacade context management', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    llmClientChatMock.mockImplementation(async () => {
+      throw new Error('mock llm unavailable')
+    })
     previewFeasibilityMock.mockReturnValue({
       ok: true,
       summary: {
@@ -167,6 +175,13 @@ describe('DemoRuntimeFacade context management', () => {
   it('确认前的短确认会提交当前版面草案进入实际编排', async () => {
     const facade = new DemoRuntimeFacade()
     const draft = createLiveDraft()
+    mockPlanner({
+      actions: [
+        { type: 'commit_layout_draft', mode: 'partial_generate', useLayoutDraft: true },
+      ],
+      assistantReplyDraft: '我会按当前草案进入正式编排。',
+      reasoning: '用户确认当前草案。',
+    })
 
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState(),
@@ -175,6 +190,9 @@ describe('DemoRuntimeFacade context management', () => {
       currentLayoutDraft: draft,
       currentLayoutDraftMode: 'full_generate',
       history: ['用户：麻烦来个14-15点静安寺外场直播播单', '助手：已根据你的要求生成版面草案。'],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_commit')
@@ -183,13 +201,20 @@ describe('DemoRuntimeFacade context management', () => {
     }
 
     expect(result.draft).toBe(draft)
-    expect(result.orchestrationRequest.mode).toBe('full_generate')
+    expect(result.orchestrationRequest.mode).toBe('partial_generate')
     expect(result.orchestrationRequest.layoutDraft).toBe(draft)
   })
 
-  it('确认 blocked 版面草案时会保留草案并阻止正式编排', async () => {
+  it('确认草案时不会用草案预检候选结果提前阻止正式编排', async () => {
     const facade = new DemoRuntimeFacade()
     const draft = createLiveDraft()
+    mockPlanner({
+      actions: [
+        { type: 'commit_layout_draft', mode: 'partial_generate', useLayoutDraft: true },
+      ],
+      assistantReplyDraft: '我会按当前草案进入正式编排。',
+      reasoning: '用户确认当前草案。',
+    })
     previewFeasibilityMock.mockReturnValue({
       ok: false,
       summary: {
@@ -217,20 +242,30 @@ describe('DemoRuntimeFacade context management', () => {
       currentLayoutDraft: draft,
       currentLayoutDraftMode: 'full_generate',
       history: ['用户：14点到15点排生命树电视剧', '助手：已生成版面草案。'],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
-    expect(result.kind).toBe('layout_draft')
-    if (result.kind !== 'layout_draft') {
-      throw new Error('expected blocked layout draft decision')
+    expect(result.kind).toBe('layout_commit')
+    if (result.kind !== 'layout_commit') {
+      throw new Error('expected layout commit decision')
     }
 
     expect(result.draft).toBe(draft)
-    expect(result.feasibilityReport.ok).toBe(false)
-    expect(result.feedback.content).toContain('不会进入正式编排')
+    expect(result.orchestrationRequest.layoutDraft).toBe(draft)
+    expect(result.feedback.content).toContain('准备按该版面开始编排')
   })
 
-  it('确认时长不可容纳的泛类型草案时也会阻止正式编排', async () => {
+  it('确认时长预检不通过的草案时仍进入正式编排链路重新检索裁决', async () => {
     const facade = new DemoRuntimeFacade()
+    mockPlanner({
+      actions: [
+        { type: 'commit_layout_draft', mode: 'partial_generate', useLayoutDraft: true },
+      ],
+      assistantReplyDraft: '我会按当前草案进入正式编排。',
+      reasoning: '用户确认当前草案。',
+    })
     const draft: LayoutDraft = {
       ...createLiveDraft(),
       userIntent: '12:45到13:00安排电视剧',
@@ -288,16 +323,19 @@ describe('DemoRuntimeFacade context management', () => {
       currentLayoutDraft: draft,
       currentLayoutDraftMode: 'full_generate',
       history: ['用户：12:45到13:00安排电视剧', '助手：已生成版面草案。'],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
-    expect(result.kind).toBe('layout_draft')
-    if (result.kind !== 'layout_draft') {
-      throw new Error('expected duration-blocked layout draft decision')
+    expect(result.kind).toBe('layout_commit')
+    if (result.kind !== 'layout_commit') {
+      throw new Error('expected layout commit decision')
     }
 
     expect(result.draft).toBe(draft)
-    expect(result.feasibilityReport.segments[0]?.blockerKind).toBe('duration')
-    expect(result.feedback.content).toContain('不会进入正式编排')
+    expect(result.orchestrationRequest.layoutDraft).toBe(draft)
+    expect(result.feedback.content).toContain('准备按该版面开始编排')
   })
 
   it.each([
@@ -308,6 +346,13 @@ describe('DemoRuntimeFacade context management', () => {
   ])('确认前的编排产物口语“%s”会提交草案进入实际编排', async (userInput) => {
     const facade = new DemoRuntimeFacade()
     const draft = createLiveDraft()
+    mockPlanner({
+      actions: [
+        { type: 'commit_layout_draft', mode: 'partial_generate', useLayoutDraft: true },
+      ],
+      assistantReplyDraft: '我会按当前草案进入正式编排。',
+      reasoning: '用户确认当前草案。',
+    })
 
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState(),
@@ -316,6 +361,9 @@ describe('DemoRuntimeFacade context management', () => {
       currentLayoutDraft: draft,
       currentLayoutDraftMode: 'full_generate',
       history: ['用户：麻烦来个14-15点静安寺外场直播播单', '助手：已根据你的要求生成版面草案。'],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_commit')
@@ -324,7 +372,7 @@ describe('DemoRuntimeFacade context management', () => {
     }
 
     expect(result.draft).toBe(draft)
-    expect(result.orchestrationRequest.mode).toBe('full_generate')
+    expect(result.orchestrationRequest.mode).toBe('partial_generate')
     expect(result.orchestrationRequest.layoutDraft).toBe(draft)
   })
 
@@ -393,6 +441,28 @@ describe('DemoRuntimeFacade context management', () => {
 
   it('确认编排后没有草案上下文时会基于实际节目单继续做局部补排', async () => {
     const facade = new DemoRuntimeFacade()
+    mockPlanner({
+      actions: [
+        {
+          type: 'prepare_layout_draft',
+          mode: 'partial_generate',
+          userIntent: '保留现有上午节目，下午补齐电视剧',
+          semanticLabel: '电视剧',
+          programTypeHint: 'drama',
+          targetTimeRange: { start: '13:00:00', end: '18:00:00' },
+          segments: [
+            {
+              start: '13:00:00',
+              end: '18:00:00',
+              semanticLabel: '电视剧',
+              programTypeHint: 'drama',
+            },
+          ],
+        },
+      ],
+      assistantReplyDraft: '我先把下午补齐电视剧整理成局部草案。',
+      reasoning: '用户要求在已有上午节目基础上补齐下午电视剧。',
+    })
 
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState({
@@ -426,6 +496,9 @@ describe('DemoRuntimeFacade context management', () => {
         '助手：已确认当前版面草案，准备按该版面开始编排。',
         '助手：已完成上午新闻编排。',
       ],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')

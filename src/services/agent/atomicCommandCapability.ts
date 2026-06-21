@@ -2453,7 +2453,10 @@ export class AtomicCommandCapability implements AgentCapability {
             createdAt: previousPendingTask?.createdAt ?? pendingTask.createdAt,
           },
         },
-        explanation: `轮播单替换《${selectedCandidate.programName}》前需要确认。`,
+        explanation: [
+          `轮播单替换《${selectedCandidate.programName}》前需要确认。`,
+          this.buildReplaceDurationEffectNote(context, target, selectedCandidate),
+        ].filter(Boolean).join(''),
         trace: runtime.trace.getTrace(),
       }
     }
@@ -2500,8 +2503,8 @@ export class AtomicCommandCapability implements AgentCapability {
       validationReport,
       explanation: validationReport.ok
         ? context.playlistType === 'rotation'
-          ? `轮播单已确认，将 ${target.programName} 替换为 ${selectedCandidate.programName}。`
-          : `电视播单已将 ${target.programName} 替换为 ${selectedCandidate.programName}。`
+          ? `轮播单已确认，将 ${target.programName} 替换为 ${selectedCandidate.programName}。${this.buildReplaceDurationEffectNote(context, target, selectedCandidate)}`
+          : `电视播单已将 ${target.programName} 替换为 ${selectedCandidate.programName}。${this.buildReplaceDurationEffectNote(context, target, selectedCandidate)}`
         : validationReport.issues[0]?.message ?? 'Agent Core fallback message.',
       trace: runtime.trace.getTrace(),
     }
@@ -4127,6 +4130,41 @@ export class AtomicCommandCapability implements AgentCapability {
     }
   }
 
+  private buildReplaceDurationEffectNote(
+    context: SchedulingContext,
+    target: ScheduleItemSnapshot,
+    candidate: AgentProgramCandidate,
+  ): string {
+    const originalDuration = target.duration ?? 0
+    const replacementDuration = candidate.duration ?? 0
+    const deltaSeconds = replacementDuration - originalDuration
+    if (!Number.isFinite(deltaSeconds) || deltaSeconds === 0) return ''
+
+    const durationText = this.formatDurationEffectText(Math.abs(deltaSeconds))
+    if (context.playlistType === 'rotation') {
+      return deltaSeconds < 0
+        ? `新节目比原节目短${durationText}，轮播队列会继续串联，总时长会减少${durationText}。`
+        : `新节目比原节目长${durationText}，轮播队列会继续串联，总时长会增加${durationText}。`
+    }
+
+    return deltaSeconds < 0
+      ? `新节目比原节目短${durationText}，电视播单会留下${durationText}空窗，可以后续补齐。`
+      : `新节目比原节目长${durationText}，电视播单需要确认不会占用后续节目；如有冲突，校验会阻拦。`
+  }
+
+  private formatDurationEffectText(seconds: number): string {
+    const bounded = Math.max(0, Math.round(seconds))
+    const hours = Math.floor(bounded / 3600)
+    const minutes = Math.floor((bounded % 3600) / 60)
+    const remainSeconds = bounded % 60
+    const parts = [
+      hours > 0 ? `${hours}小时` : '',
+      minutes > 0 ? `${minutes}分钟` : '',
+      remainSeconds > 0 ? `${remainSeconds}秒` : '',
+    ].filter(Boolean)
+    return parts.join('') || '0秒'
+  }
+
   private parseInsert(input: AgentSubmitInput): InsertSlots {
     const interpreted = this.readInterpretedSlots(input)
     const clock = parseAtomicClockExpression(input.userInput)
@@ -4721,7 +4759,14 @@ export class AtomicCommandCapability implements AgentCapability {
     const exactReplacementCandidates = commandIntent === 'replace'
       ? this.filterExactReplacementHintCandidates(candidates, input)
       : []
-    const judgeCandidates = exactReplacementCandidates.length > 0 ? exactReplacementCandidates : candidates
+    const rawJudgeCandidates = exactReplacementCandidates.length > 0 ? exactReplacementCandidates : candidates
+    const professionalAssessmentByCandidateId = new Map<string, AgentCandidateProfessionalAssessment>()
+    const playableJudgeCandidates = rawJudgeCandidates.filter((candidate) => {
+      const assessment = this.buildProfessionalAssessment(candidate, input, context, commandIntent, targetTime, replacementTarget)
+      professionalAssessmentByCandidateId.set(candidate.id, assessment)
+      return assessment.hardBlockCodes.length === 0
+    })
+    const judgeCandidates = playableJudgeCandidates.length > 0 ? playableJudgeCandidates : rawJudgeCandidates
     if (judgeCandidates.length > 1) {
       runtime.trace.record('needs_selection', '候选判断前发现多个可用候选，等待编排人员选择。', {
         commandIntent,
@@ -4758,7 +4803,9 @@ export class AtomicCommandCapability implements AgentCapability {
         selectedProgramCode: candidate?.programCode,
         candidateCount: judgeCandidates.length,
         professionalAssessment: candidate
-          ? judgePool.assessments[candidate.id] ?? this.buildProfessionalAssessment(candidate, input, context, commandIntent, targetTime, replacementTarget)
+          ? judgePool.assessments[candidate.id]
+            ?? professionalAssessmentByCandidateId.get(candidate.id)
+            ?? this.buildProfessionalAssessment(candidate, input, context, commandIntent, targetTime, replacementTarget)
           : undefined,
         reason: candidate
           ? exactReplacementCandidates.length > 0

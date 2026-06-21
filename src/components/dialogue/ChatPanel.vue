@@ -388,7 +388,9 @@
       </div>
 
       <div class="pending-command-actions">
-        <el-button type="primary" size="small" :disabled="loading" @click="confirmPendingAgentTask">确认执行</el-button>
+        <el-button type="primary" size="small" :disabled="loading" @click="confirmPendingAgentTask">
+          {{ formatPendingConfirmationPrimaryAction(pendingAtomicContext) }}
+        </el-button>
         <el-button size="small" :disabled="loading" @click="rejectPendingAgentTask">取消</el-button>
       </div>
     </div>
@@ -483,7 +485,7 @@ import { getLayoutImportService } from '@/services/layoutImportService'
 import { getCandidateService } from '@/services/candidateService'
 import { getAtomicCapabilities } from '@/services/atomicCapabilities'
 import {
-  getDemoRuntimeFacade,
+  getSchedulingAgentRuntimeFacade,
   summarizeRuntimeCommand,
   type RuntimeDecision,
   type RuntimeAnalysisContext,
@@ -492,11 +494,12 @@ import {
   type RuntimeOrchestrationRequest,
   type RuntimePendingCommand,
   type RuntimeScheduleItem,
-} from '@/services/runtime/demoRuntimeFacade'
+} from '@/services/runtime/schedulingAgentRuntimeFacade'
 import {
   buildForegroundAgentContextPackage,
   resolvePendingReviewLifecycle,
 } from '@/services/runtime/foregroundAgentContextPackage'
+import type { ReactTaskRun } from '@/services/runtime/reactTaskTypes'
 import { resolveForegroundLayoutDraft } from '@/services/runtime/foregroundLayoutDraft'
 import {
   buildWorkspaceScopedRuntimeHistory,
@@ -611,6 +614,12 @@ interface PendingQuickReply {
   prompt: string
 }
 
+interface RecoverableRuntimeFailure {
+  originalUserInput: string
+  workspaceKey: string | null
+  createdAt: number
+}
+
 interface QuickAction {
   label: string
   prompt: string
@@ -657,6 +666,7 @@ const emit = defineEmits<{
 
 const messages = ref<Message[]>([])
 const inputMessage = ref('')
+const pendingRuntimeInputSource = ref<'user' | 'quick_action'>('user')
 const loading = ref(false)
 const messagesContainer = ref<HTMLElement>()
 const layoutFileInput = ref<HTMLInputElement>()
@@ -665,6 +675,9 @@ const pendingAtomicContext = ref<RuntimePendingAtomicContext | null>(null)
 const analysisContext = ref<RuntimeAnalysisContext | null>(null)
 const pendingReviewWorkspaceKey = ref<string | null>(null)
 const pendingReviewInterruptedNotice = ref<string | null>(null)
+const recoverableRuntimeFailure = ref<RecoverableRuntimeFailure | null>(null)
+const activeReactTaskRun = ref<ReactTaskRun | null>(null)
+const activeReactTaskWorkspaceKey = ref<string | null>(null)
 const pendingLayoutDraft = ref<LayoutDraft | null>(null)
 const layoutDraftFeasibility = ref<DraftFeasibilityReport | null>(null)
 const pendingLayoutDraftMode = ref<Extract<TaskMode, 'full_generate' | 'partial_generate'> | null>(null)
@@ -684,7 +697,7 @@ const isForegroundOrchestrationRunning = computed(() => (
 const commandExecutor = getCommandExecutor()
 const candidateService = getCandidateService()
 const scheduleCommandBus = getScheduleCommandBus()
-const runtimeFacade = getDemoRuntimeFacade()
+const runtimeFacade = getSchedulingAgentRuntimeFacade()
 const layoutImportService = getLayoutImportService()
 const displayedLogIds = ref<string[]>([])
 const lastSummarySessionId = ref('')
@@ -858,21 +871,43 @@ const isForegroundLongFlowDetails = (details?: DetailMap): boolean =>
   || isOrchestrationOverviewDetails(details)
   || containsForegroundDraftPayload(details)
 
+const isLayoutDraftBlockingText = (
+  value?: string,
+  processTypeLabel?: string,
+): boolean => {
+  const text = `${processTypeLabel ?? ''}\n${value ?? ''}`
+  return text.includes('当前版面草案还有')
+    || text.includes('还没有可用草案')
+    || text.includes('没有草案')
+    || text.includes('草案只写了一部分')
+    || text.includes('还只覆盖了一部分')
+    || text.includes('不能直接整体编排')
+    || text.includes('不能直接排一整天')
+    || text.includes('不会进入正式编排')
+    || text.includes('请调整不可编排')
+    || text.includes('先补草案')
+    || text.includes('还要补草案')
+}
+
+const isForegroundAgentMainReplyText = (value?: string): boolean => {
+  if (!value) return false
+  return /确认前不会写入|不会写入正式|还需要继续补充|我先建一张|我先把|整理了一份|整理成\s*\d+\s*个内容块/u.test(value)
+}
+
 const isVisibleLayoutDraftBlockingFeedback = (message: Message): boolean => (
   !foregroundLayoutDraftEnabled
-  && (
-    message.content.includes('当前版面草案还有')
-    || message.content.includes('不会进入正式编排')
-    || message.content.includes('请调整不可编排')
-  )
+  && isLayoutDraftBlockingText(message.content, message.processTypeLabel)
 )
 
 const isForegroundLayoutDraftMessage = (message: Message): boolean => {
   if (message.role === 'user') return false
   if (isVisibleLayoutDraftBlockingFeedback(message)) return false
-  if (message.processTypeLabel === '版面更新') return false
+  if (message.processTypeLabel === '版面更新' || message.processTypeLabel === '版面草案') return false
+  if (message.processTypeLabel === '编单分析' || message.processTypeLabel === '优化建议') return false
+  if (isForegroundAgentMainReplyText(message.content)) return false
   if (/^已切换到.+频道版面/.test(message.content) || /^已切换到当前频道默认版面/.test(message.content)) return false
   const details = getMessageDetails(message)
+  if (details?.readOnly === true) return false
   return message.content.includes('版面草案')
     || message.processTypeLabel?.includes('版面草案') === true
     || containsForegroundDraftPayload(message.explanation?.explanation)
@@ -903,6 +938,7 @@ const applyQuickAction = (prompt: string) => {
     })
     return
   }
+  pendingRuntimeInputSource.value = 'quick_action'
   inputMessage.value = prompt
   void sendMessage()
 }
@@ -972,22 +1008,18 @@ const getLayoutDraftStrategyFacts = (draft: LayoutDraft): string[] => {
 const getLayoutDraftSegmentItems = (draft: LayoutDraft) =>
   draft.layoutReference.slots.map((slot, index) => {
     const column = draft.columns[index]
-    const feasibility = layoutDraftFeasibility.value?.segments.find((segment) => segment.segmentId === slot.id)
     return {
       segmentId: slot.id,
       label: column?.semanticLabel ?? column?.columnName ?? `时段 ${index + 1}`,
       startTime: normalizeClockText(slot.startTime),
       endTime: normalizeClockText(slot.endTime),
-      status: feasibility?.status ?? 'ready',
-      matchedCandidateCount: feasibility?.matchedCandidateCount ?? 0,
-      reason: feasibility?.reasons[0] ?? '',
+      status: 'ready',
+      reason: '',
     }
   })
 
 const getLayoutDraftSegmentStatusText = (status: string) => {
-  if (status === 'blocked') return '不可编排'
-  if (status === 'warning') return '候选较少'
-  return '可编排'
+  return status === 'ready' ? '待编排核验' : ''
 }
 
 const clearPendingLayoutDraftState = () => {
@@ -1020,29 +1052,6 @@ const confirmLayoutDraft = () => {
 
   const draft = pendingLayoutDraft.value
   const mode = pendingLayoutDraftMode.value
-  const blockedSegments = layoutDraftFeasibility.value?.segments.filter((segment) => segment.status === 'blocked') ?? []
-  if (blockedSegments.length > 0) {
-    const blockedText = blockedSegments
-      .map((segment) => {
-        const reason = segment.reasons[0] ? `，原因：${segment.reasons[0]}` : ''
-        return `${formatDisplayTimeRange(segment.startTime, segment.endTime)} ${segment.label}${reason}`
-      })
-      .join('；')
-    appendRuntimeFeedback({
-      content: `当前版面草案还有 ${blockedSegments.length} 个段落没有可用节目支撑，已保留草案，不会进入正式编排。${blockedText ? `请调整：${blockedText}` : ''}`,
-      processType: 'planning',
-      processTypeLabel: '版面草案待调整',
-      explanation: '开始编排前发现草案存在不可编排段落，已阻止提交正式编排。',
-      details: {
-        draftId: draft.id,
-        layoutSource: draft.source,
-        feasibilitySummary: layoutDraftFeasibility.value?.summary,
-        blockedSegments,
-      },
-    })
-    ElMessage.warning('当前草案有不可编排段落，请先调整。')
-    return
-  }
   clearPendingLayoutDraftState()
   emit('orchestrateRequested', {
     userInput: '按当前版面开始编排',
@@ -1170,6 +1179,12 @@ const handleLayoutFileChange = async (event: Event) => {
 }
 
 const handlePrimaryAction = async () => {
+  recordBrowserRuntimeTrace('primary_action:click', {
+    input: inputMessage.value.trim(),
+    isForegroundOrchestrationRunning: isForegroundOrchestrationRunning.value,
+    canInterrupt: props.canInterrupt,
+    loading: loading.value,
+  })
   if (isForegroundOrchestrationRunning.value) {
     if (props.canInterrupt) {
       const content = inputMessage.value.trim()
@@ -1213,6 +1228,35 @@ const resolveCurrentPendingWorkspaceKey = () => resolveForegroundWorkspaceKey(bu
 
 const resolveCurrentMessageWorkspaceKey = (): string | null => resolveCurrentPendingWorkspaceKey()
 
+const isRuntimeReactTaskRun = (value: unknown): value is ReactTaskRun => {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.id === 'string'
+    && typeof record.objective === 'string'
+    && typeof record.status === 'string'
+    && typeof record.loopCount === 'number'
+    && Array.isArray(record.steps)
+    && Array.isArray(record.observations)
+}
+
+const syncActiveReactTaskFromFeedback = (feedback?: RuntimeFeedback) => {
+  const details = feedback?.details as Record<string, unknown> | undefined
+  const taskRun = details?.reactTaskRun
+  if (!isRuntimeReactTaskRun(taskRun)) return
+  activeReactTaskRun.value = taskRun
+  activeReactTaskWorkspaceKey.value = resolveCurrentPendingWorkspaceKey()
+}
+
+const resolveActiveReactTaskForCurrentWorkspace = (): ReactTaskRun | null => {
+  if (!activeReactTaskRun.value) return null
+  if (activeReactTaskWorkspaceKey.value !== resolveCurrentPendingWorkspaceKey()) {
+    activeReactTaskRun.value = null
+    activeReactTaskWorkspaceKey.value = null
+    return null
+  }
+  return activeReactTaskRun.value
+}
+
 const buildUserMessage = (content: string): Message => ({
   role: 'user',
   content,
@@ -1237,6 +1281,8 @@ const expirePendingReviewForWorkspaceChange = (message: string) => {
 
 const isPendingReviewConfirmText = (content: string): boolean =>
   /^(确认|确定|执行|可以|好的|好|ok|yes)$/iu.test(content.replace(/\s+/g, ''))
+  || /^(确认重新编排|确认重排|重新编排|重排|确认覆盖|覆盖吧|开始重新编排|开始重排|开始编排|按这个重新编排|按草案重新编排|按当前草案重新编排|按这个开始编排|可以重新编排|可以重排)$/iu.test(content.replace(/\s+/g, ''))
+  || /^(更新|更新草案|更新到草案|写入草案|改到草案|改进草案|就按这个|就这个|用这个|用这个方向|按这个方向|没问题)$/iu.test(content.replace(/\s+/g, ''))
 
 const isPendingReviewCancelText = (content: string): boolean =>
   /^(取消|不用了|算了|先不用|no|cancel)$/iu.test(content.replace(/\s+/g, ''))
@@ -1256,6 +1302,49 @@ const resolvePendingReviewExpiredNotice = (reason?: 'workspace_changed' | 'next_
     : '上一条待确认操作已失效，本轮按新的指令重新判断。'
 )
 
+const isRecoverableRuntimeRetryText = (content: string): boolean =>
+  /^(重试|再试一次|继续|重新试|再来一次|retry|continue)$/iu.test(content.replace(/\s+/g, ''))
+
+const isPendingCompositeTaskContinueText = (content: string): boolean =>
+  Boolean(
+    pendingAtomicContext.value?.compositeTaskRun
+    && /^(继续|继续执行|继续处理|下一批|重试|再试一次|retry|continue)$/iu.test(content.replace(/\s+/g, '')),
+  )
+
+const resolveRecoverableRuntimeRetryInput = (content: string): string | null | undefined => {
+  if (!isRecoverableRuntimeRetryText(content)) return undefined
+  if (isPendingCompositeTaskContinueText(content)) return undefined
+  if (resolveActiveReactTaskForCurrentWorkspace()) return undefined
+  const failure = recoverableRuntimeFailure.value
+  if (!failure) return null
+  if (failure.workspaceKey !== resolveCurrentPendingWorkspaceKey()) {
+    recoverableRuntimeFailure.value = null
+    return null
+  }
+  return failure.originalUserInput
+}
+
+const getRuntimeDecisionFeedback = (decision: RuntimeDecision): RuntimeFeedback | null => (
+  'feedback' in decision ? decision.feedback : null
+)
+
+const extractRecoverableRuntimeFailure = (
+  feedback: RuntimeFeedback | null,
+  fallbackUserInput: string,
+  workspaceKey: string | null,
+): RecoverableRuntimeFailure | null => {
+  const details = (feedback?.details ?? undefined) as DetailMap | undefined
+  if (!details?.llmFailure || details.canRetry !== true) return null
+  const recoverableUserInput = typeof details.recoverableUserInput === 'string'
+    ? details.recoverableUserInput.trim()
+    : ''
+  return {
+    originalUserInput: recoverableUserInput || fallbackUserInput,
+    workspaceKey,
+    createdAt: Date.now(),
+  }
+}
+
 const pushPendingReviewExpiredMessage = (reason?: 'workspace_changed' | 'next_non_answer') => {
   pushAssistantMessage(buildAssistantMessage({
     content: resolvePendingReviewExpiredNotice(reason),
@@ -1267,6 +1356,7 @@ const pushPendingReviewExpiredMessage = (reason?: 'workspace_changed' | 'next_no
 const interruptPendingReviewForNewInput = (content: string): boolean => {
   if (!pendingCommand.value && !pendingAtomicContext.value) return false
   if (isPendingReviewAnswerText(content)) return false
+  if (isPendingCompositeTaskContinueText(content)) return false
   pendingCommand.value = null
   pendingAtomicContext.value = null
   pendingReviewWorkspaceKey.value = null
@@ -1386,11 +1476,15 @@ const withRuntimeFeedbackNotice = (
 }
 
 const appendLayoutDraftWorkspaceFeedback = (feedback: RuntimeFeedback, fallbackContent: string) => {
+  const noticeMatch = feedback.content.match(/^(上一条待确认操作[^\n]+)\n/u)
+  const leadingNotice = noticeMatch?.[1]
   const visibleContent = /切换|上传版面|默认版面|频道版面/.test(feedback.content)
     ? feedback.content
     : fallbackContent
   pushAssistantMessage(buildAssistantMessage({
-    content: visibleContent,
+    content: leadingNotice && !visibleContent.includes(leadingNotice)
+      ? `${leadingNotice}\n${visibleContent}`
+      : visibleContent,
     thinking: feedback.thinking,
     processType: feedback.processType as ProcessType,
     processTypeLabel: '版面更新',
@@ -1466,6 +1560,12 @@ const applyRuntimeDecision = async (
       appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingAtomicContext.value = decision.pendingAtomicContext
       bindPendingReviewToCurrentWorkspace()
+      recordBrowserRuntimeTrace('pending_atomic_context:set', {
+        hasCompositeTaskRun: Boolean(decision.pendingAtomicContext.compositeTaskRun),
+        compositeStatus: decision.pendingAtomicContext.compositeTaskRun?.status,
+        phase: decision.pendingAtomicContext.phase,
+        action: decision.pendingAtomicContext.action,
+      })
       return
     case 'message':
       rememberLayoutDraftContinuationIfNeeded(decision.feedback)
@@ -1542,6 +1642,9 @@ const applyRuntimeDecision = async (
       return
     case 'layout_draft':
       clearLayoutDraftContinuationPreference()
+      pendingCommand.value = null
+      pendingAtomicContext.value = null
+      pendingReviewWorkspaceKey.value = null
       pendingLayoutDraft.value = decision.draft
       layoutDraftFeasibility.value = decision.feasibilityReport
       pendingLayoutDraftMode.value = decision.orchestrationMode
@@ -1556,7 +1659,7 @@ const applyRuntimeDecision = async (
           decision.feedback,
           decision.feedback.processTypeLabel === '版面草案待调整'
             ? decision.feedback.content
-            : '左侧版面已更新，可以继续微调或确认进入编排。',
+            : decision.feedback.content || '左侧版面已更新，可以继续微调或确认进入编排；正式播单还没有开始编排。',
         )
       }
       return
@@ -1647,11 +1750,43 @@ const applyRuntimeExecutedResult = (executed: RuntimeExecutedResult, stepMetric?
   }))
 }
 
+const recordBrowserRuntimeTrace = (event: string, details?: Record<string, unknown>) => {
+  if (!import.meta.env.DEV || typeof window === 'undefined') return
+  const traceWindow = window as Window & {
+    __AIBIANDAN_RUNTIME_TRACE__?: Array<Record<string, unknown>>
+  }
+  if (!Array.isArray(traceWindow.__AIBIANDAN_RUNTIME_TRACE__)) return
+  traceWindow.__AIBIANDAN_RUNTIME_TRACE__.push({
+    event,
+    at: Date.now(),
+    ...details,
+  })
+}
+
 const processMessage = async (content: string, progressLabel = '思考中') => {
   loading.value = true
   const stepProgress = startStepProgress(progressLabel)
+  let effectiveContent = content
+  const runtimeInputSource = pendingRuntimeInputSource.value
+  pendingRuntimeInputSource.value = 'user'
 
   try {
+    const retryInput = resolveRecoverableRuntimeRetryInput(content)
+    if (retryInput === null) {
+      messages.value.push(buildAssistantMessage({
+        content: '现在没有可重试的上一条需求，请直接告诉我想怎么编排。',
+        processType: 'general',
+        processTypeLabel: '重试',
+        stepMetric: stepProgress.finish(),
+      }))
+      return
+    }
+    if (retryInput !== undefined) {
+      effectiveContent = retryInput
+    } else {
+      recoverableRuntimeFailure.value = null
+    }
+
     const scheduleState = buildCurrentRuntimeScheduleState()
     const currentLayoutDraft = foregroundLayoutDraftRuntimeEnabled
       ? props.currentLayoutDraft ?? pendingLayoutDraft.value
@@ -1703,37 +1838,73 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       pendingReviewWorkspaceKey.value = null
     }
     const foregroundContextPackage = buildForegroundAgentContextPackage({
-      latestUserInput: content,
+      latestUserInput: effectiveContent,
       scheduleState,
       currentSchedule: props.currentSchedule,
       currentLayoutDraft,
       pendingCommand: usablePendingCommand,
       pendingAtomicContext: usablePendingAtomicContext,
+      activeReactTaskRun: resolveActiveReactTaskForCurrentWorkspace(),
     })
     const preferLayoutDraftRefine = foregroundLayoutDraftRuntimeEnabled
       && Boolean(currentLayoutDraft)
       && preferLayoutDraftContinuation.value
     preferLayoutDraftContinuation.value = false
+    recordBrowserRuntimeTrace('submit:start', {
+      userInput: effectiveContent,
+      playlistType: scheduleState.playlistType,
+      hasLayoutDraft: Boolean(currentLayoutDraft),
+      itemCount: scheduleState.itemCount,
+    })
     const decision = await runtimeFacade.submitInstruction({
       scheduleState,
-      userInput: content,
+      userInput: effectiveContent,
       currentSchedule: props.currentSchedule,
       currentLayoutDraft,
       currentLayoutDraftMode: foregroundLayoutDraftRuntimeEnabled ? pendingLayoutDraftMode.value : null,
       analysisContext: analysisContext.value,
       pendingAtomicContext: usablePendingAtomicContext,
+      activeReactTaskRun: resolveActiveReactTaskForCurrentWorkspace(),
       foregroundContextPackage,
-      history: buildVisibleRuntimeHistory(content),
+      history: buildVisibleRuntimeHistory(effectiveContent),
       agentCoreEnabled: true,
       layoutDraftEnabled: foregroundLayoutDraftRuntimeEnabled,
       preferLayoutDraftRefine,
+      inputSource: retryInput !== undefined ? 'user' : runtimeInputSource,
     })
+    recordBrowserRuntimeTrace('submit:decision', {
+      userInput: effectiveContent,
+      kind: decision.kind,
+      statusHint: 'statusHint' in decision ? decision.statusHint : undefined,
+      feedback: 'feedback' in decision ? decision.feedback.content : undefined,
+    })
+    const runtimeFeedback = getRuntimeDecisionFeedback(decision)
     await applyRuntimeDecision(decision, pendingReviewExpiredNotice)
+    syncActiveReactTaskFromFeedback(runtimeFeedback ?? undefined)
+    recordBrowserRuntimeTrace('submit:applied', {
+      userInput: effectiveContent,
+      kind: decision.kind,
+    })
+    recoverableRuntimeFailure.value = extractRecoverableRuntimeFailure(
+      runtimeFeedback,
+      effectiveContent,
+      currentWorkspaceKey,
+    )
     attachStepMetricToLatestAssistantMessage(stepProgress.finish())
   } catch (error) {
     const stepMetric = stepProgress.finish()
+    const errorMessage = error instanceof Error ? error.message : 'AI 请求失败，请稍后重试。'
+    if (/LLM|模型|超时|timeout|timed out/i.test(errorMessage)) {
+      recoverableRuntimeFailure.value = {
+        originalUserInput: effectiveContent,
+        workspaceKey: resolveCurrentPendingWorkspaceKey(),
+        createdAt: Date.now(),
+      }
+    }
     messages.value.push(buildAssistantMessage({
-      content: error instanceof Error ? error.message : 'AI 请求失败，请稍后重试。',
+      content: /LLM|模型|超时|timeout|timed out/i.test(errorMessage)
+        ? '这次模型没有正常返回，我还没有修改草案或播单。你可以直接说“重试”，我会按刚才这句话再试一次。'
+        : errorMessage,
       processType: 'error',
       processTypeLabel: '执行异常',
       stepMetric,
@@ -1751,9 +1922,29 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
 const sendMessage = async () => {
   const content = inputMessage.value.trim()
   if (!content) return
+  recordBrowserRuntimeTrace('send_message:start', {
+    content,
+    loading: loading.value,
+    hasPendingCommand: Boolean(pendingCommand.value),
+    hasPendingAtomicContext: Boolean(pendingAtomicContext.value),
+    hasCompositeTaskRun: Boolean(pendingAtomicContext.value?.compositeTaskRun),
+  })
 
-  interruptPendingReviewForNewInput(content)
+  const pendingReviewInterrupted = interruptPendingReviewForNewInput(content)
   messages.value.push(buildUserMessage(content))
+  if (pendingReviewInterrupted) {
+    const interruptedNotice = pendingReviewInterruptedNotice.value
+    pendingReviewInterruptedNotice.value = null
+    if (interruptedNotice) {
+      pushAssistantMessage(buildAssistantMessage({
+        content: interruptedNotice,
+        processType: 'general',
+        processTypeLabel: '待确认已失效',
+      }), {
+        autoFocus: false,
+      })
+    }
+  }
   inputMessage.value = ''
   await scrollToBottom()
 
@@ -1851,6 +2042,14 @@ const formatPendingAtomicSummary = (context: RuntimePendingAtomicContext): strin
   if (context.compositeTaskRun) {
     return formatCompositeTaskSummary(context.compositeTaskRun)
   }
+  if (isDraftResearchConfirmationContext(context)) {
+    const label = context.layoutDraftSuggestion?.semanticLabel || context.slots.semanticLabel || '草案建议'
+    return `待确认更新草案：${label}`
+  }
+  if (isFormalRebuildConfirmationContext(context)) {
+    const count = context.formalRebuildConfirmation?.existingItemCount ?? 0
+    return count > 0 ? `待确认重新编排：当前已有 ${count} 条节目` : '待确认重新编排正式播单'
+  }
   if (context.agentPendingTask?.phase === 'needs_confirmation' || context.missingFields.includes('selection')) {
     const targetText = formatAtomicSlotTime(context.slots.targetTime || context.slots.targetTimeHint)
     const targetName = context.slots.targetItemName || context.slots.programName
@@ -1883,6 +2082,18 @@ const formatPendingAtomicReasoning = (
 ): string => {
   if (context.compositeTaskRun) {
     return formatCompositeTaskConfirmationNote(context.compositeTaskRun)
+  }
+  if (isDraftResearchConfirmationContext(context)) {
+    const label = context.layoutDraftSuggestion?.semanticLabel || context.slots.semanticLabel || '这个方向'
+    const candidateCount = context.layoutDraftSuggestion?.candidateCount ?? 0
+    const candidateText = candidateCount > 0 ? `已查到 ${candidateCount} 条可参考素材。` : ''
+    return `${candidateText}确认后我只更新左侧草案里的“${label}”方向，不会写入正式播单。`
+  }
+  if (isFormalRebuildConfirmationContext(context)) {
+    const confirmation = context.formalRebuildConfirmation
+    const playlistLabel = confirmation?.playlistType === 'rotation' ? '轮播单' : '电视播单'
+    const basisLabel = confirmation?.actionKind === 'commit_layout_draft' || confirmation?.useLayoutDraft ? '当前草案' : '这次要求'
+    return `当前${playlistLabel}已经有节目。确认后我会按${basisLabel}重新写入正式播单；取消则不改动。`
   }
   const primary = preferred === 'followUp'
     ? context.followUpQuestion || context.reasoning
@@ -2023,6 +2234,15 @@ const formatCompositeTaskConfirmationNote = (taskRun: PendingCompositeTaskRun): 
 const formatPendingAtomicConfirmationNote = (context: RuntimePendingAtomicContext): string => {
   if (context.compositeTaskRun) {
     return formatCompositeTaskConfirmationNote(context.compositeTaskRun)
+  }
+  if (isDraftResearchConfirmationContext(context)) {
+    const label = context.layoutDraftSuggestion?.semanticLabel || context.slots.semanticLabel || '这个方向'
+    return `确认后只把“${label}”更新到左侧草案，不会写入正式播单；取消则保留原草案。`
+  }
+  if (isFormalRebuildConfirmationContext(context)) {
+    const confirmation = context.formalRebuildConfirmation
+    const basisLabel = confirmation?.actionKind === 'commit_layout_draft' || confirmation?.useLayoutDraft ? '当前草案' : '这次要求'
+    return `确认后按${basisLabel}重新编排正式播单，已有节目可能被替换；取消则保留当前播单。`
   }
   const modelNote = context.confirmationNote || context.reasoning
   if (modelNote && !isTechnicalPendingReason(modelNote)) {
@@ -2228,10 +2448,24 @@ const pendingAtomicInsertSelectedCandidateId = computed<string | null>({
 const showClarifyingAtomicPanel = computed(() => false)
 const showTargetSelectionAtomicPanel = computed(() => pendingAtomicPhase.value === 'selecting_target' && pendingAtomicTargetCandidates.value.length > 0)
 const showInsertRecommendationAtomicPanel = computed(() => pendingAtomicPhase.value === 'recommending_insert' && pendingAtomicInsertRecommendations.value.length > 0)
+const isDraftResearchConfirmationContext = (context?: RuntimePendingAtomicContext | null) =>
+  context?.phase === 'draft_research_confirmation' || Boolean(context?.layoutDraftSuggestion)
+const isFormalRebuildConfirmationContext = (context?: RuntimePendingAtomicContext | null) =>
+  context?.phase === 'formal_rebuild_confirmation' || Boolean(context?.formalRebuildConfirmation)
+
 const showAgentPendingConfirmationPanel = computed(() =>
   pendingAtomicContext.value?.agentPendingTask?.phase === 'needs_confirmation'
-  || pendingAtomicContext.value?.compositeTaskRun?.status === 'waiting_confirm',
+  || pendingAtomicContext.value?.compositeTaskRun?.status === 'waiting_confirm'
+  || isDraftResearchConfirmationContext(pendingAtomicContext.value)
+  || isFormalRebuildConfirmationContext(pendingAtomicContext.value)
 )
+
+const formatPendingConfirmationPrimaryAction = (context: RuntimePendingAtomicContext): string =>
+  isDraftResearchConfirmationContext(context)
+    ? '更新草案'
+    : isFormalRebuildConfirmationContext(context)
+      ? '确认重新编排'
+      : '确认执行'
 
 const formatDetails = (details: DetailMap) => formatStructuredDetails(sanitizeForegroundDraftPayload(details), formatDisplayTime)
 
@@ -2423,13 +2657,13 @@ const buildOrchestrationOverviewMessage = (session: PlanningSession): Message =>
   }
 
   const summaryLine = [
-    pendingGapCount > 0 ? '自动编排阶段已结束' : '全天编排已完成',
+    unresolvedGapCount > 0 ? '自动编排阶段已结束' : '全天编排已完成',
     '本次优先遵循版面信息',
     completedGapCount > 0 ? `已处理 ${completedGapCount} 个空窗` : '已完成整体版面整理',
-    pendingGapCount > 0 ? `仍有 ${pendingGapCount} 个空窗待人工确认` : '',
+    unresolvedGapCount > 0 ? `仍有 ${unresolvedGapCount} 个空窗待人工确认` : '',
   ].filter(Boolean).join('，')
 
-  const explanation = pendingGapCount > 0
+  const explanation = unresolvedGapCount > 0
     ? '本轮自动编排已先完成可命中的版面补排，剩余空窗由于候选不足或约束未满足，建议人工继续确认。'
     : existingItemCount && existingItemCount > 0
       ? '本次在保留现有编单结构的前提下，优先对齐版面栏目和时段要求，再对剩余空窗做补排与修补。'
@@ -2803,16 +3037,23 @@ const sanitizeAssistantMessageInput = (input: Omit<Message, 'role'>): Omit<Messa
 const shouldKeepDraftBlockingInputVisible = (input: Omit<Message, 'role'>): boolean => (
   !foregroundLayoutDraftEnabled
   && typeof input.content === 'string'
-  && (
-    input.content.includes('当前版面草案还有')
-    || input.content.includes('不会进入正式编排')
-    || input.content.includes('请调整不可编排')
-  )
+  && isLayoutDraftBlockingText(input.content, input.processTypeLabel)
 )
+
+const shouldKeepReadOnlyAnalysisInputVisible = (input: Omit<Message, 'role'>): boolean => {
+  if (isForegroundAgentMainReplyText(input.content)) return true
+  if (input.processTypeLabel === '版面草案') return true
+  if (input.processTypeLabel === '编单分析' || input.processTypeLabel === '优化建议') return true
+  const details = input.explanation?.details as DetailMap | undefined
+  return details?.readOnly === true
+}
 
 const buildAssistantMessage = (input: Omit<Message, 'role'>): Message => {
   const hiddenFromThread = input.hiddenFromThread
-    || (!foregroundLayoutDraftEnabled && containsForegroundDraftPayload(input) && !shouldKeepDraftBlockingInputVisible(input))
+    || (!foregroundLayoutDraftEnabled
+      && containsForegroundDraftPayload(input)
+      && !shouldKeepDraftBlockingInputVisible(input)
+      && !shouldKeepReadOnlyAnalysisInputVisible(input))
   return decorateAssistantMessage({
     role: 'assistant',
     expanded: false,
@@ -4071,12 +4312,30 @@ const confirmPendingInsertRecommendation = async () => {
 }
 
 const continuePendingAgentTask = async (content: '确认' | '取消', progressLabel = '执行中') => {
-  if (!pendingAtomicContext.value?.agentPendingTask && !pendingAtomicContext.value?.compositeTaskRun) {
+  const isDraftResearchConfirmation = isDraftResearchConfirmationContext(pendingAtomicContext.value)
+  const isFormalRebuildConfirmation = isFormalRebuildConfirmationContext(pendingAtomicContext.value)
+  if (!pendingAtomicContext.value?.agentPendingTask && !pendingAtomicContext.value?.compositeTaskRun && !isDraftResearchConfirmation && !isFormalRebuildConfirmation) {
     ElMessage.warning('当前待确认操作已失效，请重新发起操作。')
     return
   }
   if (!isPendingReviewWorkspaceCurrent()) {
     expirePendingReviewForWorkspaceChange('当前待确认操作不属于这个工作区，已失效。请在当前播单重新发起操作。')
+    return
+  }
+  if (isDraftResearchConfirmation) {
+    if (content === '确认') {
+      await processMessage('更新到草案', '更新草案中')
+      return
+    }
+    await cancelPendingAtomicContext()
+    return
+  }
+  if (isFormalRebuildConfirmation) {
+    if (content === '确认') {
+      await processMessage('确认重新编排', '重新编排中')
+      return
+    }
+    await cancelPendingAtomicContext()
     return
   }
   await processMessage(content, progressLabel)
@@ -4118,11 +4377,21 @@ const cancelPendingCommand = async () => {
 const cancelPendingAtomicContext = async () => {
   if (!pendingAtomicContext.value) return
   const summary = formatPendingAtomicSummary(pendingAtomicContext.value).replace(/[，,。.!！?？]+$/u, '')
+  const isDraftResearchConfirmation = isDraftResearchConfirmationContext(pendingAtomicContext.value)
+  const isFormalRebuildConfirmation = isFormalRebuildConfirmationContext(pendingAtomicContext.value)
   const stepProgress = startStepProgress('思考中')
   try {
     messages.value.push(buildAssistantMessage({
-      content: `${summary}，已取消当前补参。`,
-      thinking: '我已停止这次原子命令的后续补参，不会继续执行。',
+      content: isDraftResearchConfirmation
+        ? `${summary}，已取消更新草案。`
+        : isFormalRebuildConfirmation
+          ? `${summary}，已取消重新编排。`
+          : `${summary}，已取消当前补参。`,
+      thinking: isDraftResearchConfirmation
+        ? '我已停止这次草案更新建议，不会改动左侧草案或正式播单。'
+        : isFormalRebuildConfirmation
+          ? '我已停止这次正式重排，当前播单不会被改动。'
+          : '我已停止这次原子命令的后续补参，不会继续执行。',
       processType: 'general',
       processTypeLabel: '已取消',
       stepMetric: stepProgress.finish(),

@@ -1,0 +1,251 @@
+# AI编审助手服务端化迁移方案
+
+## 目标
+
+把当前运行在真实前台路径里的 AI编审助手，逐步迁移为可部署、可审计、可被前台和外部访问方共同调用的正式 Agent 服务。
+
+迁移不是重写产品体验。现有 `ChatPanel / broadcast-plan` 仍然是第一客户端，已有的 ReAct、素材查证、pending、批量执行、失败恢复和草案/正式播单隔离规则必须保持。
+
+## 当前边界
+
+当前能力已经在前台路径中形成：
+
+- `ChatPanel` 负责用户输入、消息展示、pending 面板、上传草案、确认/取消/继续。
+- `schedulingAgentRuntimeFacade` 承接正式前台运行入口。
+- `agentPlanner` 和 intent interpreter 负责 LLM-first 理解。
+- `reactTaskRuntime` 保存 ReAct 任务的轮次、观察和失败恢复状态。
+- `demoRuntimeFacade` 内仍承载大量实际业务运行逻辑，需要逐步拆出。
+- `atomicCapabilities` 负责前台原子读写和批量替换。
+- `broadcast-plan` 页面负责播单工作区、草案展示、正式编排 runtime 和页面状态同步。
+
+主要技术债是：LLM 调用、任务状态、素材查证、pending 状态和正式写入裁决仍大量留在前台进程里，不适合多人访问、稳定审计和服务端密钥保护。
+
+## 目标架构
+
+### 前台
+
+前台只保留用户体验和本地页面状态适配：
+
+- 展示 AI编审助手对话。
+- 展示 pending、候选选择、任务进度和错误恢复建议。
+- 展示当前工作区、版面草案和正式播单。
+- 把用户输入、确认、取消、继续、上传草案等事件发送给 Agent API。
+- 接收服务端事件流，更新消息、任务状态、草案和播单。
+
+前台不再直接持有 API key，不直接组织完整 prompt，不直接执行长程 ReAct loop。
+
+### Agent 服务端
+
+服务端成为正式 Agent runtime：
+
+- 构建业务上下文包。
+- 调用 LLM。
+- 运行 ReAct 的 Plan / Act / Observe / Decide 循环。
+- 执行素材查证和候选验证。
+- 编译 LLM taskPlan 为受控原子命令。
+- 管理 pending、确认、取消、继续和失败恢复。
+- 执行正式播单写入前的本地业务裁决。
+- 记录任务事件、执行证据和审计日志。
+
+### 数据层
+
+服务端需要持久化：
+
+- `AgentSession`：一次对话或一个工作区会话。
+- `WorkspaceRef`：当前播单工作区，包含播单类型、频道、日期、轮播目标时长。
+- `LayoutDraftSnapshot`：当前激活草案及其来源、完整度、版本。
+- `FormalPlaylistSnapshot`：正式播单快照和变更版本。
+- `PendingReview`：待确认操作，包含过期规则和工作区绑定。
+- `ReactTaskRun`：长程任务状态、轮次、观察、失败和恢复信息。
+- `AtomicCommandRun`：原子命令或批量步骤的执行记录。
+- `MaterialEvidence`：素材查证请求、候选、缺口和最终选择证据。
+
+## API 设计
+
+### 对话入口
+
+`POST /api/agent/sessions`
+
+创建或恢复一个工作区会话。
+
+`POST /api/agent/sessions/:sessionId/messages`
+
+提交自然语言、快捷操作或用户确认。
+
+请求核心字段：
+
+- `workspace`
+- `userInput`
+- `inputSource`
+- `visibleHistory`
+- `foregroundStateVersion`
+
+响应核心字段：
+
+- `assistantMessage`
+- `systemEvents`
+- `pendingReview`
+- `layoutDraftPatch`
+- `playlistPatch`
+- `activeTask`
+- `nextActions`
+
+### pending
+
+`POST /api/agent/sessions/:sessionId/pending/:pendingId/confirm`
+
+确认待执行操作。
+
+`POST /api/agent/sessions/:sessionId/pending/:pendingId/cancel`
+
+取消待执行操作。
+
+### 长程任务
+
+`POST /api/agent/sessions/:sessionId/tasks/:taskId/continue`
+
+继续当前 ReAct 或批量任务。
+
+`POST /api/agent/sessions/:sessionId/tasks/:taskId/stop`
+
+停止当前任务。
+
+`GET /api/agent/sessions/:sessionId/events`
+
+使用 SSE 返回任务进度、素材查证结果、pending 状态和正式写入结果。
+
+## 迁移阶段
+
+### 阶段 1：协议冻结
+
+目标是先把前后台合同稳定下来，不移动大量逻辑。
+
+- 抽出 `RuntimeDecision`、`PendingReview`、`ReactTaskRun`、`LayoutDraftPatch`、`PlaylistPatch` 的共享类型。
+- 前台只通过一个 `AgentRuntimeClient` 调用当前本地 facade。
+- 给现有前台回归增加“协议级事件”断言。
+- 保持 19 条真实前台浏览器场景通过。
+
+完成标志：
+
+- `ChatPanel` 不直接依赖具体 runtime 实现，只依赖 runtime client 接口。
+- 本地实现仍可运行，但已经像调用服务端一样调用。
+
+### 阶段 2：LLM 与上下文迁移
+
+目标是保护 key，并让 prompt/context 在服务端统一。
+
+- LLM 配置和 API key 移到服务端。
+- 前台只传业务状态摘要和可见历史，不传密钥。
+- 服务端生成 LLM prompt、上下文包和结构化返回校验。
+- 保留浏览器 mock 和协议测试，避免真实 LLM 波动影响主回归。
+
+完成标志：
+
+- 前台没有可见 API key。
+- LLM-first 仍然成立，pending 快捷确认之外不回退到本地关键词分类器。
+
+### 阶段 3：ReAct runtime 迁移
+
+目标是让长程任务状态成为服务端正式任务。
+
+- `ReactTaskRun` 由服务端创建、更新和恢复。
+- 每轮 ReAct 有明确的 `plan -> act -> observe -> decide` 事件。
+- 素材查证、候选验证和失败自修在服务端运行。
+- 前台通过事件流展示“我先查素材”“还缺什么”“是否更新草案”。
+
+完成标志：
+
+- 刷新页面后，当前任务仍能恢复。
+- 模型超时、素材查不到、返回格式不完整，都能继续或停止。
+
+### 阶段 4：正式播单写入迁移
+
+目标是服务端成为正式写入裁决方。
+
+- 原子命令执行器迁到服务端。
+- 批量删除、替换、移动、插入由服务端分批执行。
+- 服务端控制批量上限、幂等 key、版本检查和失败恢复。
+- 前台接收 `playlistPatch` 更新页面，不直接推断最终结果。
+
+完成标志：
+
+- 正式写入前必须校验播单版本。
+- 批量失败能返回已完成、未完成、失败原因和下一步动作。
+- 草案更新和正式播单写入仍保持隔离。
+
+### 阶段 5：可访问部署
+
+目标是让其他人可以访问体验，同时不暴露密钥和内部状态。
+
+- 部署 Agent 服务和前台站点。
+- 提供匿名体验入口和固定演示数据。
+- 会话隔离，避免不同用户互相影响。
+- 增加速率限制、日志脱敏和任务超时。
+- 外部访问方只调用标准 API，不直接耦合前台内部组件。
+
+完成标志：
+
+- 无账号也能访问受控体验环境。
+- 生产 key 不出现在浏览器。
+- 每个会话有独立工作区和任务状态。
+
+## 关键业务规则
+
+服务端迁移必须保持这些规则：
+
+- 电视播单是时间格子里的编排。
+- 轮播单是内容队列里的编排。
+- 轮播整体编排必须有草案，原子操作可以不依赖草案。
+- 草案和正式播单默认独立。
+- 只有用户确认进入正式编排，才写正式播单。
+- 完全重编、批量删除、批量替换、批量移动必须 pending。
+- pending 绑定当前工作区；用户换话题时旧 pending 失效。
+- 多候选不自动替用户选择。
+- 电视顺播/期数过滤后唯一可用候选可以直接排，并用人话说明理由。
+- OpenClaw 只是未来外部访问方，不是当前测试或实现阻塞条件。
+
+## 风险和控制
+
+- 风险：前后台状态双写导致播单不一致。
+  控制：引入 `foregroundStateVersion` 和服务端写入版本校验。
+
+- 风险：服务端化后前台体验变慢。
+  控制：SSE 流式输出任务事件，主回复先返回，长程任务持续更新。
+
+- 风险：迁移时又出现本地分类器绕过 LLM。
+  控制：协议测试要求开放自然语言进入 LLM planner，只有 pending/安全门禁可本地快速处理。
+
+- 风险：真实 LLM 波动导致回归不稳定。
+  控制：确定性 mock 覆盖主路径，真实 LLM 做抽样评估。
+
+- 风险：服务端任务无限循环。
+  控制：每个 task 有 `maxTurns`、`batchSize`、超时和失败次数上限。
+
+## 验收方式
+
+每个迁移阶段都必须保持：
+
+- 真实前台浏览器回归通过。
+- agent 单测通过。
+- build 通过。
+- 覆盖矩阵说明新增能力和剩余缺口。
+- 不清空本地 LLM 配置和 API key。
+- 不把 OpenClaw 作为阻塞条件。
+
+阶段 4 以后需要新增：
+
+- 服务端 API 合同测试。
+- SSE 事件流测试。
+- 会话恢复测试。
+- 并发会话隔离测试。
+- 写入幂等和版本冲突测试。
+
+## 推荐下一步
+
+下一目标不直接大搬迁，而是先做“协议冻结”：
+
+1. 新增 `AgentRuntimeClient` 接口。
+2. 让 `ChatPanel` 只调用接口，不直接关心本地 facade。
+3. 把当前本地 facade 包成 `LocalAgentRuntimeClient`。
+4. 用现有 19 条浏览器场景证明体验不变。
+5. 再开始把 LLM/context/ReAct 逐步迁到服务端实现。

@@ -926,6 +926,9 @@ const resolveStatusFromAtomicContext = (
   switch (pendingAtomicContext.phase) {
     case 'clarifying':
       return 'needs_clarification'
+    case 'draft_research_confirmation':
+    case 'formal_rebuild_confirmation':
+      return 'needs_confirmation'
     case 'selecting_target':
     case 'recommending_insert':
       return 'needs_selection'

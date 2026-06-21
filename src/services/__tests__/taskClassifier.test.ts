@@ -467,4 +467,24 @@ describe('TaskClassifier', () => {
     expect(result.suggestedParams?.rotationDurationSeconds).toBe(60 * 60)
     expect(chat).toHaveBeenCalled()
   })
+
+  it('surfaces LLM timeout as recoverable failure instead of ordinary clarification', async () => {
+    const chat = vi.fn(async () => {
+      throw new Error('LLM request failed after 1 attempt: LLM 网络请求超时，请检查网络或稍后重试。')
+    })
+    const classifier = new TaskClassifier({ chat } as never)
+
+    const result = await classifier.classify({
+      scheduleState: createScheduleState({ playlistType: 'rotation' }),
+      userInput: '帮我策划一个3小时的轮播单',
+    })
+
+    expect(result.mode).toBe('clarify')
+    expect(result.suggestedParams?.llmFailure).toMatchObject({
+      stage: 'task_classification',
+      reason: 'timeout',
+      canRetry: true,
+    })
+    expect(result.reasoning).toContain('模型')
+  })
 })

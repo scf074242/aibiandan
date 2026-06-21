@@ -85,6 +85,11 @@ describe('Agent LLM context package', () => {
       channelId: 'dragon',
       date,
     })
+    expect(llmContextPackage.playlistSemantics).toMatchObject({
+      model: 'time_grid',
+    })
+    expect(llmContextPackage.playlistSemantics.positionMeaning).toContain('播出时间格')
+    expect(llmContextPackage.playlistSemantics.draftBoundary).toContain('普通原子操作不因草案存在而改写草案')
     expect(llmContextPackage.currentSchedule).toEqual([
       expect.objectContaining({
         itemId: 'item-episode-3',
@@ -178,6 +183,13 @@ describe('Agent LLM context package', () => {
     })
     expect(llmContextPackage.identity).not.toHaveProperty('channelId')
     expect(llmContextPackage.identity).not.toHaveProperty('date')
+    expect(llmContextPackage.playlistSemantics).toMatchObject({
+      model: 'content_queue',
+    })
+    expect(llmContextPackage.playlistSemantics.positionMeaning).toContain('内容队列')
+    expect(llmContextPackage.playlistSemantics.positionMeaning).toContain('从0点起算')
+    expect(llmContextPackage.playlistSemantics.draftBoundary).toContain('整体编排和整体补排需要草案')
+    expect(llmContextPackage.playlistSemantics.writeBoundary).toContain('先给候选或待确认')
     expect(llmContextPackage.currentSchedule[0]).toMatchObject({
       itemId: 'rotation-existing',
       positionBasis: 'relative_from_zero',

@@ -109,7 +109,7 @@ export class InsertCandidateResolver {
           status: 'resolved',
           selectedCandidate: top.candidate,
           confidence: top.confidence,
-          reasoning: '只命中一个高匹配候选，直接采用该节目。',
+          reasoning: '节目线索只对应到这一条候选，直接采用该节目。',
           recommendedCandidates,
         }
       }
@@ -120,7 +120,7 @@ export class InsertCandidateResolver {
         confidence: top.confidence,
         reasoning: top.score >= DIRECT_EXECUTE_SCORE_THRESHOLD
           ? '虽然命中了相关节目，但候选之间仍然接近，建议你先确认具体要插入哪一条。'
-          : '已经找到相关候选，但当前识别置信度还不够高，建议你从推荐列表里确认具体节目。',
+          : '已经找到相关候选，但节目线索还不够明确，建议你从推荐列表里确认具体节目。',
         trigger: ranked.length > 1 && top.score - (second?.score ?? 0) < DIRECT_EXECUTE_SCORE_DELTA
           ? 'ambiguous_candidates'
           : 'low_confidence',
