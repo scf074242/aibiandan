@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 import {
@@ -35,6 +35,47 @@ const readPersistedSessions = (filePath: string): AgentServerSessionState[] => {
   ))
 }
 
+const isNodeError = (error: unknown): error is Error & { code?: string } => error instanceof Error
+
+const isRecoverableReplaceError = (error: unknown): boolean => {
+  if (!isNodeError(error)) return false
+  return ['EACCES', 'EBUSY', 'ENOENT', 'EPERM'].includes(error.code ?? '')
+}
+
+const removeFileIfExists = (filePath: string): void => {
+  try {
+    unlinkSync(filePath)
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== 'ENOENT') {
+      throw error
+    }
+  }
+}
+
+const replacePersistedFile = (temporaryPath: string, filePath: string): void => {
+  try {
+    renameSync(temporaryPath, filePath)
+    return
+  } catch (error) {
+    if (!isRecoverableReplaceError(error)) throw error
+  }
+
+  try {
+    removeFileIfExists(filePath)
+    renameSync(temporaryPath, filePath)
+    return
+  } catch (error) {
+    if (!isRecoverableReplaceError(error)) throw error
+  }
+
+  copyFileSync(temporaryPath, filePath)
+  removeFileIfExists(temporaryPath)
+}
+
+const buildTemporaryPath = (filePath: string): string => (
+  `${filePath}.${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`
+)
+
 export class AgentServerFileSessionStore extends AgentServerSessionStore {
   constructor(private readonly filePath: string) {
     super(readPersistedSessions(filePath))
@@ -42,7 +83,7 @@ export class AgentServerFileSessionStore extends AgentServerSessionStore {
 
   override createSession(): AgentServerSessionState {
     const session = super.createSession()
-    this.persist()
+    this.persistSafely()
     return session
   }
 
@@ -51,7 +92,7 @@ export class AgentServerFileSessionStore extends AgentServerSessionStore {
     patch: Partial<Omit<AgentServerSessionState, 'id' | 'createdAt' | 'eventLog'>>,
   ): AgentServerSessionState {
     const session = super.updateSession(sessionId, patch)
-    this.persist()
+    this.persistSafely()
     return session
   }
 
@@ -60,7 +101,7 @@ export class AgentServerFileSessionStore extends AgentServerSessionStore {
     event: Omit<AgentServerSessionEvent, 'id' | 'createdAt'>,
   ): AgentServerSessionEvent {
     const nextEvent = super.appendEvent(sessionId, event)
-    this.persist()
+    this.persistSafely()
     return nextEvent
   }
 
@@ -69,13 +110,22 @@ export class AgentServerFileSessionStore extends AgentServerSessionStore {
     evidence: Omit<AgentMaterialEvidenceRecord, 'id' | 'createdAt'>,
   ): AgentMaterialEvidenceRecord {
     const record = super.appendMaterialEvidence(sessionId, evidence)
-    this.persist()
+    this.persistSafely()
     return record
   }
 
   override reset(): void {
     super.reset()
-    this.persist()
+    this.persistSafely()
+  }
+
+  private persistSafely(): void {
+    try {
+      this.persist()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`Agent session persistence failed; continuing with in-memory state: ${message}`)
+    }
   }
 
   private persist(): void {
@@ -93,8 +143,8 @@ export class AgentServerFileSessionStore extends AgentServerSessionStore {
       },
       sessions,
     }
-    const temporaryPath = `${this.filePath}.tmp`
+    const temporaryPath = buildTemporaryPath(this.filePath)
     writeFileSync(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
-    renameSync(temporaryPath, this.filePath)
+    replacePersistedFile(temporaryPath, this.filePath)
   }
 }

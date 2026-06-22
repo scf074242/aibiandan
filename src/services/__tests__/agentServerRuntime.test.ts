@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -735,6 +735,22 @@ describe('AgentServerRuntime migration boundary', () => {
       })
       expect(persisted.metadata?.eventCount).toBeGreaterThan(0)
     } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not fail the runtime turn when trial session persistence is temporarily blocked', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'aibiandan-agent-session-blocked-'))
+    const blockedPath = join(tempDir, 'blocked-target')
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const store = new AgentServerFileSessionStore(blockedPath)
+      mkdirSync(blockedPath, { recursive: true })
+
+      expect(() => store.createSession()).not.toThrow()
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Agent session persistence failed'))
+    } finally {
+      warnSpy.mockRestore()
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
