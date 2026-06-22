@@ -24,16 +24,17 @@ import type { ReactTaskRun } from './reactTaskTypes'
 import {
   AgentServerSessionStore,
   getAgentServerSessionStore,
-  type AgentMaterialEvidenceRecord,
+  type AgentExecutionCheckpoint,
   type AgentServerSessionEvent,
   type AgentServerSessionState,
 } from './agentServerSessionStore'
 import { FormalPlaylistWriteAdapter } from './formalPlaylistWriteAdapter'
+import { AgentServerExecutionService } from './agentServerExecutionService'
+import { AgentMaterialEvidenceService } from './agentMaterialEvidenceService'
 import { getAtomicCapabilities } from '../atomicCapabilities'
 import {
   buildFormalPlaylistSnapshot,
   buildScheduleItemSnapshotsFromFormalPlaylist,
-  type FormalPlaylistSnapshot,
 } from './formalPlaylistState'
 import {
   buildScheduleWorkspaceSummary,
@@ -49,6 +50,8 @@ export interface AgentServerRuntimeOptions {
   >
   sessions?: AgentServerSessionStore
   formalPlaylistWrites?: FormalPlaylistWriteAdapter
+  executionService?: AgentServerExecutionService
+  materialEvidenceService?: AgentMaterialEvidenceService
 }
 
 export interface AgentServerRuntimeEnvelope<T> {
@@ -70,6 +73,7 @@ export interface AgentServerSessionPublicState {
   formalPlaylistVersion?: string | number
   formalPlaylistItemCount?: number
   formalPlaylistWorkspaceKey?: string | null
+  activeExecutionCheckpoint?: AgentExecutionCheckpoint | null
   materialEvidenceCount: number
   eventCount: number
 }
@@ -113,6 +117,7 @@ const serializeSession = (session: AgentServerSessionState): AgentServerSessionP
   formalPlaylistVersion: session.formalPlaylistVersion,
   formalPlaylistItemCount: session.formalPlaylistSnapshot?.itemCount,
   formalPlaylistWorkspaceKey: session.formalPlaylistWorkspaceKey ?? null,
+  activeExecutionCheckpoint: session.activeExecutionCheckpoint ?? null,
   materialEvidenceCount: session.materialEvidence?.length ?? 0,
   eventCount: session.eventLog.length,
 })
@@ -120,17 +125,20 @@ const serializeSession = (session: AgentServerSessionState): AgentServerSessionP
 export class AgentServerRuntime {
   private readonly runtime: NonNullable<AgentServerRuntimeOptions['runtime']>
   private readonly sessions: AgentServerSessionStore
-  private readonly formalPlaylistWrites: FormalPlaylistWriteAdapter
+  private readonly executionService: AgentServerExecutionService
+  private readonly materialEvidenceService: AgentMaterialEvidenceService
 
   constructor(options: AgentServerRuntimeOptions = {}) {
     this.runtime = options.runtime ?? new SchedulingAgentRuntimeFacade()
     this.sessions = options.sessions ?? getAgentServerSessionStore()
-    this.formalPlaylistWrites = options.formalPlaylistWrites ?? new FormalPlaylistWriteAdapter({
+    const formalPlaylistWrites = options.formalPlaylistWrites ?? new FormalPlaylistWriteAdapter({
       executePendingCommand: (input) => this.runtime.executePendingCommand(input),
       prepareSnapshotForExecution: (snapshot) => {
         getAtomicCapabilities().loadItems(buildScheduleItemSnapshotsFromFormalPlaylist(snapshot))
       },
     })
+    this.executionService = options.executionService ?? new AgentServerExecutionService(formalPlaylistWrites)
+    this.materialEvidenceService = options.materialEvidenceService ?? new AgentMaterialEvidenceService()
   }
 
   createSession(): AgentServerSessionPublicState {
@@ -164,7 +172,8 @@ export class AgentServerRuntime {
       ? session.formalPlaylistSnapshot
       : foregroundSnapshot
     const activeReactTaskRun = session.activeReactTaskRun ?? input.activeReactTaskRun ?? null
-    const pendingAtomicContext = input.pendingAtomicContext ?? null
+    const pendingAtomicContext = input.pendingAtomicContext
+      ?? (this.shouldUseServerPendingAtomicContext(input.userInput) ? session.pendingAtomicContext ?? null : null)
     const contextPackage = buildForegroundAgentContextPackage({
       latestUserInput: input.userInput,
       scheduleState: input.scheduleState,
@@ -204,7 +213,7 @@ export class AgentServerRuntime {
       agentCoreEnabled: input.agentCoreEnabled ?? true,
     })
     const serverOwnedDecision = this.attachServerPendingOwnership(decision)
-    this.recordMaterialEvidenceFromDecision(session.id, serverOwnedDecision)
+    this.materialEvidenceService.recordDecisionEvidence(this.sessions, session.id, serverOwnedDecision)
     const nextSession = this.syncDecision(session.id, serverOwnedDecision, contextPackage)
     return {
       sessionId: session.id,
@@ -252,18 +261,21 @@ export class AgentServerRuntime {
       : null
     const currentSnapshot = session.formalPlaylistSnapshot ?? foregroundSnapshot ?? null
     const actualPlaylistVersion = session.formalPlaylistVersion ?? currentSnapshot?.version
-    const result = await this.formalPlaylistWrites.execute(executionInput, {
+    const executionOutcome = await this.executionService.executePendingCommand(executionInput, {
       sessionId: session.id,
       actualPlaylistVersion,
       currentSnapshot,
     })
-    const resultSnapshot = this.resolveResultSnapshot(result)
+    const result = executionOutcome.result
+    const resultSnapshot = executionOutcome.resultSnapshot
+    const activeExecutionCheckpoint = this.resolveActiveExecutionCheckpoint(executionOutcome.checkpoint)
     const nextSession = this.sessions.updateSession(session.id, {
       pendingCommand: result.success ? null : pendingCommand,
       pendingAtomicContext: result.success ? null : session.pendingAtomicContext ?? null,
       formalPlaylistSnapshot: resultSnapshot ?? currentSnapshot,
       formalPlaylistVersion: resultSnapshot?.version ?? actualPlaylistVersion,
       formalPlaylistWorkspaceKey: session.formalPlaylistWorkspaceKey ?? null,
+      activeExecutionCheckpoint,
     })
     this.sessions.appendEvent(session.id, {
       type: 'execution',
@@ -284,6 +296,15 @@ export class AgentServerRuntime {
           formalWrite: result.details.formalWrite,
           playlistPatch: result.playlistPatch,
           nextVersion: resultSnapshot?.version,
+        },
+      })
+    }
+    if (executionOutcome.checkpoint) {
+      this.sessions.appendEvent(session.id, {
+        type: 'execution_checkpoint',
+        summary: executionOutcome.checkpoint.summary,
+        data: {
+          checkpoint: executionOutcome.checkpoint,
         },
       })
     }
@@ -362,6 +383,32 @@ export class AgentServerRuntime {
     return serializeSession(nextSession)
   }
 
+  stopExecutionCheckpoint(sessionId: string): AgentServerSessionPublicState | null {
+    const session = this.sessions.getSession(sessionId)
+    if (!session) return null
+    if (!session.activeExecutionCheckpoint) {
+      this.sessions.appendEvent(session.id, {
+        type: 'execution_checkpoint',
+        summary: '当前没有需要继续处理的批量任务。',
+      })
+      return serializeSession(session)
+    }
+    const stoppedCheckpoint = this.executionService.stopCheckpoint(session.activeExecutionCheckpoint)
+    const nextSession = this.sessions.updateSession(session.id, {
+      activeExecutionCheckpoint: stoppedCheckpoint,
+      pendingAtomicContext: null,
+      pendingCommand: null,
+    })
+    this.sessions.appendEvent(session.id, {
+      type: 'execution_checkpoint',
+      summary: stoppedCheckpoint.summary,
+      data: {
+        checkpoint: stoppedCheckpoint,
+      },
+    })
+    return serializeSession(nextSession)
+  }
+
   private syncDecision(
     sessionId: string,
     decision: RuntimeDecision,
@@ -370,6 +417,7 @@ export class AgentServerRuntime {
     const reactTaskRun = extractReactTaskRun(decision)
     const pendingCommand = decision.kind === 'pending_command' ? decision.pendingCommand : null
     const pendingAtomicContext = this.resolvePendingAtomicContext(decision)
+    const executionCheckpoint = this.executionService.extractCheckpointFromDecision(decision)
     const currentSession = this.sessions.getOrCreateSession(sessionId)
     const nextSession = this.sessions.updateSession(sessionId, {
       lastDecisionKind: decision.kind,
@@ -377,6 +425,9 @@ export class AgentServerRuntime {
       pendingCommand,
       pendingAtomicContext,
       activeReactTaskRun: reactTaskRun ?? currentSession.activeReactTaskRun ?? null,
+      activeExecutionCheckpoint: executionCheckpoint
+        ? this.resolveActiveExecutionCheckpoint(executionCheckpoint)
+        : currentSession.activeExecutionCheckpoint ?? null,
     })
     const feedback = getRuntimeDecisionFeedback(decision)
     this.sessions.appendEvent(sessionId, {
@@ -405,18 +456,16 @@ export class AgentServerRuntime {
           observationCount: reactTaskRun.observations.length,
         },
       })
-      const latestObservation = reactTaskRun.observations.at(-1)
-      if (latestObservation?.type === 'asset_search') {
-        this.sessions.appendMaterialEvidence(sessionId, {
-          source: 'react_observation',
-          summary: latestObservation.summary,
-          candidateCount: typeof latestObservation.data?.candidateCount === 'number'
-            ? latestObservation.data.candidateCount
-            : undefined,
-          query: this.resolveEvidenceQuery(latestObservation.data),
-          data: latestObservation.data,
-        })
-      }
+      this.materialEvidenceService.recordReactTaskEvidence(this.sessions, sessionId, reactTaskRun)
+    }
+    if (executionCheckpoint) {
+      this.sessions.appendEvent(sessionId, {
+        type: 'execution_checkpoint',
+        summary: executionCheckpoint.summary,
+        data: {
+          checkpoint: executionCheckpoint,
+        },
+      })
     }
     return this.sessions.getOrCreateSession(nextSession.id)
   }
@@ -531,45 +580,24 @@ export class AgentServerRuntime {
     }
   }
 
-  private resolveResultSnapshot(result: RuntimeExecutedResult): FormalPlaylistSnapshot | null {
-    const snapshot = result.scheduleSnapshot
-    if (!snapshot || !isRecord(snapshot)) return null
-    if (typeof snapshot.version !== 'string' || !Array.isArray(snapshot.items)) return null
-    return snapshot as unknown as FormalPlaylistSnapshot
-  }
-
-  private recordMaterialEvidenceFromDecision(sessionId: string, decision: RuntimeDecision): AgentMaterialEvidenceRecord | null {
-    const feedback = getRuntimeDecisionFeedback(decision)
-    const details = feedback?.details
-    if (!isRecord(details)) return null
-    const materialEvidence = details.materialEvidence
-    if (!isRecord(materialEvidence)) return null
-    const summary = typeof materialEvidence.summary === 'string'
-      ? materialEvidence.summary
-      : '已记录素材查证结果。'
-    return this.sessions.appendMaterialEvidence(sessionId, {
-      source: 'runtime_feedback',
-      summary,
-      candidateCount: typeof materialEvidence.candidateCount === 'number'
-        ? materialEvidence.candidateCount
-        : undefined,
-      query: this.resolveEvidenceQuery(materialEvidence),
-      data: materialEvidence,
-    })
-  }
-
-  private resolveEvidenceQuery(data: unknown): Record<string, unknown> | undefined {
-    if (!isRecord(data)) return undefined
-    if (isRecord(data.query)) return data.query
-    if (Array.isArray(data.keywords)) return { keywords: data.keywords }
-    if (typeof data.keyword === 'string') return { keyword: data.keyword }
-    return undefined
-  }
-
   private resolvePendingAtomicContext(decision: RuntimeDecision): RuntimePendingAtomicContext | null {
     if (decision.kind === 'pending_atomic_context') return decision.pendingAtomicContext
     if (decision.kind === 'agent_execution') return decision.pendingAtomicContext ?? null
     return null
+  }
+
+  private resolveActiveExecutionCheckpoint(
+    checkpoint: AgentExecutionCheckpoint | null,
+  ): AgentExecutionCheckpoint | null {
+    if (!checkpoint) return null
+    return ['waiting_continue', 'failed_retryable', 'blocked'].includes(checkpoint.status)
+      ? checkpoint
+      : null
+  }
+
+  private shouldUseServerPendingAtomicContext(userInput: string): boolean {
+    return /^(?:确认|确定|执行|继续|下一批|继续执行|确认执行|重试|再试一次|可以|好的|好|ok|yes|取消|不用了|算了|先不用|不要执行|停止|cancel|no)$/iu
+      .test(userInput.replace(/\s+/g, ''))
   }
 }
 

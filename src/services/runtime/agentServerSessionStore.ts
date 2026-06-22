@@ -14,6 +14,25 @@ export interface AgentMaterialEvidenceRecord {
   data?: Record<string, unknown>
 }
 
+export interface AgentExecutionCheckpoint {
+  id: string
+  kind: 'formal_write_batch' | 'composite_task'
+  status: 'waiting_continue' | 'failed_retryable' | 'blocked' | 'completed' | 'stopped'
+  summary: string
+  pendingId?: string
+  taskId?: string
+  completedCount?: number
+  remainingCount?: number
+  nextIndex?: number
+  batchIndex?: number
+  commandCount?: number
+  lastError?: string
+  suggestedActions: string[]
+  createdAt: string
+  updatedAt: string
+  details?: Record<string, unknown>
+}
+
 export interface AgentServerSessionState {
   id: string
   createdAt: string
@@ -26,13 +45,14 @@ export interface AgentServerSessionState {
   formalPlaylistVersion?: string | number
   formalPlaylistSnapshot?: FormalPlaylistSnapshot | null
   formalPlaylistWorkspaceKey?: string | null
+  activeExecutionCheckpoint?: AgentExecutionCheckpoint | null
   materialEvidence?: AgentMaterialEvidenceRecord[]
   eventLog: AgentServerSessionEvent[]
 }
 
 export interface AgentServerSessionEvent {
   id: string
-  type: 'session' | 'context' | 'decision' | 'pending' | 'react_task' | 'execution' | 'formal_write' | 'material_evidence' | 'task_progress' | 'error'
+  type: 'session' | 'context' | 'decision' | 'pending' | 'react_task' | 'execution' | 'formal_write' | 'material_evidence' | 'task_progress' | 'execution_checkpoint' | 'error'
   summary: string
   createdAt: string
   data?: Record<string, unknown>

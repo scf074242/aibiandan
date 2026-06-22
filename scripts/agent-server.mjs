@@ -90,6 +90,7 @@ const handlePost = async (request, response, url) => {
   const sessionMessageMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/messages$/)
   const sessionContinueMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/tasks\/([^/]+)\/continue$/)
   const sessionStopMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/tasks\/([^/]+)\/stop$/)
+  const sessionExecutionStopMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/execution\/stop$/)
 
   if (url.pathname === '/api/agent/sessions') {
     json(request, response, 200, {
@@ -161,6 +162,20 @@ const handlePost = async (request, response, url) => {
     return
   }
 
+  if (sessionExecutionStopMatch) {
+    const [, sessionId] = sessionExecutionStopMatch
+    const session = runtime.stopExecutionCheckpoint(sessionId)
+    if (!session) {
+      json(request, response, 404, {
+        error: 'session_not_found',
+        message: '没有找到这次 AI 编审助手会话。',
+      })
+      return
+    }
+    json(request, response, 200, { session })
+    return
+  }
+
   json(request, response, 404, {
     error: 'not_found',
     message: 'Agent service endpoint not found.',
@@ -181,7 +196,7 @@ const server = http.createServer(async (request, response) => {
       json(request, response, 200, {
         ok: true,
         service: 'aibiandan-agent',
-        stage: 'formal-playlist-and-event-stream-migration',
+        stage: 'server-agent-trial-execution-checkpoint',
         time: new Date().toISOString(),
       })
       return
@@ -190,11 +205,14 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/agent/status') {
       json(request, response, 200, {
         service: 'aibiandan-agent',
-        migrationStep: 'phase-4-to-phase-6-formal-playlist-events-batch-evidence-deployment',
+        migrationStep: 'goal-50-server-agent-trial-execution-checkpoint',
         runtimeMode: 'server-runtime',
         llmContextOwner: 'agent-server',
         reactTaskOwner: 'agent-server-session',
         formalPlaylistOwner: 'agent-server-session',
+        pendingOwner: 'agent-server-session',
+        executionOwner: 'agent-server-execution-service',
+        materialEvidenceOwner: 'agent-server-material-evidence-service',
         sessionPersistence: sessionStoreFile ? 'file' : 'memory',
         eventStream: {
           snapshot: 'GET /api/agent/sessions/:sessionId/events',
@@ -211,6 +229,7 @@ const server = http.createServer(async (request, response) => {
           'POST /api/agent/pending/insert-recommendation',
           'POST /api/agent/sessions/:sessionId/tasks/:taskId/continue',
           'POST /api/agent/sessions/:sessionId/tasks/:taskId/stop',
+          'POST /api/agent/sessions/:sessionId/execution/stop',
           'GET /api/agent/sessions/:sessionId/events',
         ],
       })

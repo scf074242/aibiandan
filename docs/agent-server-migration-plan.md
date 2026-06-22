@@ -422,3 +422,25 @@ Goal 49 把执行归属从“前台持有 pending 和当前播单，再调用共
 - 前台仍展示 pending 卡片，但卡片不再是执行事实来源；服务端 session 才是。
 
 这个阶段完成后，迁移进度评估约 90%-92%。剩余部分主要是数据库化、多用户权限隔离、真实素材库服务、审计日志、监控限流和进程托管。
+
+## Goal 50：服务端 Agent 商用试用化与执行层收口
+
+Goal 50 的目标不是新增一批场景规则，而是把 Goal 49 后已经服务端化的执行事实继续收拢成正式 Agent 服务端能力，方便办公网长期试用。
+
+本阶段完成的服务端收口：
+
+- 新增 `AgentServerExecutionService`，把正式播单写入、批量执行检查点、停止后续处理等执行层职责从 `AgentServerRuntime` 中收拢出来。
+- 新增 `AgentMaterialEvidenceService`，素材查证证据统一从 ReAct observation 或 runtime feedback 进入服务端 session，不再由 runtime 临时拼装。
+- 服务端 session 新增 `activeExecutionCheckpoint`，用于记录批量任务已处理数量、剩余数量、下一批状态、失败可重试状态和用户可说的下一步。
+- checkpoint 是服务端内部恢复点，不是新的复杂 UI 概念。前台仍通过 AI 编审助手自然语言展示“已处理多少、还剩多少、可以继续或停止”。
+- `POST /api/agent/sessions/:sessionId/execution/stop` 可停止后续批量处理；停止不会回滚已确认写入的正式播单，只是清掉后续 pending。
+- 用户在服务端仍保存 pending 时说“继续 / 下一批 / 停止 / 取消”等短语，服务端可以使用 session 中的 pending atomic context 继续判断，降低页面刷新或前台状态丢失后的断链风险。
+- `/api/agent/status` 继续暴露服务端职责归属：pending、正式播单、执行服务、素材证据和 session persistence 都是 Agent Server 归属。
+
+仍保留的兼容边界：
+
+- 旧原子命令执行器仍被复用；Goal 50 只是把调用边界和执行恢复状态收进服务端，不重写插入、删除、移动、替换等业务规则。
+- checkpoint 只负责“继续/停止后续任务”，不是回滚系统。真正版本回滚、审计回放和多用户权限仍属于后续商用化工作。
+- 真实素材库服务仍未接入，当前只是统一素材证据接口和 mock/反馈证据入口。
+
+这个阶段完成后，迁移进度评估约 94%-95%。剩余主要是数据库化、多用户权限隔离、真实素材库适配、审计日志检索、监控限流和后台进程托管。

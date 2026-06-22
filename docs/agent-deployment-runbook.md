@@ -83,6 +83,7 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 - ReAct 长程任务由服务端持续推进。
 - 素材查证和候选证据由服务端记录。
 - 正式播单写入、幂等、版本冲突和批量恢复由服务端控制。
+- 批量任务 checkpoint 由服务端保存，用户说“继续”或“停止”时不依赖前台保留完整执行计划。
 - 前台只展示自然语言回复、弱系统过程、pending、进度和最终播单结果。
 
 ## 当前阶段边界
@@ -96,14 +97,17 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 - HTTP runtime client。
 - `dev:agent` / `dev:lan` 默认走 Agent Server，而不是前台 local runtime。
 - 服务端持有 pending id，HTTP 前台确认时只传 pending id 和选择结果。
+- 服务端持有批量任务 checkpoint，支持后续继续或停止。
 - 正式写入边界、幂等和版本元数据。
 - 正式播单快照、版本检查和 patch 闭环。
 - 事件流 `GET /api/agent/sessions/:sessionId/events?follow=1`。
 - 素材证据事件记录。
 - 可选文件持久化 session store，可保存 session、正式播单快照、事件和素材证据。
+- 停止后续批量处理：`POST /api/agent/sessions/:sessionId/execution/stop`。
 
 仍是渐进迁移：
 
 - 旧原子命令执行器仍被复用。
+- checkpoint 只表示“继续/停止后续任务”，不是正式播单回滚系统。
 - 未配置 `--session-store` 时仍是内存态。
 - 服务端数据层和持久化审计日志尚未接入数据库。

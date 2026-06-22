@@ -18,6 +18,7 @@ import type {
 } from '@/services/runtime/schedulingAgentRuntimeFacade'
 import type { RuntimePendingAtomicContext } from '@/services/runtime/pendingAtomicContext'
 import type { ReactTaskRun } from '@/services/runtime/reactTaskTypes'
+import type { SchedulingTaskRun } from '@/services/runtime/schedulingTaskPlan'
 import type { ScheduleState } from '@/types/orchestration'
 
 afterEach(() => {
@@ -83,6 +84,61 @@ const reactTaskRun: ReactTaskRun = {
   createdAt: '2026-03-25T00:00:00.000Z',
   updatedAt: '2026-03-25T00:00:00.000Z',
 }
+
+const batchDeleteTaskRun: SchedulingTaskRun = {
+  id: 'task-batch-delete-1',
+  goal: '删除全部看东方',
+  originalUserInput: '把全部看东方节目删除掉',
+  status: 'waiting_confirm',
+  currentStageIndex: 0,
+  loopCount: 1,
+  limits: {
+    maxStages: 5,
+    maxStepsPerStage: 10,
+    maxLoopTurns: 5,
+    maxAutoExecutePerLoop: 5,
+    maxMatchedItemsBeforeNarrowing: 30,
+  },
+  stages: [{
+    id: 'stage-delete-2',
+    type: 'batch_atomic',
+    status: 'waiting_confirm',
+    summary: '继续删除下一批看东方',
+    action: 'delete',
+    requiresConfirmation: true,
+    steps: [],
+  }],
+  batch: {
+    strategy: 'chunked',
+    matchKind: 'program',
+    targetLabel: '看东方',
+    totalMatched: 37,
+    processedCount: 10,
+    remainingCount: 27,
+    batchSize: 10,
+    batchIndex: 2,
+  },
+  createdAt: '2026-03-25T00:00:00.000Z',
+  updatedAt: '2026-03-25T00:00:00.000Z',
+}
+
+const batchDeletePendingContext = (taskRun: SchedulingTaskRun = batchDeleteTaskRun): RuntimePendingAtomicContext => ({
+  action: 'delete',
+  phase: 'clarifying',
+  summary: '继续批量删除看东方',
+  reasoning: '上一批已经完成，等待用户确认是否继续下一批。',
+  originalUserInput: '把全部看东方节目删除掉',
+  collectedUserInput: '继续',
+  slots: {
+    programName: '看东方',
+  },
+  missingFields: ['selection'],
+  followUpQuestion: '要继续处理剩余节目吗？',
+  compositeTaskRun: taskRun,
+  attemptCount: 0,
+  createdAt: '2026-03-25T00:00:00.000Z',
+  updatedAt: '2026-03-25T00:00:00.000Z',
+})
 
 const createRuntime = (
   submitInstruction: (input: RuntimeSubmitInput) => Promise<RuntimeDecision>,
@@ -182,6 +238,112 @@ describe('AgentServerRuntime migration boundary', () => {
     const stopped = runtime.stopReactTask(first.sessionId)
 
     expect(stopped?.activeReactTaskRun?.status).toBe('cancelled')
+  })
+
+  it('keeps a simple server checkpoint for the next batch and can continue from server pending context', async () => {
+    const capturedInputs: RuntimeSubmitInput[] = []
+    const runtime = createRuntime(async (input) => {
+      capturedInputs.push(input)
+      return capturedInputs.length === 1
+        ? {
+            kind: 'agent_execution',
+            feedback: {
+              content: '已先删除 10 条看东方，还剩 27 条。你说继续，我再处理下一批。',
+              processType: 'execution',
+              processTypeLabel: '执行完成',
+              details: {
+                taskRun: {
+                  ...batchDeleteTaskRun,
+                  status: 'completed',
+                  batch: {
+                    ...batchDeleteTaskRun.batch!,
+                    processedCount: 10,
+                    remainingCount: 27,
+                    batchIndex: 1,
+                  },
+                },
+                nextTaskRun: batchDeleteTaskRun,
+              },
+            },
+            result: {
+              status: 'executed',
+              input: {
+                userInput: input.userInput,
+                channelId: input.scheduleState.channelId,
+                date: input.scheduleState.date,
+              },
+              decision: {
+                intent: 'batch_delete',
+              },
+              executionResult: {
+                committed: true,
+                operationId: 'task-batch-delete-1',
+                affectedItemIds: [],
+              },
+              trace: [],
+            },
+            pendingAtomicContext: batchDeletePendingContext(),
+          }
+        : messageDecision('继续下一批。')
+    })
+
+    const first = await runtime.submitInstruction(baseSubmitInput('把全部看东方节目删除掉'))
+    const second = await runtime.submitInstruction(baseSubmitInput('继续'), first.sessionId)
+
+    expect(first.session.activeExecutionCheckpoint).toMatchObject({
+      kind: 'composite_task',
+      status: 'waiting_continue',
+      completedCount: 10,
+      remainingCount: 27,
+    })
+    expect(capturedInputs[1].pendingAtomicContext?.compositeTaskRun?.id).toBe('task-batch-delete-1')
+    expect(second.decision?.kind).toBe('message')
+    expect(runtime.getSessionEvents(first.sessionId).some((event) => event.type === 'execution_checkpoint')).toBe(true)
+  })
+
+  it('can stop a server checkpoint without rolling back completed playlist work', async () => {
+    const runtime = createRuntime(async () => ({
+      kind: 'agent_execution',
+      feedback: {
+        content: '已先删除 10 条看东方，还剩 27 条。你说继续，我再处理下一批。',
+        processType: 'execution',
+        processTypeLabel: '执行完成',
+        details: {
+          nextTaskRun: batchDeleteTaskRun,
+        },
+      },
+      result: {
+        status: 'executed',
+        input: {
+          userInput: '把全部看东方节目删除掉',
+          channelId: 'rotation',
+          date: '2026-03-25',
+        },
+        decision: {
+          intent: 'batch_delete',
+        },
+        executionResult: {
+          committed: true,
+          operationId: 'task-batch-delete-1',
+          affectedItemIds: [],
+        },
+        trace: [],
+      },
+      pendingAtomicContext: batchDeletePendingContext(),
+    }))
+
+    const first = await runtime.submitInstruction(baseSubmitInput('把全部看东方节目删除掉'))
+    const stopped = runtime.stopExecutionCheckpoint(first.sessionId)
+
+    expect(stopped?.activeExecutionCheckpoint).toMatchObject({
+      status: 'stopped',
+      remainingCount: 27,
+    })
+    expect(stopped?.hasPendingAtomicContext).toBe(false)
+    expect(runtime.getSessionEvents(first.sessionId).some((event) => (
+      event.type === 'execution_checkpoint'
+      && event.summary.includes('已停止后续处理')
+    ))).toBe(true)
   })
 
   it('executes pending formal writes through the server write boundary', async () => {
@@ -513,6 +675,20 @@ describe('AgentServerRuntime migration boundary', () => {
           summary: '删除看东方',
           reasoning: '用户确认删除。',
         },
+        activeExecutionCheckpoint: {
+          id: 'agent_checkpoint_restore',
+          kind: 'composite_task',
+          status: 'waiting_continue',
+          taskId: 'task-batch-delete-1',
+          summary: '已处理 10 条，还剩 27 条，等待继续确认。',
+          completedCount: 10,
+          remainingCount: 27,
+          commandCount: 37,
+          batchIndex: 2,
+          suggestedActions: ['继续', '停止'],
+          createdAt: '2026-03-25T00:00:00.000Z',
+          updatedAt: '2026-03-25T00:00:00.000Z',
+        },
       })
       store.appendEvent(session.id, {
         type: 'formal_write',
@@ -532,6 +708,11 @@ describe('AgentServerRuntime migration boundary', () => {
         pendingCommand: {
           pendingId: 'server_pending_command_restore',
           summary: '删除看东方',
+        },
+        activeExecutionCheckpoint: {
+          id: 'agent_checkpoint_restore',
+          status: 'waiting_continue',
+          remainingCount: 27,
         },
       })
       expect(restoredSession?.eventLog.some((event) => event.type === 'formal_write')).toBe(true)
