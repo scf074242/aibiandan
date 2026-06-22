@@ -216,7 +216,7 @@
         </div>
       </div>
 
-      <div v-if="messages.length === 0 && !loading" class="empty-state">
+      <div v-if="visibleMessages.length === 0 && !loading" class="empty-state">
         <el-icon :size="48"><ChatDotRound /></el-icon>
       </div>
     </div>
@@ -457,6 +457,7 @@ import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, Document, Paperclip, Top } from '@element-plus/icons-vue'
 import type { ChatMessage } from '@/types/llm'
+import { resolveLLMReadiness } from '@/services/llm/llmConfig'
 import type {
   DraftFeasibilityReport,
   ExplanationResult,
@@ -505,6 +506,7 @@ import { resolveForegroundLayoutDraft } from '@/services/runtime/foregroundLayou
 import {
   buildWorkspaceScopedRuntimeHistory,
   buildForegroundWorkspaceIdentity,
+  isForegroundWorkspaceMessageVisible,
   resolveForegroundWorkspaceKey,
   resolveForegroundWorkspaceTransition,
 } from '@/services/runtime/foregroundWorkspaceState'
@@ -916,7 +918,11 @@ const isForegroundLayoutDraftMessage = (message: Message): boolean => {
 }
 
 const visibleMessages = computed(() =>
-  messages.value.filter((message) => !message.hiddenFromThread && !isForegroundLayoutDraftMessage(message)),
+  messages.value.filter((message) => (
+    !message.hiddenFromThread
+    && !isForegroundLayoutDraftMessage(message)
+    && isForegroundWorkspaceMessageVisible(message, resolveCurrentPendingWorkspaceKey())
+  )),
 )
 
 const buildVisibleRuntimeHistory = (currentUserInput: string): string[] => {
@@ -1325,6 +1331,30 @@ const resolveRecoverableRuntimeRetryInput = (content: string): string | null | u
   return failure.originalUserInput
 }
 
+const resolveForegroundLlmReadiness = () => resolveLLMReadiness({
+  allowBrowserMock: import.meta.env.DEV,
+})
+
+const pushLlmNotReadyMessage = (message: string, errors: string[], stepMetric?: MessageStepMetric) => {
+  pushAssistantMessage(buildAssistantMessage({
+    content: message,
+    thinking: '我在发送给模型前检查到配置不可用，本轮不会修改草案或正式播单。',
+    explanation: {
+      type: 'command',
+      targetId: `llm-readiness-${Date.now()}`,
+      explanation: message,
+      details: {
+        llmReadiness: 'not_ready',
+        errors,
+        noMutation: true,
+      },
+    },
+    processType: 'error',
+    processTypeLabel: '需要配置模型',
+    stepMetric,
+  }))
+}
+
 const getRuntimeDecisionFeedback = (decision: RuntimeDecision): RuntimeFeedback | null => (
   'feedback' in decision ? decision.feedback : null
 )
@@ -1418,10 +1448,43 @@ const applyPlaylistStateFromDetails = (details?: DetailMap) => {
   })
 }
 
+const resolveRuntimeFeedbackWorkspaceKey = (details?: DetailMap): string | null => {
+  const playlistState = details?.playlistState as {
+    playlistId?: string
+    playlistType?: PlaylistType
+    rotationStrategy?: RotationPlaylistStrategy
+    rotationDurationSeconds?: number
+    channelId?: string
+    channelName?: string
+    date?: string
+  } | undefined
+  if (!playlistState?.playlistType) return null
+  return resolveForegroundWorkspaceKey(buildForegroundWorkspaceIdentity({
+    playlistId: playlistState.playlistId ?? props.playlistId,
+    playlistType: playlistState.playlistType,
+    channelId: playlistState.channelId ?? props.channelId,
+    channelName: playlistState.channelName ?? props.channelName,
+    date: playlistState.date ?? props.date,
+    rotationStrategy: playlistState.rotationStrategy ?? activeRotationStrategy.value,
+    rotationDurationSeconds: typeof playlistState.rotationDurationSeconds === 'number'
+      ? playlistState.rotationDurationSeconds
+      : activeRotationDurationSeconds.value,
+  }))
+}
+
+const bindLatestUserMessageToWorkspace = (workspaceKey: string | null) => {
+  if (!workspaceKey) return
+  const latestUserMessage = [...messages.value].reverse().find((message) => message.role === 'user')
+  if (!latestUserMessage) return
+  latestUserMessage.workspaceKey = workspaceKey
+}
+
 const appendRuntimeFeedback = (feedback: RuntimeFeedback) => {
   const feedbackProcessType = feedback.processType as ProcessType
   const details = (feedback.details ?? undefined) as DetailMap | undefined
+  const feedbackWorkspaceKey = resolveRuntimeFeedbackWorkspaceKey(details)
   applyPlaylistStateFromDetails(details)
+  bindLatestUserMessageToWorkspace(feedbackWorkspaceKey)
   pushAssistantMessage(buildAssistantMessage({
     content: formatAssistantDisplayContent(feedback.content),
     thinking: feedback.thinking,
@@ -1443,6 +1506,7 @@ const appendRuntimeFeedback = (feedback: RuntimeFeedback) => {
         )
       : undefined,
     expanded: isLayoutAnalysisDetails(details) ? true : undefined,
+    workspaceKey: feedbackWorkspaceKey ?? undefined,
   }))
 }
 
@@ -1849,6 +1913,12 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       pendingCommand.value = null
       pendingAtomicContext.value = null
       pendingReviewWorkspaceKey.value = null
+    }
+    const llmReadiness = resolveForegroundLlmReadiness()
+    if (!llmReadiness.ready) {
+      recoverableRuntimeFailure.value = null
+      pushLlmNotReadyMessage(llmReadiness.message, llmReadiness.errors, stepProgress.finish())
+      return
     }
     const foregroundContextPackage = buildForegroundAgentContextPackage({
       latestUserInput: effectiveContent,

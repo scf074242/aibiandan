@@ -47,6 +47,16 @@ export class AgentServerSessionStore {
   private readonly sessions = new Map<string, AgentServerSessionState>()
   private readonly listeners = new Map<string, Set<AgentServerSessionEventListener>>()
 
+  constructor(initialSessions: AgentServerSessionState[] = []) {
+    initialSessions.forEach((session) => {
+      this.sessions.set(session.id, {
+        ...session,
+        eventLog: [...session.eventLog],
+        materialEvidence: session.materialEvidence ? [...session.materialEvidence] : undefined,
+      })
+    })
+  }
+
   createSession(): AgentServerSessionState {
     const now = nowIso()
     const session: AgentServerSessionState = {
@@ -158,6 +168,14 @@ export class AgentServerSessionStore {
   reset(): void {
     this.sessions.clear()
     this.listeners.clear()
+  }
+
+  listSessions(): AgentServerSessionState[] {
+    return Array.from(this.sessions.values()).map((session) => ({
+      ...session,
+      eventLog: [...session.eventLog],
+      materialEvidence: session.materialEvidence ? [...session.materialEvidence] : undefined,
+    }))
   }
 }
 

@@ -15,11 +15,15 @@ const jiti = createJiti(import.meta.url, {
     '@': resolve(rootDir, 'src'),
   },
 })
-const { getAgentServerRuntime } = await jiti.import('../src/services/runtime/agentServerRuntime.ts')
+const { AgentServerRuntime, getAgentServerRuntime } = await jiti.import('../src/services/runtime/agentServerRuntime.ts')
+const { AgentServerFileSessionStore } = await jiti.import('../src/services/runtime/agentServerFileSessionStore.ts')
 
 const host = readArg('host', process.env.AGENT_HOST || '127.0.0.1')
 const port = Number(readArg('port', process.env.AGENT_PORT || '3000'))
-const runtime = getAgentServerRuntime()
+const sessionStoreFile = readArg('session-store', process.env.AGENT_SESSION_STORE_FILE || '')
+const runtime = sessionStoreFile
+  ? new AgentServerRuntime({ sessions: new AgentServerFileSessionStore(sessionStoreFile) })
+  : getAgentServerRuntime()
 
 const buildHeaders = (request) => ({
   'access-control-allow-origin': request.headers.origin || '*',
@@ -191,6 +195,7 @@ const server = http.createServer(async (request, response) => {
         llmContextOwner: 'agent-server',
         reactTaskOwner: 'agent-server-session',
         formalPlaylistOwner: 'agent-server-session',
+        sessionPersistence: sessionStoreFile ? 'file' : 'memory',
         eventStream: {
           snapshot: 'GET /api/agent/sessions/:sessionId/events',
           follow: 'GET /api/agent/sessions/:sessionId/events?follow=1',

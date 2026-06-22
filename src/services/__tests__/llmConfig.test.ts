@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { clearLLMConfig, getDefaultConfig, loadLLMConfig, saveLLMConfig } from '@/services/llm/llmConfig'
+import { clearLLMConfig, getDefaultConfig, loadLLMConfig, resolveLLMReadiness, saveLLMConfig } from '@/services/llm/llmConfig'
 
 const storage = new Map<string, string>()
 let cookieValue = ''
@@ -34,6 +34,7 @@ const installDocumentCookieMock = () => {
 }
 
 beforeEach(() => {
+  vi.unstubAllGlobals()
   storage.clear()
   cookieValue = ''
   installDocumentCookieMock()
@@ -199,5 +200,36 @@ describe('llmConfig', () => {
 
     expect(storage.has('llm_config')).toBe(false)
     expect(document.cookie).not.toContain('llm_config_shared=')
+  })
+
+  it('reports foreground LLM readiness without clearing an existing key', () => {
+    expect(resolveLLMReadiness()).toMatchObject({
+      ready: false,
+      reason: 'missing_api_key',
+    })
+
+    saveLLMConfig({ apiKey: 'sk-existing' })
+
+    expect(resolveLLMReadiness()).toMatchObject({
+      ready: true,
+      reason: 'configured',
+    })
+    expect(loadLLMConfig().apiKey).toBe('sk-existing')
+  })
+
+  it('allows browser mock readiness in development harnesses without treating the real config as valid', () => {
+    vi.stubGlobal('window', {
+      __AIBIANDAN_LLM_MOCK__: vi.fn(),
+    })
+
+    expect(resolveLLMReadiness({ allowBrowserMock: true })).toMatchObject({
+      ready: true,
+      reason: 'browser_mock',
+      errors: ['API Key 不能为空'],
+    })
+    expect(resolveLLMReadiness()).toMatchObject({
+      ready: false,
+      reason: 'missing_api_key',
+    })
   })
 })

@@ -55,7 +55,13 @@ describe('ChatPanel quick actions', () => {
 
   it('syncs runtime playlist state details back to the parent page', () => {
     expect(chatPanelSource).toContain('const applyPlaylistStateFromDetails')
+    expect(chatPanelSource).toContain('const resolveRuntimeFeedbackWorkspaceKey')
+    expect(chatPanelSource).toContain('const bindLatestUserMessageToWorkspace')
     expect(chatPanelSource).toContain('details?.playlistState')
+    expect(chatPanelSource).toContain('playlistId: playlistState.playlistId ?? props.playlistId')
+    expect(chatPanelSource).toContain('const feedbackWorkspaceKey = resolveRuntimeFeedbackWorkspaceKey(details)')
+    expect(chatPanelSource).toContain('bindLatestUserMessageToWorkspace(feedbackWorkspaceKey)')
+    expect(chatPanelSource).toContain('workspaceKey: feedbackWorkspaceKey ?? undefined')
     expect(chatPanelSource).toContain('playlistId: playlistState.playlistId')
     expect(chatPanelSource).toContain('channelName: activePlaylistType.value === \'tv\' ? playlistState.channelName : undefined')
     expect(chatPanelSource).toContain('date: activePlaylistType.value === \'tv\' ? playlistState.date : undefined')
@@ -117,7 +123,8 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('&& containsForegroundDraftPayload(input)')
     expect(chatPanelSource).toContain('&& !shouldKeepDraftBlockingInputVisible(input)')
     expect(chatPanelSource).toContain('&& !shouldKeepReadOnlyAnalysisInputVisible(input)')
-    expect(chatPanelSource).toContain('messages.value.filter((message) => !message.hiddenFromThread && !isForegroundLayoutDraftMessage(message))')
+    expect(chatPanelSource).toContain('messages.value.filter((message) => (')
+    expect(chatPanelSource).toContain('&& isForegroundWorkspaceMessageVisible(message, resolveCurrentPendingWorkspaceKey())')
     expect(chatPanelSource).toContain('const sanitizeForegroundDraftText')
     expect(chatPanelSource).toContain('const sanitizeForegroundDraftPayload')
     expect(chatPanelSource).toContain('const sanitizeAssistantMessageInput')
@@ -652,5 +659,25 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('recoverableUserInput')
     expect(chatPanelSource).toContain('effectiveContent = retryInput')
     expect(chatPanelSource).toContain('这次模型没有正常返回，我还没有修改草案或播单。你可以直接说“重试”')
+  })
+
+  it('keeps visible chat messages scoped to the active playlist workspace', () => {
+    expect(chatPanelSource).toContain('isForegroundWorkspaceMessageVisible')
+    expect(chatPanelSource).toContain('&& isForegroundWorkspaceMessageVisible(message, resolveCurrentPendingWorkspaceKey())')
+    expect(chatPanelSource).toContain('v-if="visibleMessages.length === 0 && !loading"')
+  })
+
+  it('checks LLM readiness before open natural-language submissions but after pending confirmations', () => {
+    const confirmIndex = chatPanelSource.indexOf('if (usablePendingCommand && isPendingReviewConfirmText(content))')
+    const readinessIndex = chatPanelSource.indexOf('const llmReadiness = resolveForegroundLlmReadiness()')
+    const submitIndex = chatPanelSource.indexOf('runtimeClient.submitInstruction')
+
+    expect(chatPanelSource).toContain("import { resolveLLMReadiness } from '@/services/llm/llmConfig'")
+    expect(chatPanelSource).toContain('const resolveForegroundLlmReadiness = () => resolveLLMReadiness({')
+    expect(chatPanelSource).toContain('allowBrowserMock: import.meta.env.DEV')
+    expect(chatPanelSource).toContain('pushLlmNotReadyMessage(llmReadiness.message, llmReadiness.errors, stepProgress.finish())')
+    expect(confirmIndex).toBeGreaterThanOrEqual(0)
+    expect(readinessIndex).toBeGreaterThan(confirmIndex)
+    expect(submitIndex).toBeGreaterThan(readinessIndex)
   })
 })

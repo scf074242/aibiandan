@@ -179,6 +179,51 @@ export function validateLLMConfig(config: LLMConfig): { valid: boolean; errors: 
   }
 }
 
+export interface LLMReadiness {
+  ready: boolean
+  reason: 'configured' | 'browser_mock' | 'missing_api_key' | 'invalid_config'
+  message: string
+  errors: string[]
+}
+
+const hasBrowserLlmMock = (): boolean => {
+  if (typeof window === 'undefined') return false
+  const browserWindow = window as Window & { __AIBIANDAN_LLM_MOCK__?: unknown }
+  return typeof browserWindow.__AIBIANDAN_LLM_MOCK__ === 'function'
+}
+
+export function resolveLLMReadiness(options: { allowBrowserMock?: boolean } = {}): LLMReadiness {
+  const config = loadLLMConfig()
+  const validation = validateLLMConfig(config)
+  if (validation.valid) {
+    return {
+      ready: true,
+      reason: 'configured',
+      message: '模型配置可用。',
+      errors: [],
+    }
+  }
+
+  if (options.allowBrowserMock && hasBrowserLlmMock()) {
+    return {
+      ready: true,
+      reason: 'browser_mock',
+      message: '当前使用浏览器测试模型。',
+      errors: validation.errors,
+    }
+  }
+
+  const missingApiKey = validation.errors.some((error) => error.includes('API Key'))
+  return {
+    ready: false,
+    reason: missingApiKey ? 'missing_api_key' : 'invalid_config',
+    message: missingApiKey
+      ? '我现在还不能开始编排，因为模型 API Key 还没有配置。请先点右上角“LLM配置”填写并保存；在配置好之前，我不会改动草案或正式播单。'
+      : `模型配置还不完整：${validation.errors.join('；')}。请先在“LLM配置”里检查后再继续。`,
+    errors: validation.errors,
+  }
+}
+
 export function getDefaultConfig(): LLMConfig {
   return { ...DEFAULT_CONFIG }
 }

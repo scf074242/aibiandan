@@ -1,6 +1,11 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { AgentServerRuntime } from '@/services/runtime/agentServerRuntime'
+import { AgentServerFileSessionStore } from '@/services/runtime/agentServerFileSessionStore'
 import { AgentServerSessionStore } from '@/services/runtime/agentServerSessionStore'
 import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomicCapabilities'
 import type {
@@ -334,6 +339,51 @@ describe('AgentServerRuntime migration boundary', () => {
       error: 'formal_playlist_version_conflict',
     })
     expect(result.session.formalPlaylistVersion).toBe(first.session.formalPlaylistVersion)
+  })
+
+  it('can persist server sessions, formal playlist snapshots and events to disk', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'aibiandan-agent-session-'))
+    const filePath = join(tempDir, 'sessions.json')
+    try {
+      const store = new AgentServerFileSessionStore(filePath)
+      const session = store.createSession()
+      store.updateSession(session.id, {
+        formalPlaylistVersion: 'formal_before',
+        formalPlaylistSnapshot: {
+          version: 'formal_before',
+          itemCount: 1,
+          updatedAt: '2026-03-25T00:00:00.000Z',
+          source: 'foreground',
+          items: [{
+            id: 'item-1',
+            programName: '看东方',
+            programCode: 'news-1',
+            startTime: '2026-03-25T09:00:00',
+            endTime: '2026-03-25T09:30:00',
+            duration: 1800,
+            programType: 'news',
+          }],
+        },
+      })
+      store.appendEvent(session.id, {
+        type: 'formal_write',
+        summary: '正式播单写入边界已完成。',
+      })
+
+      const restored = new AgentServerFileSessionStore(filePath)
+      const restoredSession = restored.getSession(session.id)
+
+      expect(restoredSession).toMatchObject({
+        id: session.id,
+        formalPlaylistVersion: 'formal_before',
+        formalPlaylistSnapshot: {
+          itemCount: 1,
+        },
+      })
+      expect(restoredSession?.eventLog.some((event) => event.type === 'formal_write')).toBe(true)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
   })
 
   it('records material evidence from ReAct observations as server events', async () => {

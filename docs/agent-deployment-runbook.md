@@ -10,6 +10,12 @@
 npm run dev:agent
 ```
 
+如果希望重启服务后仍保留会话、正式播单快照、事件和素材证据，使用持久化启动：
+
+```bash
+npm run dev:agent:persist
+```
+
 默认地址：
 
 - 前台页面：`http://127.0.0.1:5173`
@@ -22,6 +28,12 @@ npm run dev:lan
 ```
 
 这会把前台和 Agent Server 绑定到 `0.0.0.0`。同一办公网内其他人可以访问这台机器的局域网 IP。
+
+需要保留试用过程时，使用：
+
+```bash
+npm run dev:lan:persist
+```
 
 试用前确认：
 
@@ -44,7 +56,9 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 检查项：
 
 - `/health`：服务是否存活。
-- `/api/agent/status`：迁移阶段、服务端职责、事件流入口和可用 API。
+- `/api/agent/status`：迁移阶段、服务端职责、事件流入口、可用 API 和 `sessionPersistence`。
+
+`sessionPersistence` 为 `file` 表示已经启用文件持久化；为 `memory` 表示本次启动仍是内存态，重启会丢失 session。
 
 ## 长期运行建议
 
@@ -58,6 +72,7 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 - API Key 只放在服务端环境变量里，不放浏览器。
 - 每个试用用户独立 session，避免互相污染。
 - 打开服务日志，保留健康检查结果。
+- 使用 `npm run agent:server:persist` 或设置 `AGENT_SESSION_STORE_FILE=.agent-state/sessions.json`，让会话和正式播单状态可恢复。
 - 限制办公网入口，不直接暴露公网。
 
 ## 性能迁移方向
@@ -83,8 +98,10 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 - 正式播单快照、版本检查和 patch 闭环。
 - 事件流 `GET /api/agent/sessions/:sessionId/events?follow=1`。
 - 素材证据事件记录。
+- 可选文件持久化 session store，可保存 session、正式播单快照、事件和素材证据。
 
 仍是渐进迁移：
 
 - 旧原子命令执行器仍被复用。
+- 未配置 `--session-store` 时仍是内存态。
 - 服务端数据层和持久化审计日志尚未接入数据库。

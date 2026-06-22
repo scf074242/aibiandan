@@ -29,6 +29,10 @@ export interface ForegroundRuntimeHistoryMessage {
   workspaceKey?: string | null
 }
 
+export interface ForegroundWorkspaceMessageVisibilityInput {
+  workspaceKey?: string | null
+}
+
 export const buildForegroundWorkspaceIdentity = (
   input: ForegroundWorkspaceIdentity,
 ): ForegroundWorkspaceIdentity => ({
@@ -136,6 +140,17 @@ export const buildWorkspaceScopedRuntimeHistory = (
     })
 
   return historyCandidates.slice(-(input.historyLimit ?? 6))
+}
+
+export const isForegroundWorkspaceMessageVisible = (
+  message: ForegroundWorkspaceMessageVisibilityInput,
+  currentWorkspaceKey: string | null,
+): boolean => {
+  if (!message.workspaceKey) return true
+  if (!currentWorkspaceKey || currentWorkspaceKey === 'none') {
+    return message.workspaceKey === currentWorkspaceKey
+  }
+  return message.workspaceKey === currentWorkspaceKey
 }
 
 const buildChangedTransition = (

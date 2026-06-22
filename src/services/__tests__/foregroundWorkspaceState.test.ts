@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildWorkspaceScopedRuntimeHistory,
   buildForegroundWorkspaceIdentity,
+  isForegroundWorkspaceMessageVisible,
   resolveForegroundWorkspaceKey,
   resolveForegroundWorkspaceTransition,
 } from '@/services/runtime/foregroundWorkspaceState'
@@ -147,5 +148,17 @@ describe('foreground workspace state', () => {
     expect(history).toHaveLength(6)
     expect(history[0]).toBe('用户：第5轮')
     expect(history.at(-1)).toBe('助手：第10轮')
+  })
+
+  it('shows only messages that belong to the active foreground workspace', () => {
+    expect(isForegroundWorkspaceMessageVisible({
+      workspaceKey: 'tv:playlist-tv-1',
+    }, 'tv:playlist-tv-1')).toBe(true)
+    expect(isForegroundWorkspaceMessageVisible({
+      workspaceKey: 'tv:playlist-tv-1',
+    }, 'rotation:playlist-rotation-1')).toBe(false)
+    expect(isForegroundWorkspaceMessageVisible({
+      workspaceKey: null,
+    }, 'rotation:playlist-rotation-1')).toBe(true)
   })
 })
