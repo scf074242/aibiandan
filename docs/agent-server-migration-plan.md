@@ -444,3 +444,27 @@ Goal 50 的目标不是新增一批场景规则，而是把 Goal 49 后已经服
 - 真实素材库服务仍未接入，当前只是统一素材证据接口和 mock/反馈证据入口。
 
 这个阶段完成后，迁移进度评估约 94%-95%。剩余主要是数据库化、多用户权限隔离、真实素材库适配、审计日志检索、监控限流和后台进程托管。
+
+## Goal 51：办公网试用版硬化
+
+Goal 51 不继续追大而全的商用权限系统，而是把当前 Agent Server 变成可以在办公网内部开放试用、出问题能定位、重启后能恢复的版本。
+
+本阶段完成的试用硬化：
+
+- 文件持久化从单纯 `sessions` 数组升级到 schema v2，写入 metadata：更新时间、session 数、事件数、素材证据数和活跃 checkpoint 数。
+- 新增轻量复盘包 `GET /api/agent/sessions/:sessionId/replay`，用于定位“刚才为什么这样排”，包含最近用户原话、工作区、pending、checkpoint、正式播单快照摘要、素材证据和最近事件。
+- `agent:health` 不只检查 HTTP 200，也检查 server runtime、pending owner、execution service、material evidence service、事件流和复盘接口是否齐全。
+- 新增 `npm run agent:trial`，一条命令启动办公网试用环境：前台、Agent Server、持久化状态文件和日志目录。
+- 试用脚本不固定 `VITE_AGENT_RUNTIME_BASE_URL`，避免办公网其他机器访问时错误连接自己的 `127.0.0.1`。
+- Agent Server 启动时统一读取 `.env.agent.local` / `.env.agent` / `.env.local` / `.env.development` / `.env`，让模型 API Key 和模型参数属于后台配置，不再依赖每个前台端口自己的 `localStorage`。
+- HTTP runtime 下前台跳过本地 LLM Key 门禁，并隐藏日常前台 LLM 配置入口；本地非服务端开发模式仍保留兼容面板。
+- 为避免迁移时要求用户重新填写，HTTP runtime 会在后台缺少模型配置且旧前台已有真实配置时，一次性导入 Agent Server 并持久化到 `.agent-state/.../llm-config.json`；导入接口只回传配置状态，不回传密钥。
+
+仍暂缓：
+
+- 多用户权限、账号体系和租户隔离。
+- 复杂审计后台、执行回放和正式回滚。
+- OpenClaw 主路径接入。
+- 真实素材库深度接入。
+
+这个阶段完成后，迁移进度评估约 96%。剩余部分主要是数据库化、多用户权限隔离、真实素材库适配、正式审计检索、监控限流和进程托管。

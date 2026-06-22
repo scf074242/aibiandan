@@ -40,6 +40,10 @@ import {
   buildScheduleWorkspaceSummary,
   resolveForegroundWorkspaceKey,
 } from './foregroundWorkspaceState'
+import {
+  buildAgentSessionReplayPackage,
+  type AgentSessionReplayPackage,
+} from './agentSessionReplayPackage'
 
 export interface AgentServerRuntimeOptions {
   runtime?: Pick<SchedulingAgentRuntimeFacade,
@@ -152,6 +156,11 @@ export class AgentServerRuntime {
 
   getSessionEvents(sessionId: string) {
     return this.sessions.getSession(sessionId)?.eventLog ?? []
+  }
+
+  getSessionReplayPackage(sessionId: string): AgentSessionReplayPackage | null {
+    const session = this.sessions.getSession(sessionId)
+    return session ? buildAgentSessionReplayPackage(session) : null
   }
 
   subscribeSessionEvents(

@@ -2,14 +2,32 @@ import http from 'node:http'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createJiti } from 'jiti'
+import {
+  applyAgentLlmConfigToEnv,
+  loadAgentEnv,
+  loadAgentLlmConfigStore,
+  writeAgentLlmConfigStore,
+} from './agent-env.mjs'
 
 const readArg = (name, fallback) => {
   const prefix = `--${name}=`
   const value = process.argv.find((item) => item.startsWith(prefix))?.slice(prefix.length)
-  return value || process.env[name.toUpperCase()] || fallback
+  const envKey = name.toUpperCase().replaceAll('-', '_')
+  return value || process.env[envKey] || fallback
 }
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+loadAgentEnv(rootDir)
+const host = readArg('host', process.env.AGENT_HOST || '127.0.0.1')
+const port = Number(readArg('port', process.env.AGENT_PORT || '3000'))
+const sessionStoreFile = readArg('session-store', process.env.AGENT_SESSION_STORE_FILE || '')
+const defaultLlmConfigStoreFile = sessionStoreFile
+  ? resolve(dirname(resolve(rootDir, sessionStoreFile)), 'llm-config.json')
+  : ''
+const llmConfigStoreFile = readArg('llm-config-store', process.env.AGENT_LLM_CONFIG_FILE || defaultLlmConfigStoreFile)
+if (llmConfigStoreFile) {
+  loadAgentLlmConfigStore(resolve(rootDir, llmConfigStoreFile))
+}
 const jiti = createJiti(import.meta.url, {
   alias: {
     '@': resolve(rootDir, 'src'),
@@ -17,13 +35,66 @@ const jiti = createJiti(import.meta.url, {
 })
 const { AgentServerRuntime, getAgentServerRuntime } = await jiti.import('../src/services/runtime/agentServerRuntime.ts')
 const { AgentServerFileSessionStore } = await jiti.import('../src/services/runtime/agentServerFileSessionStore.ts')
-
-const host = readArg('host', process.env.AGENT_HOST || '127.0.0.1')
-const port = Number(readArg('port', process.env.AGENT_PORT || '3000'))
-const sessionStoreFile = readArg('session-store', process.env.AGENT_SESSION_STORE_FILE || '')
+const { loadLLMConfig, validateLLMConfig } = await jiti.import('../src/services/llm/llmConfig.ts')
+const { getLLMClient } = await jiti.import('../src/services/llm/llmClient.ts')
 const runtime = sessionStoreFile
   ? new AgentServerRuntime({ sessions: new AgentServerFileSessionStore(sessionStoreFile) })
   : getAgentServerRuntime()
+
+const resolveLlmStatus = () => {
+  const config = loadLLMConfig()
+  const validation = validateLLMConfig(config)
+  return {
+    configured: validation.valid,
+    baseURLConfigured: Boolean(config.baseURL),
+    model: config.model,
+    apiKeyPresent: validation.valid,
+    errors: validation.errors,
+    owner: 'agent-server',
+    persisted: Boolean(llmConfigStoreFile),
+  }
+}
+
+const importLlmConfig = (config) => {
+  const current = resolveLlmStatus()
+  if (current.configured) {
+    return {
+      imported: false,
+      reason: 'already_configured',
+      llm: current,
+    }
+  }
+
+  const candidate = {
+    ...loadLLMConfig(),
+    ...Object.fromEntries(
+      Object.entries(config ?? {}).filter(([, value]) => typeof value === 'string' || typeof value === 'number'),
+    ),
+  }
+  const validation = validateLLMConfig(candidate)
+  if (!validation.valid) {
+    return {
+      imported: false,
+      reason: 'invalid_config',
+      llm: {
+        ...current,
+        errors: validation.errors,
+      },
+    }
+  }
+
+  applyAgentLlmConfigToEnv(candidate, { overwrite: true })
+  getLLMClient().updateConfig(loadLLMConfig())
+  if (llmConfigStoreFile) {
+    writeAgentLlmConfigStore(resolve(rootDir, llmConfigStoreFile), loadLLMConfig())
+  }
+
+  return {
+    imported: true,
+    reason: 'imported_from_existing_foreground_config',
+    llm: resolveLlmStatus(),
+  }
+}
 
 const buildHeaders = (request) => ({
   'access-control-allow-origin': request.headers.origin || '*',
@@ -91,6 +162,12 @@ const handlePost = async (request, response, url) => {
   const sessionContinueMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/tasks\/([^/]+)\/continue$/)
   const sessionStopMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/tasks\/([^/]+)\/stop$/)
   const sessionExecutionStopMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/execution\/stop$/)
+
+  if (url.pathname === '/api/agent/llm-config/import') {
+    const result = importLlmConfig(body?.config ?? body)
+    json(request, response, result.imported || result.reason === 'already_configured' ? 200 : 400, result)
+    return
+  }
 
   if (url.pathname === '/api/agent/sessions') {
     json(request, response, 200, {
@@ -196,7 +273,7 @@ const server = http.createServer(async (request, response) => {
       json(request, response, 200, {
         ok: true,
         service: 'aibiandan-agent',
-        stage: 'server-agent-trial-execution-checkpoint',
+        stage: 'office-trial-hardening',
         time: new Date().toISOString(),
       })
       return
@@ -205,7 +282,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/agent/status') {
       json(request, response, 200, {
         service: 'aibiandan-agent',
-        migrationStep: 'goal-50-server-agent-trial-execution-checkpoint',
+        migrationStep: 'goal-51-office-trial-hardening',
         runtimeMode: 'server-runtime',
         llmContextOwner: 'agent-server',
         reactTaskOwner: 'agent-server-session',
@@ -214,6 +291,7 @@ const server = http.createServer(async (request, response) => {
         executionOwner: 'agent-server-execution-service',
         materialEvidenceOwner: 'agent-server-material-evidence-service',
         sessionPersistence: sessionStoreFile ? 'file' : 'memory',
+        llm: resolveLlmStatus(),
         eventStream: {
           snapshot: 'GET /api/agent/sessions/:sessionId/events',
           follow: 'GET /api/agent/sessions/:sessionId/events?follow=1',
@@ -230,8 +308,18 @@ const server = http.createServer(async (request, response) => {
           'POST /api/agent/sessions/:sessionId/tasks/:taskId/continue',
           'POST /api/agent/sessions/:sessionId/tasks/:taskId/stop',
           'POST /api/agent/sessions/:sessionId/execution/stop',
+          'GET /api/agent/llm-config/status',
+          'POST /api/agent/llm-config/import',
           'GET /api/agent/sessions/:sessionId/events',
+          'GET /api/agent/sessions/:sessionId/replay',
         ],
+      })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/agent/llm-config/status') {
+      json(request, response, 200, {
+        llm: resolveLlmStatus(),
       })
       return
     }
@@ -252,6 +340,16 @@ const server = http.createServer(async (request, response) => {
       writeSse(request, response, runtime.getSessionEvents(sessionId), {
         follow: url.searchParams.get('follow') === '1' || url.searchParams.get('follow') === 'true',
         sessionId,
+      })
+      return
+    }
+
+    const replayMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/replay$/)
+    if (request.method === 'GET' && replayMatch) {
+      const replayPackage = runtime.getSessionReplayPackage(replayMatch[1])
+      json(request, response, replayPackage ? 200 : 404, replayPackage ? { replayPackage } : {
+        error: 'session_not_found',
+        message: '没有找到这次 AI 编审助手会话。',
       })
       return
     }

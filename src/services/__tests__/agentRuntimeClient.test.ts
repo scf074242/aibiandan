@@ -61,7 +61,12 @@ describe('AgentRuntimeClient migration boundary', () => {
         storage.set(key, value)
       }),
     })
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/agent/llm-config/status')) {
+        return new Response(JSON.stringify({
+          llm: { configured: true },
+        }), { status: 200 })
+      }
       const body = JSON.parse(String(init?.body ?? '{}')) as { sessionId?: string | null }
       if (!body.sessionId) {
         return new Response(JSON.stringify({
@@ -127,11 +132,15 @@ describe('AgentRuntimeClient migration boundary', () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
+      'http://agent.local/api/agent/llm-config/status',
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
       'http://agent.local/api/agent/submit',
       expect.objectContaining({ method: 'POST' }),
     )
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).input).not.toHaveProperty('foregroundContextPackage')
-    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).input).not.toHaveProperty('foregroundContextPackage')
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toMatchObject({
       sessionId: 'agent-session-1',
       input: {
         pendingId: 'server-pending-1',
@@ -139,8 +148,87 @@ describe('AgentRuntimeClient migration boundary', () => {
         foregroundStateVersion: 'formal_frontend_v1',
       },
     })
-    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).input).not.toHaveProperty('pendingCommand')
-    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).input).not.toHaveProperty('currentSchedule')
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body)).input).not.toHaveProperty('pendingCommand')
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body)).input).not.toHaveProperty('currentSchedule')
     expect(storage.get('aibiandan_agent_session_id')).toBe('agent-session-1')
+  })
+
+  it('bridges an existing foreground LLM key to the server once when HTTP runtime is missing backend config', async () => {
+    const storage = new Map<string, string>()
+    storage.set('llm_config', JSON.stringify({
+      baseURL: 'https://api.siliconflow.cn/v1',
+      apiKey: 'sk-existing-foreground',
+      model: 'deepseek-ai/DeepSeek-V4-Flash',
+      temperature: 0.3,
+      maxTokens: 8192,
+      timeout: 60000,
+    }))
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        storage.set(key, value)
+      }),
+      removeItem: vi.fn((key: string) => {
+        storage.delete(key)
+      }),
+    })
+    vi.stubGlobal('sessionStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+    })
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/agent/llm-config/status')) {
+        return new Response(JSON.stringify({
+          llm: { configured: false },
+        }), { status: 200 })
+      }
+      if (url.endsWith('/api/agent/llm-config/import')) {
+        return new Response(JSON.stringify({
+          imported: true,
+          llm: { configured: true },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        sessionId: 'agent-session-bridge',
+        decision: {
+          kind: 'message',
+          feedback: {
+            content: '服务端已接管。',
+            processType: 'planning',
+            processTypeLabel: 'Agent Server',
+          },
+        },
+      }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new HttpAgentRuntimeClient('http://agent.local')
+    await client.submitInstruction({
+      scheduleState: {
+        channelId: 'rotation',
+        channelName: '轮播单',
+        date: '2026-03-25',
+        isEmpty: true,
+        itemCount: 0,
+        gapCount: 0,
+        hasSelectedTimeRange: false,
+        playlistType: 'rotation',
+      },
+      userInput: '查询当前播单',
+      currentSchedule: [],
+    })
+
+    const importBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body))
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      'http://agent.local/api/agent/llm-config/status',
+      'http://agent.local/api/agent/llm-config/import',
+      'http://agent.local/api/agent/submit',
+    ])
+    expect(importBody.config).toMatchObject({
+      baseURL: 'https://api.siliconflow.cn/v1',
+      apiKey: 'sk-existing-foreground',
+      model: 'deepseek-ai/DeepSeek-V4-Flash',
+    })
   })
 })

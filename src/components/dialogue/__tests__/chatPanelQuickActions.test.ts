@@ -114,6 +114,13 @@ describe('ChatPanel quick actions', () => {
     expect(broadcastPlanSource).toContain('class="assistant-workspace-close"')
   })
 
+  it('keeps LLM configuration as a backend-owned concern in HTTP runtime', () => {
+    expect(broadcastPlanSource).toContain("import { isHttpAgentRuntimeEnabled } from '@/services/runtime/agentRuntimeClient'")
+    expect(broadcastPlanSource).toContain('const showForegroundLlmConfigAction = computed(() => !isHttpAgentRuntimeEnabled())')
+    expect(broadcastPlanSource).toContain('v-if="showForegroundLlmConfigAction" class="ai-sidebar-actions"')
+    expect(broadcastPlanSource).toContain('v-if="showForegroundLlmConfigAction" v-model="llmConfigVisible"')
+  })
+
   it('keeps layout draft viewing out of the foreground conversation and playlist workspace', () => {
     expect(chatPanelSource).not.toContain('v-if="pendingLayoutDraft" class="pending-command-panel layout-draft-panel"')
     expect(chatPanelSource).not.toContain('class="layout-upload-status"')
@@ -667,13 +674,16 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('v-if="visibleMessages.length === 0 && !loading"')
   })
 
-  it('checks LLM readiness before open natural-language submissions but after pending confirmations', () => {
+  it('lets HTTP server runtime own LLM readiness while preserving local fallback checks', () => {
     const confirmIndex = chatPanelSource.indexOf('if (usablePendingCommand && isPendingReviewConfirmText(content))')
     const readinessIndex = chatPanelSource.indexOf('const llmReadiness = resolveForegroundLlmReadiness()')
     const submitIndex = chatPanelSource.indexOf('runtimeClient.submitInstruction')
 
     expect(chatPanelSource).toContain("import { resolveLLMReadiness } from '@/services/llm/llmConfig'")
-    expect(chatPanelSource).toContain('const resolveForegroundLlmReadiness = () => resolveLLMReadiness({')
+    expect(chatPanelSource).toContain('isHttpAgentRuntimeEnabled,')
+    expect(chatPanelSource).toContain('if (isHttpAgentRuntimeEnabled())')
+    expect(chatPanelSource).toContain('模型配置由后台统一管理。')
+    expect(chatPanelSource).toContain('return resolveLLMReadiness({')
     expect(chatPanelSource).toContain('allowBrowserMock: import.meta.env.DEV')
     expect(chatPanelSource).toContain('pushLlmNotReadyMessage(llmReadiness.message, llmReadiness.errors, stepProgress.finish())')
     expect(confirmIndex).toBeGreaterThanOrEqual(0)

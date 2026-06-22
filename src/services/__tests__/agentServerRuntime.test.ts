@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -716,9 +716,73 @@ describe('AgentServerRuntime migration boundary', () => {
         },
       })
       expect(restoredSession?.eventLog.some((event) => event.type === 'formal_write')).toBe(true)
+      const persisted = JSON.parse(readFileSync(filePath, 'utf8')) as {
+        schemaVersion: number
+        metadata?: {
+          storeKind?: string
+          sessionCount?: number
+          eventCount?: number
+          activeCheckpointCount?: number
+        }
+      }
+      expect(persisted).toMatchObject({
+        schemaVersion: 2,
+        metadata: {
+          storeKind: 'agent-server-file-session-store',
+          sessionCount: 1,
+          activeCheckpointCount: 1,
+        },
+      })
+      expect(persisted.metadata?.eventCount).toBeGreaterThan(0)
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
+  })
+
+  it('builds a lightweight replay package for trial feedback', async () => {
+    const runtime = createRuntime(async () => ({
+      kind: 'message',
+      feedback: {
+        content: '我先查素材。此轮不会写入正式播单。',
+        processType: 'planning',
+        processTypeLabel: 'AI编审助手',
+        details: {
+          materialEvidence: {
+            summary: '已找到世界杯亚洲球队介绍素材方向。',
+            candidateCount: 4,
+            query: {
+              keywords: ['世界杯', '亚洲球队', '球队介绍'],
+            },
+          },
+        },
+      },
+    }))
+
+    const result = await runtime.submitInstruction(baseSubmitInput('新建一个 1 小时世界杯亚洲球队介绍轮播单'))
+    const replayPackage = runtime.getSessionReplayPackage(result.sessionId)
+
+    expect(replayPackage).toMatchObject({
+      schemaVersion: 1,
+      session: {
+        id: result.sessionId,
+      },
+      latestUserInput: '新建一个 1 小时世界杯亚洲球队介绍轮播单',
+      pending: {
+        hasPendingCommand: false,
+      },
+      eventSummary: {
+        byType: {
+          context: 1,
+          decision: 1,
+          material_evidence: 1,
+        },
+      },
+    })
+    expect(replayPackage?.materialEvidence[0]).toMatchObject({
+      summary: '已找到世界杯亚洲球队介绍素材方向。',
+      candidateCount: 4,
+    })
+    expect(replayPackage?.recentEvents.length).toBeGreaterThan(0)
   })
 
   it('records material evidence from ReAct observations as server events', async () => {

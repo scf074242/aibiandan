@@ -13,6 +13,8 @@ import {
   type RuntimeScheduleItem,
   type RuntimeSubmitInput,
 } from './schedulingAgentRuntimeFacade'
+import { loadLLMConfig } from '@/services/llm/llmConfig'
+import { isPlaceholderApiKey } from '@/services/llm/localDemoLlm'
 
 export {
   summarizeRuntimeCommand,
@@ -42,6 +44,12 @@ type RuntimeEnvelope<T> = {
   sessionId?: string
   decision?: T
   result?: T
+}
+
+type ServerLlmConfigStatus = {
+  llm?: {
+    configured?: boolean
+  }
 }
 
 const HTTP_SESSION_STORAGE_KEY = 'aibiandan_agent_session_id'
@@ -89,10 +97,12 @@ export class LocalAgentRuntimeClient implements AgentRuntimeClient {
 
 export class HttpAgentRuntimeClient implements AgentRuntimeClient {
   private sessionId: string | null = this.readStoredSessionId()
+  private llmConfigBridge: Promise<void> | null = null
 
   constructor(private readonly baseUrl: string = resolveAgentRuntimeBaseUrl()) {}
 
   async submitInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision> {
+    await this.ensureServerLlmConfig()
     const { foregroundContextPackage: _foregroundContextPackage, ...serverInput } = input
     const envelope = await this.post<RuntimeEnvelope<RuntimeDecision>>('/api/agent/submit', {
       sessionId: this.sessionId,
@@ -122,6 +132,7 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
   }
 
   async resolvePendingTargetSelection(input: RuntimeResolveTargetSelectionInput): Promise<RuntimeDecision> {
+    await this.ensureServerLlmConfig()
     const {
       pendingTargetSelection,
       ...restInput
@@ -140,6 +151,7 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
   }
 
   async resolvePendingInsertRecommendation(input: RuntimeResolveInsertRecommendationInput): Promise<RuntimeDecision> {
+    await this.ensureServerLlmConfig()
     const {
       pendingInsertRecommendation,
       currentSchedule: _currentSchedule,
@@ -171,6 +183,34 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
       throw new Error(message || `Agent server request failed: ${response.status}`)
     }
     return await response.json() as T
+  }
+
+  private async get<T>(path: string): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${path}`)
+    if (!response.ok) {
+      const message = await response.text().catch(() => '')
+      throw new Error(message || `Agent server request failed: ${response.status}`)
+    }
+    return await response.json() as T
+  }
+
+  private async ensureServerLlmConfig(): Promise<void> {
+    if (!this.llmConfigBridge) {
+      this.llmConfigBridge = this.bridgeExistingForegroundLlmConfig()
+    }
+    await this.llmConfigBridge
+  }
+
+  private async bridgeExistingForegroundLlmConfig(): Promise<void> {
+    const status = await this.get<ServerLlmConfigStatus>('/api/agent/llm-config/status').catch(() => null)
+    if (status?.llm?.configured) return
+
+    const localConfig = loadLLMConfig()
+    if (isPlaceholderApiKey(localConfig.apiKey)) return
+
+    await this.post('/api/agent/llm-config/import', {
+      config: localConfig,
+    }).catch(() => undefined)
   }
 
   private syncSession(sessionId?: string): void {

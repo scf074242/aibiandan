@@ -180,6 +180,19 @@ describe('llmConfig', () => {
     })
   })
 
+  it('uses backend AGENT_LLM_API_KEY when a Vite env key is only a placeholder', () => {
+    vi.stubGlobal('process', {
+      ...process,
+      env: {
+        ...process.env,
+        VITE_CODE_PLAN_LLM_API_KEY: 'YOUR_API_KEY_FROM_OLD_FRONTEND',
+        AGENT_LLM_API_KEY: 'sk-server-owned',
+      },
+    })
+
+    expect(loadLLMConfig().apiKey).toBe('sk-server-owned')
+  })
+
   it('keeps an explicit origin-local API key over the shared cookie copy', () => {
     saveLLMConfig({ apiKey: 'sk-shared' })
     storage.set('llm_config', JSON.stringify({

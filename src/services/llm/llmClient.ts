@@ -61,7 +61,10 @@ export class LLMClient {
   private initClient(): void {
     const validation = validateLLMConfig(this.config)
     if (!validation.valid) {
-      console.warn('LLM config validation failed:', validation.errors)
+      const onlyMissingApiKey = validation.errors.every((error) => error.includes('API Key'))
+      if (!onlyMissingApiKey) {
+        console.warn('LLM config validation failed:', validation.errors)
+      }
       return
     }
 

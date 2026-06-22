@@ -23,6 +23,28 @@ npm run dev:agent:persist
 
 ## 办公网试用
 
+推荐试用启动：
+
+```bash
+npm run agent:trial
+```
+
+这会自动创建 `.agent-state/trial`，启动前台和 Agent Server，并把日志写到 `.agent-state/trial/logs`。同一办公网内其他人访问这台机器的局域网 IP 即可试用。
+
+模型配置由 Agent Server 统一读取，不要求每个前台浏览器重新填写。推荐把私有配置放到不提交的 `.env.agent.local`，也兼容读取现有 `.env.development`：
+
+```bash
+VITE_CODE_PLAN_LLM_BASE_URL=https://api.siliconflow.cn/v1
+VITE_CODE_PLAN_LLM_API_KEY=...
+VITE_CODE_PLAN_LLM_MODEL=deepseek-ai/DeepSeek-V4-Flash
+```
+
+启动脚本只读取这些变量，不打印密钥值，也不会用文件里的值覆盖已经存在的系统环境变量。HTTP runtime 下，前台会把自然语言请求交给后台，不再用当前端口的 `localStorage` API Key 做门禁。
+
+如果旧前台浏览器里已经保存过真实模型配置，而后台还没有配置，HTTP runtime 第一次发送请求前会把这份既有配置导入 Agent Server，并写到 `.agent-state/.../llm-config.json`；导入接口不返回密钥，之后就由后台统一使用。
+
+如果只想沿用原来的并行脚本，也可以使用：
+
 ```bash
 npm run dev:lan
 ```
@@ -57,6 +79,8 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 
 - `/health`：服务是否存活。
 - `/api/agent/status`：迁移阶段、服务端职责、事件流入口、可用 API 和 `sessionPersistence`。
+- `/api/agent/llm-config/status`：只返回后台模型配置是否可用，不返回 API Key。
+- `agent:health` 会检查 server runtime、pending owner、execution service、material evidence service、事件流、复盘接口和后台模型配置归属是否齐全。
 
 `sessionPersistence` 为 `file` 表示已经启用文件持久化；为 `memory` 表示本次启动仍是内存态，重启会丢失 session。
 
@@ -69,11 +93,29 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 
 长期运行时建议：
 
-- API Key 只放在服务端环境变量里，不放浏览器。
+- API Key 只放在服务端环境变量或 `.env.agent.local` 里，不放浏览器。
 - 每个试用用户独立 session，避免互相污染。
 - 打开服务日志，保留健康检查结果。
 - 使用 `npm run agent:server:persist` 或设置 `AGENT_SESSION_STORE_FILE=.agent-state/sessions.json`，让会话和正式播单状态可恢复。
+- 试用推荐使用 `npm run agent:trial`，它会把会话状态和日志放在 `.agent-state/trial`。
 - 限制办公网入口，不直接暴露公网。
+
+## 轻量问题复盘
+
+试用阶段如果有人反馈“刚才为什么这样排”，先不要翻前台页面。可以直接取 session 的复盘包：
+
+```bash
+curl http://127.0.0.1:3000/api/agent/sessions/<sessionId>/replay
+```
+
+复盘包只做定位，不是复杂审计后台。它包含：
+
+- 最近用户原话和工作区。
+- pending 状态、checkpoint、正式播单快照摘要。
+- 素材证据摘要。
+- 最近事件和事件类型统计。
+
+它不会回放执行，也不会做权限审计。正式商用审计、回滚和多用户隔离仍是后续阶段。
 
 ## 性能迁移方向
 
@@ -101,8 +143,9 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 - 正式写入边界、幂等和版本元数据。
 - 正式播单快照、版本检查和 patch 闭环。
 - 事件流 `GET /api/agent/sessions/:sessionId/events?follow=1`。
+- 轻量复盘包 `GET /api/agent/sessions/:sessionId/replay`。
 - 素材证据事件记录。
-- 可选文件持久化 session store，可保存 session、正式播单快照、事件和素材证据。
+- 可选文件持久化 session store，可保存 session、正式播单快照、事件、checkpoint 和素材证据，并写入 metadata。
 - 停止后续批量处理：`POST /api/agent/sessions/:sessionId/execution/stop`。
 
 仍是渐进迁移：

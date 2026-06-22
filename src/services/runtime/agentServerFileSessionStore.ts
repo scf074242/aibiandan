@@ -9,7 +9,15 @@ import {
 } from './agentServerSessionStore'
 
 interface PersistedAgentSessionStore {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
+  metadata?: {
+    storeKind: 'agent-server-file-session-store'
+    updatedAt: string
+    sessionCount: number
+    eventCount: number
+    materialEvidenceCount: number
+    activeCheckpointCount: number
+  }
   sessions: AgentServerSessionState[]
 }
 
@@ -18,7 +26,7 @@ const readPersistedSessions = (filePath: string): AgentServerSessionState[] => {
   const raw = readFileSync(filePath, 'utf8')
   if (!raw.trim()) return []
   const parsed = JSON.parse(raw) as Partial<PersistedAgentSessionStore>
-  if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.sessions)) return []
+  if (![1, 2].includes(parsed.schemaVersion ?? 0) || !Array.isArray(parsed.sessions)) return []
   return parsed.sessions.filter((session): session is AgentServerSessionState => (
     typeof session?.id === 'string'
     && typeof session.createdAt === 'string'
@@ -72,9 +80,18 @@ export class AgentServerFileSessionStore extends AgentServerSessionStore {
 
   private persist(): void {
     mkdirSync(dirname(this.filePath), { recursive: true })
+    const sessions = this.listSessions()
     const payload: PersistedAgentSessionStore = {
-      schemaVersion: 1,
-      sessions: this.listSessions(),
+      schemaVersion: 2,
+      metadata: {
+        storeKind: 'agent-server-file-session-store',
+        updatedAt: new Date().toISOString(),
+        sessionCount: sessions.length,
+        eventCount: sessions.reduce((sum, session) => sum + session.eventLog.length, 0),
+        materialEvidenceCount: sessions.reduce((sum, session) => sum + (session.materialEvidence?.length ?? 0), 0),
+        activeCheckpointCount: sessions.filter((session) => Boolean(session.activeExecutionCheckpoint)).length,
+      },
+      sessions,
     }
     const temporaryPath = `${this.filePath}.tmp`
     writeFileSync(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')

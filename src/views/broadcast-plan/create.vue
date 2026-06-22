@@ -561,7 +561,7 @@
               <el-icon class="assistant-workspace-close"><Close /></el-icon>
             </button>
           </el-tooltip>
-          <div class="ai-sidebar-actions">
+          <div v-if="showForegroundLlmConfigAction" class="ai-sidebar-actions">
             <el-button link @click="llmConfigVisible = true">
               <el-icon><Setting /></el-icon>
               LLM配置
@@ -613,7 +613,7 @@
       @save="handleSaveItem"
       @delete="handleDeleteItemById"
     />
-    <el-dialog v-model="llmConfigVisible" title="LLM 配置" width="520px" destroy-on-close>
+    <el-dialog v-if="showForegroundLlmConfigAction" v-model="llmConfigVisible" title="LLM 配置" width="520px" destroy-on-close>
       <LLMConfigPanel />
     </el-dialog>
   </div>
@@ -717,6 +717,7 @@ import type { GapProcessingStatus } from '@/types/orchestration'
 import type { DraftFeasibilityReport, LayoutDraft, PlaylistType, RotationPlaylistStrategy, ValidationReport, ValidationIssue } from '@/types/orchestration'
 import ChatPanel from '@/components/dialogue/ChatPanel.vue'
 import LLMConfigPanel from '@/components/llm/LLMConfigPanel.vue'
+import { isHttpAgentRuntimeEnabled } from '@/services/runtime/agentRuntimeClient'
 import { getScheduleValidationService } from '@/services/scheduleValidationService'
 import { resolveForegroundLayoutDraft } from '@/services/runtime/foregroundLayoutDraft'
 import { formatClockWithFrame, normalizeClockText as normalizeClockTextValue } from '@/services/time/clockFormat'
@@ -1615,6 +1616,7 @@ const showLayoutReference = ref(false)
 
 // AI 编排相关状态
 const llmConfigVisible = ref(false)
+const showForegroundLlmConfigAction = computed(() => !isHttpAgentRuntimeEnabled())
 const atomicCapabilities = getAtomicCapabilities()
 const scheduleCommandBus = getScheduleCommandBus()
 const manualCommandAdapter = getManualCommandAdapter()

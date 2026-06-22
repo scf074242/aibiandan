@@ -28,6 +28,19 @@ const readRuntimeEnv = (key: string): string | undefined => {
   return nodeProcess?.env?.[key]
 }
 
+const readFirstRuntimeEnv = (
+  keys: string[],
+  options: { rejectPlaceholderApiKey?: boolean } = {},
+): string | undefined => {
+  for (const key of keys) {
+    const value = readRuntimeEnv(key)
+    if (value === undefined || value === '') continue
+    if (options.rejectPlaceholderApiKey && isPlaceholderApiKey(String(value))) continue
+    return value
+  }
+  return undefined
+}
+
 const migrateDeprecatedModel = (config: Partial<LLMConfig>): Partial<LLMConfig> => {
   if (typeof config.model === 'string' && DEPRECATED_AUTO_UPGRADE_MODELS.has(config.model)) {
     return {
@@ -106,9 +119,12 @@ const resolveStoredConfig = (): Partial<LLMConfig> => {
 
 export function loadLLMConfig(): LLMConfig {
   const envConfig: Partial<LLMConfig> = {
-    baseURL: readRuntimeEnv('VITE_CODE_PLAN_LLM_BASE_URL') ?? readRuntimeEnv('CODE_PLAN_LLM_BASE_URL') ?? readRuntimeEnv('AGENT_LLM_BASE_URL'),
-    apiKey: readRuntimeEnv('VITE_CODE_PLAN_LLM_API_KEY') ?? readRuntimeEnv('CODE_PLAN_LLM_API_KEY') ?? readRuntimeEnv('AGENT_LLM_API_KEY'),
-    model: readRuntimeEnv('VITE_CODE_PLAN_LLM_MODEL') ?? readRuntimeEnv('CODE_PLAN_LLM_MODEL') ?? readRuntimeEnv('AGENT_LLM_MODEL'),
+    baseURL: readFirstRuntimeEnv(['VITE_CODE_PLAN_LLM_BASE_URL', 'CODE_PLAN_LLM_BASE_URL', 'AGENT_LLM_BASE_URL']),
+    apiKey: readFirstRuntimeEnv(
+      ['VITE_CODE_PLAN_LLM_API_KEY', 'CODE_PLAN_LLM_API_KEY', 'AGENT_LLM_API_KEY'],
+      { rejectPlaceholderApiKey: true },
+    ),
+    model: readFirstRuntimeEnv(['VITE_CODE_PLAN_LLM_MODEL', 'CODE_PLAN_LLM_MODEL', 'AGENT_LLM_MODEL']),
   }
 
   let storedConfig: Partial<LLMConfig> = {}

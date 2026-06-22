@@ -487,6 +487,7 @@ import { getCandidateService } from '@/services/candidateService'
 import { getAtomicCapabilities } from '@/services/atomicCapabilities'
 import {
   getAgentRuntimeClient,
+  isHttpAgentRuntimeEnabled,
   summarizeRuntimeCommand,
   type RuntimeDecision,
   type RuntimeAnalysisContext,
@@ -1331,9 +1332,19 @@ const resolveRecoverableRuntimeRetryInput = (content: string): string | null | u
   return failure.originalUserInput
 }
 
-const resolveForegroundLlmReadiness = () => resolveLLMReadiness({
-  allowBrowserMock: import.meta.env.DEV,
-})
+const resolveForegroundLlmReadiness = () => {
+  if (isHttpAgentRuntimeEnabled()) {
+    return {
+      ready: true,
+      reason: 'configured' as const,
+      message: '模型配置由后台统一管理。',
+      errors: [],
+    }
+  }
+  return resolveLLMReadiness({
+    allowBrowserMock: import.meta.env.DEV,
+  })
+}
 
 const pushLlmNotReadyMessage = (message: string, errors: string[], stepMetric?: MessageStepMetric) => {
   pushAssistantMessage(buildAssistantMessage({
