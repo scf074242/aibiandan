@@ -25,6 +25,7 @@ export interface AgentServerSessionState {
   activeReactTaskRun?: ReactTaskRun | null
   formalPlaylistVersion?: string | number
   formalPlaylistSnapshot?: FormalPlaylistSnapshot | null
+  formalPlaylistWorkspaceKey?: string | null
   materialEvidence?: AgentMaterialEvidenceRecord[]
   eventLog: AgentServerSessionEvent[]
 }

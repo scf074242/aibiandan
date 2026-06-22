@@ -62,7 +62,9 @@ export function isHttpAgentRuntimeEnabled(): boolean {
 
 const resolveAgentRuntimeBaseUrl = (): string => (
   readViteEnv('VITE_AGENT_RUNTIME_BASE_URL')?.replace(/\/$/, '')
-  ?? 'http://127.0.0.1:3000'
+  ?? (typeof window !== 'undefined' && window.location?.hostname
+    ? `${window.location.protocol}//${window.location.hostname}:3000`
+    : 'http://127.0.0.1:3000')
 )
 
 export class LocalAgentRuntimeClient implements AgentRuntimeClient {
@@ -102,9 +104,17 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
   }
 
   async executePendingCommand(input: RuntimeExecutePendingCommandInput): Promise<RuntimeExecutedResult> {
+    const {
+      pendingCommand,
+      currentSchedule: _currentSchedule,
+      ...restInput
+    } = input
     const envelope = await this.post<RuntimeEnvelope<RuntimeExecutedResult>>('/api/agent/pending/execute', {
       sessionId: this.sessionId,
-      input,
+      input: {
+        ...restInput,
+        pendingId: input.pendingId ?? pendingCommand.pendingId,
+      },
     })
     this.syncSession(envelope.sessionId)
     if (!envelope.result) throw new Error('Agent server did not return a pending command result.')
@@ -112,9 +122,17 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
   }
 
   async resolvePendingTargetSelection(input: RuntimeResolveTargetSelectionInput): Promise<RuntimeDecision> {
+    const {
+      pendingTargetSelection,
+      ...restInput
+    } = input
     const envelope = await this.post<RuntimeEnvelope<RuntimeDecision>>('/api/agent/pending/target-selection', {
       sessionId: this.sessionId,
-      input,
+      input: {
+        ...restInput,
+        pendingId: pendingTargetSelection.pendingId,
+        selectedItemId: pendingTargetSelection.selectedItemId,
+      },
     })
     this.syncSession(envelope.sessionId)
     if (!envelope.decision) throw new Error('Agent server did not return a target-selection decision.')
@@ -122,9 +140,18 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
   }
 
   async resolvePendingInsertRecommendation(input: RuntimeResolveInsertRecommendationInput): Promise<RuntimeDecision> {
+    const {
+      pendingInsertRecommendation,
+      currentSchedule: _currentSchedule,
+      ...restInput
+    } = input
     const envelope = await this.post<RuntimeEnvelope<RuntimeDecision>>('/api/agent/pending/insert-recommendation', {
       sessionId: this.sessionId,
-      input,
+      input: {
+        ...restInput,
+        pendingId: pendingInsertRecommendation.pendingId,
+        selectedCandidateId: pendingInsertRecommendation.selectedCandidateId,
+      },
     })
     this.syncSession(envelope.sessionId)
     if (!envelope.decision) throw new Error('Agent server did not return an insert-recommendation decision.')

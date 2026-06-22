@@ -4,11 +4,18 @@ import {
   type RuntimeExecutePendingCommandInput,
   type RuntimeExecutedResult,
   type RuntimeFeedback,
+  type RuntimePendingCommand,
+  type RuntimePendingInsertRecommendation,
+  type RuntimePendingTargetSelection,
   type RuntimeResolveInsertRecommendationInput,
   type RuntimeResolveTargetSelectionInput,
   type RuntimeSubmitInput,
 } from './schedulingAgentRuntimeFacade'
-import type { RuntimePendingAtomicContext } from './pendingAtomicContext'
+import {
+  rehydratePendingInsertRecommendationFromAtomicContext,
+  rehydratePendingTargetSelectionFromAtomicContext,
+  type RuntimePendingAtomicContext,
+} from './pendingAtomicContext'
 import {
   buildForegroundAgentContextPackage,
   type ForegroundAgentContextPackage,
@@ -28,6 +35,10 @@ import {
   buildScheduleItemSnapshotsFromFormalPlaylist,
   type FormalPlaylistSnapshot,
 } from './formalPlaylistState'
+import {
+  buildScheduleWorkspaceSummary,
+  resolveForegroundWorkspaceKey,
+} from './foregroundWorkspaceState'
 
 export interface AgentServerRuntimeOptions {
   runtime?: Pick<SchedulingAgentRuntimeFacade,
@@ -58,6 +69,7 @@ export interface AgentServerSessionPublicState {
   activeReactTaskRun?: ReactTaskRun | null
   formalPlaylistVersion?: string | number
   formalPlaylistItemCount?: number
+  formalPlaylistWorkspaceKey?: string | null
   materialEvidenceCount: number
   eventCount: number
 }
@@ -65,6 +77,8 @@ export interface AgentServerSessionPublicState {
 const isRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null
 )
+
+const createServerPendingId = (kind: string): string => `server_pending_${kind}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
 const isRuntimeReactTaskRun = (value: unknown): value is ReactTaskRun => {
   if (!isRecord(value)) return false
@@ -98,6 +112,7 @@ const serializeSession = (session: AgentServerSessionState): AgentServerSessionP
   activeReactTaskRun: session.activeReactTaskRun ?? null,
   formalPlaylistVersion: session.formalPlaylistVersion,
   formalPlaylistItemCount: session.formalPlaylistSnapshot?.itemCount,
+  formalPlaylistWorkspaceKey: session.formalPlaylistWorkspaceKey ?? null,
   materialEvidenceCount: session.materialEvidence?.length ?? 0,
   eventCount: session.eventLog.length,
 })
@@ -144,6 +159,10 @@ export class AgentServerRuntime {
   ): Promise<AgentServerRuntimeEnvelope<RuntimeDecision>> {
     const session = this.sessions.getOrCreateSession(sessionId)
     const foregroundSnapshot = buildFormalPlaylistSnapshot(input.currentSchedule, 'foreground')
+    const workspaceKey = resolveForegroundWorkspaceKey(buildScheduleWorkspaceSummary(input.scheduleState))
+    const knownSnapshot = session.formalPlaylistWorkspaceKey === workspaceKey && session.formalPlaylistSnapshot
+      ? session.formalPlaylistSnapshot
+      : foregroundSnapshot
     const activeReactTaskRun = session.activeReactTaskRun ?? input.activeReactTaskRun ?? null
     const pendingAtomicContext = input.pendingAtomicContext ?? null
     const contextPackage = buildForegroundAgentContextPackage({
@@ -159,8 +178,9 @@ export class AgentServerRuntime {
       pendingCommand: null,
       pendingAtomicContext,
       activeReactTaskRun,
-      formalPlaylistSnapshot: foregroundSnapshot,
-      formalPlaylistVersion: foregroundSnapshot.version,
+      formalPlaylistSnapshot: knownSnapshot,
+      formalPlaylistVersion: knownSnapshot.version,
+      formalPlaylistWorkspaceKey: workspaceKey,
     })
     this.sessions.appendEvent(session.id, {
       type: 'context',
@@ -170,8 +190,9 @@ export class AgentServerRuntime {
         playlistType: contextPackage.workspace.playlistType,
         hasLayoutDraft: contextPackage.layoutDraft.available,
         activeReactTask: contextPackage.reactTask.active,
-        formalPlaylistVersion: foregroundSnapshot.version,
-        formalPlaylistItemCount: foregroundSnapshot.itemCount,
+        formalPlaylistVersion: knownSnapshot.version,
+        formalPlaylistItemCount: knownSnapshot.itemCount,
+        formalPlaylistWorkspaceKey: workspaceKey,
       },
     })
 
@@ -182,37 +203,67 @@ export class AgentServerRuntime {
       foregroundContextPackage: contextPackage,
       agentCoreEnabled: input.agentCoreEnabled ?? true,
     })
-    this.recordMaterialEvidenceFromDecision(session.id, decision)
-    const nextSession = this.syncDecision(session.id, decision, contextPackage)
+    const serverOwnedDecision = this.attachServerPendingOwnership(decision)
+    this.recordMaterialEvidenceFromDecision(session.id, serverOwnedDecision)
+    const nextSession = this.syncDecision(session.id, serverOwnedDecision, contextPackage)
     return {
       sessionId: session.id,
-      decision,
+      decision: serverOwnedDecision,
       contextPackage,
       session: serializeSession(nextSession),
     }
   }
 
   async executePendingCommand(
-    input: RuntimeExecutePendingCommandInput,
+    input: RuntimeExecutePendingCommandInput | (Partial<RuntimeExecutePendingCommandInput> & {
+      pendingId?: string
+      scheduleDate: string
+      channelId: string
+    }),
     sessionId?: string | null,
   ): Promise<AgentServerRuntimeEnvelope<RuntimeExecutedResult>> {
     const session = this.sessions.getOrCreateSession(sessionId)
+    const pendingCommand = this.resolveServerPendingCommand(session, input)
+    if (!pendingCommand) {
+      const result = this.buildMissingServerPendingResult(input.pendingId)
+      this.sessions.appendEvent(session.id, {
+        type: 'error',
+        summary: result.message,
+        data: {
+          error: result.error,
+          pendingId: input.pendingId,
+        },
+      })
+      return {
+        sessionId: session.id,
+        result,
+        session: serializeSession(session),
+      }
+    }
+    const executionInput: RuntimeExecutePendingCommandInput = {
+      ...input,
+      pendingCommand,
+      scheduleDate: input.scheduleDate,
+      channelId: input.channelId,
+      pendingId: input.pendingId ?? pendingCommand.pendingId,
+    }
     const foregroundSnapshot = input.currentSchedule
       ? buildFormalPlaylistSnapshot(input.currentSchedule, 'foreground')
       : null
     const currentSnapshot = session.formalPlaylistSnapshot ?? foregroundSnapshot ?? null
     const actualPlaylistVersion = session.formalPlaylistVersion ?? currentSnapshot?.version
-    const result = await this.formalPlaylistWrites.execute(input, {
+    const result = await this.formalPlaylistWrites.execute(executionInput, {
       sessionId: session.id,
       actualPlaylistVersion,
       currentSnapshot,
     })
     const resultSnapshot = this.resolveResultSnapshot(result)
     const nextSession = this.sessions.updateSession(session.id, {
-      pendingCommand: null,
-      pendingAtomicContext: null,
+      pendingCommand: result.success ? null : pendingCommand,
+      pendingAtomicContext: result.success ? null : session.pendingAtomicContext ?? null,
       formalPlaylistSnapshot: resultSnapshot ?? currentSnapshot,
       formalPlaylistVersion: resultSnapshot?.version ?? actualPlaylistVersion,
+      formalPlaylistWorkspaceKey: session.formalPlaylistWorkspaceKey ?? null,
     })
     this.sessions.appendEvent(session.id, {
       type: 'execution',
@@ -244,29 +295,49 @@ export class AgentServerRuntime {
   }
 
   async resolvePendingTargetSelection(
-    input: RuntimeResolveTargetSelectionInput,
+    input: RuntimeResolveTargetSelectionInput | (Omit<Partial<RuntimeResolveTargetSelectionInput>, 'pendingTargetSelection'> & {
+      pendingId?: string
+      selectedItemId?: string | null
+    }),
     sessionId?: string | null,
   ): Promise<AgentServerRuntimeEnvelope<RuntimeDecision>> {
     const session = this.sessions.getOrCreateSession(sessionId)
-    const decision = await this.runtime.resolvePendingTargetSelection(input)
-    const nextSession = this.syncDecision(session.id, decision)
+    const pendingTargetSelection = this.resolveServerPendingTargetSelection(session, input)
+    const decision = pendingTargetSelection
+      ? await this.runtime.resolvePendingTargetSelection({
+          ...(input as RuntimeResolveTargetSelectionInput),
+          pendingTargetSelection,
+        })
+      : this.buildMissingServerPendingDecision('当前目标选择已失效，请重新发起操作。')
+    const serverOwnedDecision = this.attachServerPendingOwnership(decision)
+    const nextSession = this.syncDecision(session.id, serverOwnedDecision)
     return {
       sessionId: session.id,
-      decision,
+      decision: serverOwnedDecision,
       session: serializeSession(nextSession),
     }
   }
 
   async resolvePendingInsertRecommendation(
-    input: RuntimeResolveInsertRecommendationInput,
+    input: RuntimeResolveInsertRecommendationInput | (Omit<Partial<RuntimeResolveInsertRecommendationInput>, 'pendingInsertRecommendation'> & {
+      pendingId?: string
+      selectedCandidateId?: string | null
+    }),
     sessionId?: string | null,
   ): Promise<AgentServerRuntimeEnvelope<RuntimeDecision>> {
     const session = this.sessions.getOrCreateSession(sessionId)
-    const decision = await this.runtime.resolvePendingInsertRecommendation(input)
-    const nextSession = this.syncDecision(session.id, decision)
+    const pendingInsertRecommendation = this.resolveServerPendingInsertRecommendation(session, input)
+    const decision = pendingInsertRecommendation
+      ? await this.runtime.resolvePendingInsertRecommendation({
+          ...(input as RuntimeResolveInsertRecommendationInput),
+          pendingInsertRecommendation,
+        })
+      : this.buildMissingServerPendingDecision('当前插入推荐已失效，请重新发起操作。')
+    const serverOwnedDecision = this.attachServerPendingOwnership(decision)
+    const nextSession = this.syncDecision(session.id, serverOwnedDecision)
     return {
       sessionId: session.id,
-      decision,
+      decision: serverOwnedDecision,
       session: serializeSession(nextSession),
     }
   }
@@ -348,6 +419,116 @@ export class AgentServerRuntime {
       }
     }
     return this.sessions.getOrCreateSession(nextSession.id)
+  }
+
+  private attachServerPendingOwnership(decision: RuntimeDecision): RuntimeDecision {
+    if (decision.kind === 'pending_command') {
+      const pendingId = decision.pendingCommand.pendingId ?? createServerPendingId('command')
+      return {
+        ...decision,
+        pendingCommand: {
+          ...decision.pendingCommand,
+          pendingId,
+          details: {
+            ...(decision.pendingCommand.details ?? {}),
+            serverPendingId: pendingId,
+            serverOwned: true,
+          },
+        },
+      }
+    }
+    if (decision.kind === 'pending_atomic_context') {
+      return {
+        ...decision,
+        pendingAtomicContext: this.attachServerPendingAtomicContext(decision.pendingAtomicContext),
+      }
+    }
+    if (decision.kind === 'agent_execution' && decision.pendingAtomicContext) {
+      return {
+        ...decision,
+        pendingAtomicContext: this.attachServerPendingAtomicContext(decision.pendingAtomicContext),
+      }
+    }
+    return decision
+  }
+
+  private attachServerPendingAtomicContext(context: RuntimePendingAtomicContext): RuntimePendingAtomicContext {
+    return {
+      ...context,
+      pendingId: context.pendingId ?? createServerPendingId(context.phase),
+    }
+  }
+
+  private resolveServerPendingCommand(
+    session: AgentServerSessionState,
+    input: Partial<RuntimeExecutePendingCommandInput> & { pendingId?: string },
+  ): RuntimePendingCommand | null {
+    const sessionPending = session.pendingCommand ?? null
+    if (sessionPending && (!input.pendingId || sessionPending.pendingId === input.pendingId)) {
+      return sessionPending
+    }
+    return input.pendingCommand ?? null
+  }
+
+  private resolveServerPendingTargetSelection(
+    session: AgentServerSessionState,
+    input: Partial<RuntimeResolveTargetSelectionInput> & { pendingId?: string; selectedItemId?: string | null },
+  ): RuntimePendingTargetSelection | null {
+    if (input.pendingTargetSelection) return input.pendingTargetSelection
+    const context = session.pendingAtomicContext
+    if (!context || (input.pendingId && context.pendingId !== input.pendingId)) return null
+    const selection = rehydratePendingTargetSelectionFromAtomicContext({
+      ...context,
+      selectedItemId: input.selectedItemId ?? context.selectedItemId ?? null,
+    })
+    return selection
+  }
+
+  private resolveServerPendingInsertRecommendation(
+    session: AgentServerSessionState,
+    input: Partial<RuntimeResolveInsertRecommendationInput> & { pendingId?: string; selectedCandidateId?: string | null },
+  ): RuntimePendingInsertRecommendation | null {
+    if (input.pendingInsertRecommendation) return input.pendingInsertRecommendation
+    const context = session.pendingAtomicContext
+    if (!context || (input.pendingId && context.pendingId !== input.pendingId)) return null
+    const recommendation = rehydratePendingInsertRecommendationFromAtomicContext({
+      ...context,
+      selectedCandidateId: input.selectedCandidateId ?? context.selectedCandidateId ?? null,
+    })
+    return recommendation
+  }
+
+  private buildMissingServerPendingDecision(content: string): RuntimeDecision {
+    return {
+      kind: 'message',
+      statusHint: 'failed',
+      feedback: {
+        content,
+        processType: 'error',
+        processTypeLabel: '待确认已失效',
+        details: {
+          serverPending: 'missing',
+          noMutation: true,
+        },
+      },
+    }
+  }
+
+  private buildMissingServerPendingResult(pendingId?: string): RuntimeExecutedResult {
+    return {
+      success: false,
+      command: { action: 'validate' } as never,
+      message: '当前待确认操作已失效，请重新发起操作。',
+      error: 'server_pending_not_found',
+      summary: '待确认操作已失效',
+      thinking: '服务端没有找到可执行的待确认操作，本轮不会修改正式播单。',
+      explanation: '服务端 pending 已不存在、已过期，或与当前确认不匹配。',
+      details: {
+        serverPending: 'missing',
+        pendingId,
+        noMutation: true,
+      },
+    }
   }
 
   private resolveResultSnapshot(result: RuntimeExecutedResult): FormalPlaylistSnapshot | null {

@@ -105,6 +105,7 @@ describe('AgentRuntimeClient migration boundary', () => {
     })
     await client.executePendingCommand({
       pendingCommand: {
+        pendingId: 'server-pending-1',
         command: { action: 'validate' } as never,
         summary: '执行校验',
         reasoning: '用户确认执行。',
@@ -133,14 +134,13 @@ describe('AgentRuntimeClient migration boundary', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
       sessionId: 'agent-session-1',
       input: {
+        pendingId: 'server-pending-1',
         expectedPlaylistVersion: 'formal_frontend_v1',
         foregroundStateVersion: 'formal_frontend_v1',
-        currentSchedule: [{
-          id: 'item-1',
-          programName: '看东方',
-        }],
       },
     })
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).input).not.toHaveProperty('pendingCommand')
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).input).not.toHaveProperty('currentSchedule')
     expect(storage.get('aibiandan_agent_session_id')).toBe('agent-session-1')
   })
 })

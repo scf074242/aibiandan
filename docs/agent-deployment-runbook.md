@@ -39,7 +39,7 @@ npm run dev:lan:persist
 
 - Windows 防火墙允许对应端口访问。
 - 浏览器访问的是前台地址，不是 Agent Server 地址。
-- 如果前台要走 HTTP runtime，需要配置 `VITE_AGENT_RUNTIME_MODE=http` 和 `VITE_AGENT_RUNTIME_BASE_URL`。
+- `dev:agent` / `dev:lan` 已默认使用 HTTP runtime；前台会按当前访问主机连接 3000 端口的 Agent Server。只有端口或域名不一致时，才需要额外配置 `VITE_AGENT_RUNTIME_BASE_URL`。
 
 ## 健康检查
 
@@ -94,6 +94,8 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 - 服务端上下文重建。
 - 服务端 ReAct task session。
 - HTTP runtime client。
+- `dev:agent` / `dev:lan` 默认走 Agent Server，而不是前台 local runtime。
+- 服务端持有 pending id，HTTP 前台确认时只传 pending id 和选择结果。
 - 正式写入边界、幂等和版本元数据。
 - 正式播单快照、版本检查和 patch 闭环。
 - 事件流 `GET /api/agent/sessions/:sessionId/events?follow=1`。

@@ -11,10 +11,12 @@ import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomi
 import type {
   RuntimeDecision,
   RuntimeExecutePendingCommandInput,
+  RuntimePendingTargetSelection,
   RuntimeResolveInsertRecommendationInput,
   RuntimeResolveTargetSelectionInput,
   RuntimeSubmitInput,
 } from '@/services/runtime/schedulingAgentRuntimeFacade'
+import type { RuntimePendingAtomicContext } from '@/services/runtime/pendingAtomicContext'
 import type { ReactTaskRun } from '@/services/runtime/reactTaskTypes'
 import type { ScheduleState } from '@/types/orchestration'
 
@@ -215,6 +217,146 @@ describe('AgentServerRuntime migration boundary', () => {
     ))).toBe(true)
   })
 
+  it('can execute a server-owned pending command when the foreground only sends pending id', async () => {
+    const executePendingCommand = vi.fn(async (input: RuntimeExecutePendingCommandInput) => {
+      expect(input.pendingCommand.summary).toBe('删除看东方')
+      expect(input.currentSchedule).toBeUndefined()
+      expect(getAtomicCapabilities().getItem('item-1')?.programName).toBe('看东方')
+      return {
+        success: true,
+        command: input.pendingCommand.command,
+        message: '已删除。',
+        summary: input.pendingCommand.summary,
+        data: {
+          deletedItem: {
+            id: 'item-1',
+            programName: '看东方',
+            startTime: '2026-03-25T09:00:00',
+            endTime: '2026-03-25T09:30:00',
+            duration: 1800,
+            programType: 'news',
+          },
+        },
+      }
+    })
+    const runtime = createRuntime(async () => ({
+      kind: 'pending_command',
+      feedback: {
+        content: '这会删除《看东方》，请确认。',
+        processType: 'selection',
+        processTypeLabel: '待确认修改',
+      },
+      pendingCommand: {
+        command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '用户确认删除。' } as never,
+        summary: '删除看东方',
+        reasoning: '用户确认删除。',
+      },
+    }), executePendingCommand)
+
+    const first = await runtime.submitInstruction({
+      ...baseSubmitInput('删除看东方'),
+      currentSchedule: [{
+        id: 'item-1',
+        programName: '看东方',
+        programCode: 'news-1',
+        startTime: '2026-03-25T09:00:00',
+        endTime: '2026-03-25T09:30:00',
+        duration: 1800,
+        programType: 'news',
+      }],
+    })
+    const pendingId = first.decision?.kind === 'pending_command'
+      ? first.decision.pendingCommand.pendingId
+      : ''
+
+    const result = await runtime.executePendingCommand({
+      pendingId,
+      scheduleDate: '2026-03-25',
+      channelId: 'rotation',
+      expectedPlaylistVersion: first.session.formalPlaylistVersion,
+    }, first.sessionId)
+
+    expect(pendingId).toMatch(/^server_pending_command_/)
+    expect(executePendingCommand).toHaveBeenCalledTimes(1)
+    expect(result.result?.success).toBe(true)
+    expect(result.session.formalPlaylistItemCount).toBe(0)
+    expect(result.result?.details?.formalWrite).toMatchObject({
+      boundary: 'agent-server',
+      status: 'applied',
+    })
+  })
+
+  it('rehydrates server-owned target selection pending from the session', async () => {
+    let capturedSelection: RuntimePendingTargetSelection | null = null
+    const pendingAtomicContext: RuntimePendingAtomicContext = {
+      action: 'delete',
+      phase: 'selecting_target',
+      summary: '请选择要删除的节目',
+      reasoning: '用户要求删除节目，但当前有多个匹配。',
+      originalUserInput: '删除看东方',
+      collectedUserInput: '删除看东方',
+      slots: {
+        targetTime: '09:00:00',
+        programName: '看东方',
+      },
+      missingFields: ['selection'],
+      followUpQuestion: '请选择要删除的节目。',
+      targetCandidates: [
+        {
+          id: 'item-1',
+          programName: '看东方',
+          startTime: '09:00:00',
+          endTime: '09:30:00',
+          duration: 1800,
+          programType: 'news',
+        },
+      ],
+      selectedItemId: null,
+      attemptCount: 0,
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:00:00.000Z',
+    }
+    const runtime = new AgentServerRuntime({
+      sessions: new AgentServerSessionStore(),
+      runtime: {
+        submitInstruction: vi.fn(async () => ({
+          kind: 'pending_atomic_context',
+          feedback: {
+            content: '请选择要删除的节目。',
+            processType: 'selection',
+            processTypeLabel: '需选择',
+          },
+          pendingAtomicContext,
+        })),
+        executePendingCommand: vi.fn(),
+        resolvePendingTargetSelection: vi.fn(async (input: RuntimeResolveTargetSelectionInput) => {
+          capturedSelection = input.pendingTargetSelection
+          return messageDecision('已按选择生成待确认。')
+        }),
+        resolvePendingInsertRecommendation: vi.fn(async () => messageDecision('已选择候选。')),
+      },
+    })
+
+    const first = await runtime.submitInstruction(baseSubmitInput('删除看东方'))
+    const pendingId = first.decision?.kind === 'pending_atomic_context'
+      ? first.decision.pendingAtomicContext.pendingId
+      : ''
+    const second = await runtime.resolvePendingTargetSelection({
+      pendingId,
+      selectedItemId: 'item-1',
+      channelId: 'rotation',
+      date: '2026-03-25',
+    }, first.sessionId)
+
+    expect(pendingId).toMatch(/^server_pending_selecting_target_/)
+    expect(capturedSelection).toMatchObject({
+      pendingId,
+      selectedItemId: 'item-1',
+      candidates: [{ id: 'item-1' }],
+    })
+    expect(second.decision?.kind).toBe('message')
+  })
+
   it('does not execute the same idempotent pending write twice in one server session', async () => {
     const executePendingCommand = vi.fn(async (_input: RuntimeExecutePendingCommandInput) => ({
       success: true,
@@ -349,6 +491,7 @@ describe('AgentServerRuntime migration boundary', () => {
       const session = store.createSession()
       store.updateSession(session.id, {
         formalPlaylistVersion: 'formal_before',
+        formalPlaylistWorkspaceKey: 'rotation:rotation-1',
         formalPlaylistSnapshot: {
           version: 'formal_before',
           itemCount: 1,
@@ -364,6 +507,12 @@ describe('AgentServerRuntime migration boundary', () => {
             programType: 'news',
           }],
         },
+        pendingCommand: {
+          pendingId: 'server_pending_command_restore',
+          command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '用户确认删除。' } as never,
+          summary: '删除看东方',
+          reasoning: '用户确认删除。',
+        },
       })
       store.appendEvent(session.id, {
         type: 'formal_write',
@@ -376,8 +525,13 @@ describe('AgentServerRuntime migration boundary', () => {
       expect(restoredSession).toMatchObject({
         id: session.id,
         formalPlaylistVersion: 'formal_before',
+        formalPlaylistWorkspaceKey: 'rotation:rotation-1',
         formalPlaylistSnapshot: {
           itemCount: 1,
+        },
+        pendingCommand: {
+          pendingId: 'server_pending_command_restore',
+          summary: '删除看东方',
         },
       })
       expect(restoredSession?.eventLog.some((event) => event.type === 'formal_write')).toBe(true)

@@ -86,6 +86,7 @@ export interface RuntimeFormalRebuildConfirmation {
 }
 
 export interface RuntimePendingAtomicContext {
+  pendingId?: string
   action: RuntimeAtomicAction | null
   phase: RuntimePendingAtomicPhase
   summary: string
@@ -156,6 +157,7 @@ export const buildPendingAtomicContextFromClarification = (
   }
 
   return {
+    pendingId: pending.pendingId,
     action: pending.action,
     phase: 'clarifying',
     summary: pending.summary,
@@ -193,6 +195,7 @@ export const rehydratePendingAtomicClarificationFromAtomicContext = (
   })
 
   return {
+    pendingId: pending.pendingId,
     action: pending.action,
     summary: pending.summary,
     reasoning: pending.reasoning,
@@ -316,6 +319,7 @@ export const rehydratePendingTargetSelectionFromAtomicContext = (
   }
 
   return {
+    pendingId: pending.pendingId,
     action: pending.action,
     summary: pending.summary,
     reasoning: pending.reasoning,
@@ -341,6 +345,7 @@ export const rehydratePendingInsertRecommendationFromAtomicContext = (
   }
 
   return {
+    pendingId: pending.pendingId,
     action: pending.action === 'replace' ? 'replace' : 'insert',
     summary: pending.summary,
     reasoning: pending.reasoning,
