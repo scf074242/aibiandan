@@ -354,7 +354,7 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('const emitLatestRuntimeSchedule')
     expect(chatPanelSource).toContain('resolveScheduleItemsFromExecutionData(executionData)')
     expect(chatPanelSource).toContain('getAtomicCapabilities().getAllItems()')
-    expect(chatPanelSource).toContain('emitLatestRuntimeSchedule(executed.data)')
+    expect(chatPanelSource).toContain('emitLatestRuntimeSchedule(executed)')
     expect(chatPanelSource).toContain('emitLatestRuntimeSchedule(result.data)')
     expect(chatPanelSource).not.toContain('if (executionResult?.scheduleItems)')
   })
@@ -620,7 +620,10 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null')
     expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewCancelText(content))')
     expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewConfirmText(content))')
-    expect(chatPanelSource).toContain('runtimeClient.executePendingCommand({')
+    expect(chatPanelSource).toContain('const buildPendingExecuteInput = (pendingCommand: RuntimePendingCommand) =>')
+    expect(chatPanelSource).toContain('expectedPlaylistVersion: formalPlaylistVersion')
+    expect(chatPanelSource).toContain('currentSchedule: props.currentSchedule')
+    expect(chatPanelSource).toContain('runtimeClient.executePendingCommand(buildPendingExecuteInput(usablePendingCommand))')
     expect(chatPanelSource).toContain('const pendingReviewInterruptedNotice = ref<string | null>(null)')
     expect(chatPanelSource).toContain('const interruptPendingReviewForNewInput = (content: string): boolean =>')
     expect(chatPanelSource).toContain('interruptPendingReviewForNewInput(content)')
@@ -630,6 +633,14 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('withRuntimeFeedbackNotice(decision.feedback, leadingNotice)')
     expect(chatPanelSource).toContain('await applyRuntimeDecision(decision, pendingReviewExpiredNotice)')
     expect(chatPanelSource).not.toContain('pushPendingReviewExpiredMessage(pendingReviewLifecycle.expireReason)')
+  })
+
+  it('uses server schedule snapshots as the authoritative foreground update when available', () => {
+    expect(chatPanelSource).toContain("import { buildFormalPlaylistVersion } from '@/services/runtime/formalPlaylistState'")
+    expect(chatPanelSource).toContain('if (record.scheduleSnapshot && typeof record.scheduleSnapshot ===')
+    expect(chatPanelSource).toContain('if (isRuntimeScheduleItemList(snapshot.items)) return snapshot.items')
+    expect(chatPanelSource).toContain('emitLatestRuntimeSchedule(executed)')
+    expect(chatPanelSource).toContain('runtimeClient.executePendingCommand(buildPendingExecuteInput(pending))')
   })
 
   it('keeps recoverable LLM failure retry in the foreground message path', () => {

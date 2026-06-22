@@ -1,4 +1,4 @@
-import type { OrchestrationCommand } from '@/types/orchestration'
+import type { OrchestrationCommand, ScheduleItemSnapshot } from '@/types/orchestration'
 import type {
   RuntimeExecutePendingCommandInput,
   RuntimeExecutedResult,
@@ -103,6 +103,31 @@ const addSeconds = (value: string, seconds: number): string => {
   if (!Number.isFinite(startMs)) return value
   return new Date(startMs + seconds * 1000).toISOString().replace('.000Z', '')
 }
+
+const resolveDurationSeconds = (item: RuntimeScheduleItem): number => {
+  if (typeof item.duration === 'number' && Number.isFinite(item.duration) && item.duration >= 0) {
+    return item.duration
+  }
+  const startMs = toTimeMs(item.startTime)
+  const endMs = toTimeMs(item.endTime)
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return 0
+  return Math.max(0, Math.floor((endMs - startMs) / 1000))
+}
+
+export const buildScheduleItemSnapshotsFromFormalPlaylist = (
+  snapshot: FormalPlaylistSnapshot,
+): ScheduleItemSnapshot[] => (
+  snapshot.items.map((item, index) => ({
+    id: item.id,
+    programCode: item.programCode ?? item.id,
+    programName: item.programName ?? item.id,
+    startTime: item.startTime,
+    endTime: item.endTime,
+    duration: resolveDurationSeconds(item),
+    programType: item.programType ?? 'unknown',
+    sequence: index + 1,
+  }))
+)
 
 const applyCommandToItems = (
   items: RuntimeScheduleItem[],

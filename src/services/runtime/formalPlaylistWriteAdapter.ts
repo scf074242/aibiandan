@@ -40,6 +40,7 @@ export interface FormalPlaylistWriteMetadata {
 
 export interface FormalPlaylistWriteAdapterOptions {
   executePendingCommand: (input: RuntimeExecutePendingCommandInput) => Promise<RuntimeExecutedResult>
+  prepareSnapshotForExecution?: (snapshot: FormalPlaylistSnapshot) => void | Promise<void>
   createRunId?: () => string
 }
 
@@ -96,11 +97,13 @@ const withFormalWriteDetails = (
 
 export class FormalPlaylistWriteAdapter {
   private readonly executeDelegate: FormalPlaylistWriteAdapterOptions['executePendingCommand']
+  private readonly prepareSnapshotForExecution?: FormalPlaylistWriteAdapterOptions['prepareSnapshotForExecution']
   private readonly createRunId: () => string
   private readonly completedByIdempotencyKey = new Map<string, RuntimeExecutedResult>()
 
   constructor(options: FormalPlaylistWriteAdapterOptions) {
     this.executeDelegate = options.executePendingCommand
+    this.prepareSnapshotForExecution = options.prepareSnapshotForExecution
     this.createRunId = options.createRunId ?? createDefaultRunId
   }
 
@@ -147,6 +150,29 @@ export class FormalPlaylistWriteAdapter {
     const batchLimitBlock = this.resolveBatchLimitBlock(input, context)
     if (batchLimitBlock) {
       return batchLimitBlock
+    }
+
+    if (context.currentSnapshot && this.prepareSnapshotForExecution) {
+      try {
+        await this.prepareSnapshotForExecution(context.currentSnapshot)
+      } catch (error) {
+        return withFormalWriteDetails({
+          success: false,
+          command: input.pendingCommand.command,
+          message: '正式写入前同步播单状态失败，请稍后重试。',
+          error: 'formal_playlist_snapshot_prepare_failed',
+          summary: input.pendingCommand.summary,
+          thinking: '正式写入前未能把服务端播单快照同步到执行器，已停止本次写入。',
+          explanation: (error as Error).message,
+          details: {
+            prepareError: (error as Error).message,
+          },
+        }, buildMetadata(input, context, {
+          writeRunId: this.createRunId(),
+          status: 'failed',
+          reused: false,
+        }))
+      }
     }
 
     const result = await this.executeDelegate(input)

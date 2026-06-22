@@ -80,12 +80,11 @@ npm run agent:health -- --url=http://127.0.0.1:3000
 - 服务端 ReAct task session。
 - HTTP runtime client。
 - 正式写入边界、幂等和版本元数据。
-- 正式播单快照和 patch 元数据。
+- 正式播单快照、版本检查和 patch 闭环。
 - 事件流 `GET /api/agent/sessions/:sessionId/events?follow=1`。
 - 素材证据事件记录。
 
 仍是渐进迁移：
 
 - 旧原子命令执行器仍被复用。
-- 前台暂时仍按旧方式刷新页面状态。
 - 服务端数据层和持久化审计日志尚未接入数据库。

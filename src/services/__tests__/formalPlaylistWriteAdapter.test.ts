@@ -85,6 +85,31 @@ describe('FormalPlaylistWriteAdapter', () => {
     })
   })
 
+  it('prepares the current server snapshot before delegating to the old executor', async () => {
+    const callOrder: string[] = []
+    const prepareSnapshotForExecution = vi.fn(async () => {
+      callOrder.push('prepare')
+    })
+    const executePendingCommand = vi.fn(async () => {
+      callOrder.push('delegate')
+      return executedResult()
+    })
+    const adapter = new FormalPlaylistWriteAdapter({
+      executePendingCommand,
+      prepareSnapshotForExecution,
+      createRunId: () => 'formal-write-1',
+    })
+
+    const result = await adapter.execute(pendingInput(), {
+      sessionId: 'session-1',
+      currentSnapshot,
+    })
+
+    expect(result.success).toBe(true)
+    expect(prepareSnapshotForExecution).toHaveBeenCalledWith(currentSnapshot)
+    expect(callOrder).toEqual(['prepare', 'delegate'])
+  })
+
   it('reuses an idempotent write result without executing the delegate twice', async () => {
     const executePendingCommand = vi.fn(async () => executedResult())
     const adapter = new FormalPlaylistWriteAdapter({
@@ -110,8 +135,10 @@ describe('FormalPlaylistWriteAdapter', () => {
 
   it('blocks a formal write when the known playlist version no longer matches', async () => {
     const executePendingCommand = vi.fn(async () => executedResult())
+    const prepareSnapshotForExecution = vi.fn()
     const adapter = new FormalPlaylistWriteAdapter({
       executePendingCommand,
+      prepareSnapshotForExecution,
       createRunId: () => 'formal-write-1',
     })
 
@@ -123,6 +150,7 @@ describe('FormalPlaylistWriteAdapter', () => {
     })
 
     expect(executePendingCommand).not.toHaveBeenCalled()
+    expect(prepareSnapshotForExecution).not.toHaveBeenCalled()
     expect(result).toMatchObject({
       success: false,
       error: 'formal_playlist_version_conflict',

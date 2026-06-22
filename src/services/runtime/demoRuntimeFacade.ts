@@ -149,6 +149,7 @@ export interface RuntimeExecutePendingCommandInput {
   pendingCommand: RuntimePendingCommand
   scheduleDate: string
   channelId: string
+  currentSchedule?: RuntimeScheduleItem[]
   pendingId?: string
   idempotencyKey?: string
   foregroundStateVersion?: string | number

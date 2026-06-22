@@ -499,6 +499,7 @@ import {
   buildForegroundAgentContextPackage,
   resolvePendingReviewLifecycle,
 } from '@/services/runtime/foregroundAgentContextPackage'
+import { buildFormalPlaylistVersion } from '@/services/runtime/formalPlaylistState'
 import type { ReactTaskRun } from '@/services/runtime/reactTaskTypes'
 import { resolveForegroundLayoutDraft } from '@/services/runtime/foregroundLayoutDraft'
 import {
@@ -1506,6 +1507,10 @@ const resolveScheduleItemsFromExecutionData = (data: unknown): RuntimeScheduleIt
   if (isRuntimeScheduleItemList(data)) return data
   if (data && typeof data === 'object') {
     const record = data as Record<string, unknown>
+    if (record.scheduleSnapshot && typeof record.scheduleSnapshot === 'object') {
+      const snapshot = record.scheduleSnapshot as Record<string, unknown>
+      if (isRuntimeScheduleItemList(snapshot.items)) return snapshot.items
+    }
     if (isRuntimeScheduleItemList(record.scheduleItems)) return record.scheduleItems
     if (isRuntimeScheduleItemList(record.items)) return record.items
   }
@@ -1526,6 +1531,18 @@ const emitLatestRuntimeSchedule = (executionData?: unknown) => {
   }
 
   emit('scheduleUpdated', commandExecutor.getScheduleItems())
+}
+
+const buildPendingExecuteInput = (pendingCommand: RuntimePendingCommand) => {
+  const formalPlaylistVersion = buildFormalPlaylistVersion(props.currentSchedule)
+  return {
+    pendingCommand,
+    scheduleDate: props.date,
+    channelId: props.channelId,
+    currentSchedule: props.currentSchedule,
+    foregroundStateVersion: formalPlaylistVersion,
+    expectedPlaylistVersion: formalPlaylistVersion,
+  }
 }
 
 const applyRuntimeDecision = async (
@@ -1707,7 +1724,7 @@ const applyRuntimeExecutedResult = (executed: RuntimeExecutedResult, stepMetric?
 
   if (executed.success) {
     ElMessage.success(executed.message)
-    emitLatestRuntimeSchedule(executed.data)
+    emitLatestRuntimeSchedule(executed)
     pushAssistantMessage(buildAssistantMessage({
       content: executed.message,
       thinking: executed.thinking,
@@ -1824,11 +1841,7 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       pendingCommand.value = null
       pendingAtomicContext.value = null
       pendingReviewWorkspaceKey.value = null
-      const result = await runtimeClient.executePendingCommand({
-        pendingCommand: usablePendingCommand,
-        scheduleDate: props.date,
-        channelId: props.channelId,
-      })
+      const result = await runtimeClient.executePendingCommand(buildPendingExecuteInput(usablePendingCommand))
       applyRuntimeExecutedResult(result, stepProgress.finish())
       return
     }
@@ -4188,11 +4201,7 @@ const confirmPendingCommand = async () => {
     pendingCommand.value = null
     pendingAtomicContext.value = null
     pendingReviewWorkspaceKey.value = null
-    const result = await runtimeClient.executePendingCommand({
-      pendingCommand: pending,
-      scheduleDate: props.date,
-      channelId: props.channelId,
-    })
+    const result = await runtimeClient.executePendingCommand(buildPendingExecuteInput(pending))
     applyRuntimeExecutedResult(result, stepProgress.finish())
   } catch (error) {
     messages.value.push(buildAssistantMessage({

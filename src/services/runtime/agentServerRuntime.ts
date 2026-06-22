@@ -22,8 +22,10 @@ import {
   type AgentServerSessionState,
 } from './agentServerSessionStore'
 import { FormalPlaylistWriteAdapter } from './formalPlaylistWriteAdapter'
+import { getAtomicCapabilities } from '../atomicCapabilities'
 import {
   buildFormalPlaylistSnapshot,
+  buildScheduleItemSnapshotsFromFormalPlaylist,
   type FormalPlaylistSnapshot,
 } from './formalPlaylistState'
 
@@ -110,6 +112,9 @@ export class AgentServerRuntime {
     this.sessions = options.sessions ?? getAgentServerSessionStore()
     this.formalPlaylistWrites = options.formalPlaylistWrites ?? new FormalPlaylistWriteAdapter({
       executePendingCommand: (input) => this.runtime.executePendingCommand(input),
+      prepareSnapshotForExecution: (snapshot) => {
+        getAtomicCapabilities().loadItems(buildScheduleItemSnapshotsFromFormalPlaylist(snapshot))
+      },
     })
   }
 
@@ -192,17 +197,22 @@ export class AgentServerRuntime {
     sessionId?: string | null,
   ): Promise<AgentServerRuntimeEnvelope<RuntimeExecutedResult>> {
     const session = this.sessions.getOrCreateSession(sessionId)
+    const foregroundSnapshot = input.currentSchedule
+      ? buildFormalPlaylistSnapshot(input.currentSchedule, 'foreground')
+      : null
+    const currentSnapshot = session.formalPlaylistSnapshot ?? foregroundSnapshot ?? null
+    const actualPlaylistVersion = session.formalPlaylistVersion ?? currentSnapshot?.version
     const result = await this.formalPlaylistWrites.execute(input, {
       sessionId: session.id,
-      actualPlaylistVersion: session.formalPlaylistVersion,
-      currentSnapshot: session.formalPlaylistSnapshot,
+      actualPlaylistVersion,
+      currentSnapshot,
     })
     const resultSnapshot = this.resolveResultSnapshot(result)
     const nextSession = this.sessions.updateSession(session.id, {
       pendingCommand: null,
       pendingAtomicContext: null,
-      formalPlaylistSnapshot: resultSnapshot ?? session.formalPlaylistSnapshot ?? null,
-      formalPlaylistVersion: resultSnapshot?.version ?? session.formalPlaylistVersion,
+      formalPlaylistSnapshot: resultSnapshot ?? currentSnapshot,
+      formalPlaylistVersion: resultSnapshot?.version ?? actualPlaylistVersion,
     })
     this.sessions.appendEvent(session.id, {
       type: 'execution',

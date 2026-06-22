@@ -111,6 +111,17 @@ describe('AgentRuntimeClient migration boundary', () => {
       },
       scheduleDate: '2026-03-25',
       channelId: 'rotation',
+      currentSchedule: [{
+        id: 'item-1',
+        programName: '看东方',
+        programCode: 'news-1',
+        startTime: '2026-03-25T09:00:00',
+        endTime: '2026-03-25T09:30:00',
+        duration: 1800,
+        programType: 'news',
+      }],
+      expectedPlaylistVersion: 'formal_frontend_v1',
+      foregroundStateVersion: 'formal_frontend_v1',
     })
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -121,6 +132,14 @@ describe('AgentRuntimeClient migration boundary', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).input).not.toHaveProperty('foregroundContextPackage')
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
       sessionId: 'agent-session-1',
+      input: {
+        expectedPlaylistVersion: 'formal_frontend_v1',
+        foregroundStateVersion: 'formal_frontend_v1',
+        currentSchedule: [{
+          id: 'item-1',
+          programName: '看东方',
+        }],
+      },
     })
     expect(storage.get('aibiandan_agent_session_id')).toBe('agent-session-1')
   })

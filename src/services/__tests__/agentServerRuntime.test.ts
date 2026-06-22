@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { AgentServerRuntime } from '@/services/runtime/agentServerRuntime'
 import { AgentServerSessionStore } from '@/services/runtime/agentServerSessionStore'
+import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomicCapabilities'
 import type {
   RuntimeDecision,
   RuntimeExecutePendingCommandInput,
@@ -11,6 +12,10 @@ import type {
 } from '@/services/runtime/schedulingAgentRuntimeFacade'
 import type { ReactTaskRun } from '@/services/runtime/reactTaskTypes'
 import type { ScheduleState } from '@/types/orchestration'
+
+afterEach(() => {
+  resetAtomicCapabilities()
+})
 
 const rotationScheduleState: ScheduleState = {
   playlistId: 'rotation-1',
@@ -235,12 +240,15 @@ describe('AgentServerRuntime migration boundary', () => {
   })
 
   it('keeps a server-side formal playlist snapshot and returns a patch after confirmed writes', async () => {
-    const executePendingCommand = vi.fn(async (_input: RuntimeExecutePendingCommandInput) => ({
-      success: true,
-      command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '用户确认删除。' } as never,
-      message: '已删除。',
-      summary: '删除看东方',
-    }))
+    const executePendingCommand = vi.fn(async (_input: RuntimeExecutePendingCommandInput) => {
+      expect(getAtomicCapabilities().getItem('item-1')?.programName).toBe('看东方')
+      return {
+        success: true,
+        command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '用户确认删除。' } as never,
+        message: '已删除。',
+        summary: '删除看东方',
+      }
+    })
     const runtime = createRuntime(async () => messageDecision(), executePendingCommand)
     const first = await runtime.submitInstruction({
       ...baseSubmitInput('查询当前播单'),
@@ -276,6 +284,56 @@ describe('AgentServerRuntime migration boundary', () => {
     expect(result.session.formalPlaylistItemCount).toBe(0)
     expect(result.session.formalPlaylistVersion).not.toBe(first.session.formalPlaylistVersion)
     expect(runtime.getSessionEvents(first.sessionId).some((event) => event.type === 'formal_write')).toBe(true)
+  })
+
+  it('blocks confirmed writes when the foreground playlist version no longer matches the server session', async () => {
+    const executePendingCommand = vi.fn(async (_input: RuntimeExecutePendingCommandInput) => ({
+      success: true,
+      command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '用户确认删除。' } as never,
+      message: '已删除。',
+      summary: '删除看东方',
+    }))
+    const runtime = createRuntime(async () => messageDecision(), executePendingCommand)
+    const first = await runtime.submitInstruction({
+      ...baseSubmitInput('删除看东方'),
+      currentSchedule: [{
+        id: 'item-1',
+        programName: '看东方',
+        programCode: 'news-1',
+        startTime: '2026-03-25T09:00:00',
+        endTime: '2026-03-25T09:30:00',
+        duration: 1800,
+        programType: 'news',
+      }],
+    })
+
+    const staleForegroundVersion = 'formal_foreground_changed'
+    const result = await runtime.executePendingCommand({
+      pendingCommand: {
+        command: { action: 'delete', data: { itemId: 'item-1' }, reasoning: '用户确认删除。' } as never,
+        summary: '删除看东方',
+        reasoning: '用户确认删除。',
+      },
+      scheduleDate: '2026-03-25',
+      channelId: 'rotation',
+      expectedPlaylistVersion: staleForegroundVersion,
+      currentSchedule: [{
+        id: 'item-2',
+        programName: '新插入节目',
+        programCode: 'news-2',
+        startTime: '2026-03-25T09:30:00',
+        endTime: '2026-03-25T10:00:00',
+        duration: 1800,
+        programType: 'news',
+      }],
+    }, first.sessionId)
+
+    expect(executePendingCommand).not.toHaveBeenCalled()
+    expect(result.result).toMatchObject({
+      success: false,
+      error: 'formal_playlist_version_conflict',
+    })
+    expect(result.session.formalPlaylistVersion).toBe(first.session.formalPlaylistVersion)
   })
 
   it('records material evidence from ReAct observations as server events', async () => {
