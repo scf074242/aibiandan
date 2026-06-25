@@ -202,6 +202,16 @@ describe('RuntimeSchedulingDataGateway', () => {
       userInput: '把9点的节目整体后移30分钟',
       channelId: 'dragon',
       date,
+      interpretation: {
+        intent: 'move',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetTime: '09:00:00',
+          offsetSeconds: 1800,
+          direction: 'forward',
+        },
+      },
     })
 
     expect(result.status).toBe('executed')
@@ -311,6 +321,15 @@ describe('RuntimeSchedulingDataGateway', () => {
       userInput: '在9点插入东方新闻',
       channelId: 'dragon',
       date,
+      interpretation: {
+        intent: 'insert',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetTime: '09:00:00',
+          programHint: '东方新闻',
+        },
+      },
     })
 
     expect(result.status).toBe('needs_confirmation')

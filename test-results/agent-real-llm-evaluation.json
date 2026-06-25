@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-06-19T13:04:23.608Z",
+  "generatedAt": "2026-06-24T17:49:59.421Z",
   "status": "skipped",
   "config": {
     "runRequested": false,
     "strict": false,
-    "apiKeyPresent": false,
-    "apiKeyUsable": false,
+    "apiKeyPresent": true,
+    "apiKeyUsable": true,
     "model": "deepseek-ai/DeepSeek-V4-Flash",
     "baseURL": "https://api.siliconflow.cn/v1",
     "skipReason": "RUN_AGENT_REAL_LLM_EVAL is not set to 1."

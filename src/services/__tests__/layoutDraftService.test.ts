@@ -193,51 +193,48 @@ describe('LayoutDraftService', () => {
     ]))
   })
 
-  it('在回退生成时保留自由业务短语标签', async () => {
+  it('模型不可用时不会本地生成自由业务短语草案', async () => {
     const service = new LayoutDraftService({
       chat: vi.fn(async () => {
         throw new Error('mock llm unavailable')
       }),
     } as never)
 
-    const spec = await service.generateSpec({
+    await expect(service.generateSpec({
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
       userInput: '不参考当前版面参考，下午编入下午剧场节目',
+    })).rejects.toMatchObject({
+      llmFailure: {
+        stage: 'layout_draft_generate',
+        canRetry: true,
+      },
     })
-
-    expect(spec.coverage).toEqual({
-      start: '13:00:00',
-      end: '18:00:00',
-    })
-    expect(spec.segments).toHaveLength(1)
-    expect(spec.segments[0]?.label).toBe('下午剧场')
-    expect(spec.segments[0]?.programType).toBe('drama')
-    expect(spec.segments[0]?.queryHints).toContain('下午剧场')
   })
 
-  it('在回退微调时能删除命中的版面时段', async () => {
+  it('模型不可用时不会本地删除命中的版面时段', async () => {
     const service = new LayoutDraftService({
       chat: vi.fn(async () => {
         throw new Error('mock llm unavailable')
       }),
     } as never)
 
-    const spec = await service.refineSpec({
+    await expect(service.refineSpec({
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
       userInput: '去掉23点的两说',
       currentDraft: createDraft(),
+    })).rejects.toMatchObject({
+      llmFailure: {
+        stage: 'layout_draft_refine',
+        canRetry: true,
+      },
     })
-
-    expect(spec.segments.map((segment) => segment.label)).not.toContain('两说')
-    expect(spec.segments.map((segment) => `${segment.startTime}-${segment.endTime}`)).toContain('22:30:00-23:00:00')
-    expect(spec.segments.map((segment) => `${segment.startTime}-${segment.endTime}`)).toContain('23:30:00-23:59:59')
   })
 
-  it('删除草案时段时不会把草案泛称当作栏目名', async () => {
+  it('删除草案时段也必须由模型返回更新后的草案', async () => {
     const chat = vi.fn(async () => {
       throw new Error('mock llm unavailable')
     })
@@ -245,18 +242,19 @@ describe('LayoutDraftService', () => {
       chat,
     } as never)
 
-    const spec = await service.refineSpec({
+    await expect(service.refineSpec({
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
       userInput: '删除22点的草案',
       currentDraft: createDraft(),
+    })).rejects.toMatchObject({
+      llmFailure: {
+        stage: 'layout_draft_refine',
+        canRetry: true,
+      },
     })
-
-    expect(chat).not.toHaveBeenCalled()
-    expect(spec.segments.map((segment) => segment.label)).not.toContain('今晚')
-    expect(spec.segments.map((segment) => `${segment.startTime}-${segment.endTime}`)).not.toContain('22:00:00-22:30:00')
-    expect(spec.segments.map((segment) => `${segment.startTime}-${segment.endTime}`)).toContain('22:30:00-23:00:00')
+    expect(chat).toHaveBeenCalledTimes(1)
   })
 
   it('短句微调没有显式新时间时不会采纳 LLM 扩大的覆盖范围', async () => {
@@ -287,7 +285,7 @@ describe('LayoutDraftService', () => {
       chat,
     } as never)
 
-    const spec = await service.refineSpec({
+    await expect(service.refineSpec({
       channelId: 'dragon',
       channelName: '东方卫视',
       date: '2026-03-25',
@@ -296,20 +294,14 @@ describe('LayoutDraftService', () => {
       coverage: { start: '14:00:00', end: '15:00:00' },
       semanticLabel: '预热',
       programTypeHint: 'news_magazine',
+    })).rejects.toMatchObject({
+      llmFailure: {
+        stage: 'layout_draft_refine',
+        canRetry: true,
+      },
     })
 
     expect(chat).toHaveBeenCalledTimes(1)
-    expect(spec.coverage).toEqual({
-      start: '14:00:00',
-      end: '15:00:00',
-    })
-    expect(spec.segments).toHaveLength(1)
-    expect(spec.segments[0]).toMatchObject({
-      label: '预热',
-      startTime: '14:00:00',
-      endTime: '15:00:00',
-      programType: 'news_magazine',
-    })
   })
 
   it('需要模型拆结构的草案生成超时时不会悄悄回退成成功草案', async () => {
@@ -328,6 +320,40 @@ describe('LayoutDraftService', () => {
       llmFailure: {
         stage: 'layout_draft_generate',
         reason: 'timeout',
+        canRetry: true,
+      },
+    })
+  })
+
+  it('用户明确要求拆成多段时不会接受单段 LLM 结果', async () => {
+    const service = new LayoutDraftService({
+      chat: vi.fn(async () => ({
+        content: JSON.stringify({
+          coverage: { start: '00:00:00', end: '02:00:00' },
+          segments: [
+            {
+              id: 'only-one',
+              label: '世界杯北美球队介绍',
+              startTime: '00:00:00',
+              endTime: '02:00:00',
+              programType: 'news_magazine',
+              queryHints: ['世界杯', '北美球队'],
+            },
+          ],
+        }),
+      })),
+    } as never)
+
+    await expect(service.generateSpec({
+      channelId: 'rotation',
+      channelName: '轮播单',
+      date: '2026-03-25',
+      playlistType: 'rotation',
+      targetDurationSeconds: 2 * 60 * 60,
+      userInput: '拆分成10个草案片段，每个片段都是一个北美球队',
+    })).rejects.toMatchObject({
+      llmFailure: {
+        stage: 'layout_draft_generate',
         canRetry: true,
       },
     })

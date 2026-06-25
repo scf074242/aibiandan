@@ -159,6 +159,9 @@ describe('foreground workspace state', () => {
     }, 'rotation:playlist-rotation-1')).toBe(false)
     expect(isForegroundWorkspaceMessageVisible({
       workspaceKey: null,
-    }, 'rotation:playlist-rotation-1')).toBe(true)
+    }, 'rotation:playlist-rotation-1')).toBe(false)
+    expect(isForegroundWorkspaceMessageVisible({
+      workspaceKey: null,
+    }, 'none')).toBe(true)
   })
 })

@@ -66,7 +66,7 @@ const reactTaskRun: ReactTaskRun = {
     maxTurns: 4,
     batchSize: 5,
   },
-  stopCondition: '素材方向明确后进入草案确认',
+  stopCondition: '素材方向明确后更新草案',
   steps: [],
   observations: [
     {
@@ -219,6 +219,74 @@ describe('AgentServerRuntime migration boundary', () => {
     expect(second.contextPackage?.reactTask.active).toBe(true)
     expect(capturedInputs[1].activeReactTaskRun?.id).toBe('react-task-1')
     expect(runtime.getSessionEvents(first.sessionId).some((event) => event.type === 'react_task')).toBe(true)
+  })
+
+  it('reuses server pending context for natural follow-up in the same workspace', async () => {
+    const pendingInsertContext: RuntimePendingAtomicContext = {
+      action: 'insert',
+      phase: 'recommending_insert',
+      summary: '待确认插入节目',
+      reasoning: '候选较多，需要用户选择。',
+      originalUserInput: '在9点插入节目看东方',
+      collectedUserInput: '在9点插入节目看东方',
+      slots: {
+        targetTime: '09:00:00',
+        programName: '看东方',
+      },
+      missingFields: ['selection'],
+      followUpQuestion: '请选择要插入的候选。',
+      targetCandidates: [],
+      agentPendingTask: {
+        id: 'pending-agent-insert-1',
+        intent: 'insert',
+        phase: 'needs_selection',
+        originalInput: '在9点插入节目看东方',
+        collectedInput: '在9点插入节目看东方',
+        collectedSlots: {
+          targetTime: { value: '09:00:00', source: 'user' },
+          programHint: { value: '看东方', source: 'user' },
+        },
+        missingSlots: ['candidateId'],
+        allowedActions: ['continue_pending', 'select_candidate', 'confirm', 'cancel_pending', 'reject'],
+        attemptCount: 0,
+        maxAttempts: 3,
+        updatedAt: '2026-03-25T00:00:00.000Z',
+        createdAt: '2026-03-25T00:00:00.000Z',
+      },
+      attemptCount: 0,
+      createdAt: '2026-03-25T00:00:00.000Z',
+      updatedAt: '2026-03-25T00:00:00.000Z',
+    }
+    const capturedInputs: RuntimeSubmitInput[] = []
+    const runtime = createRuntime(async (input) => {
+      capturedInputs.push(input)
+      return capturedInputs.length === 1
+        ? {
+            kind: 'pending_atomic_context',
+            feedback: {
+              content: '我找到了多个可插入候选，需要你确认。',
+              processType: 'selection',
+              processTypeLabel: '待确认',
+            },
+            pendingAtomicContext: pendingInsertContext,
+          }
+        : messageDecision('继续处理。')
+    })
+
+    const first = await runtime.submitInstruction(baseSubmitInput('在9点插入节目看东方'))
+    await runtime.submitInstruction({
+      ...baseSubmitInput('就你推荐的那个'),
+      pendingAtomicContext: undefined,
+    }, first.sessionId)
+
+    expect(capturedInputs[1].pendingAtomicContext).toMatchObject({
+      action: 'insert',
+      slots: {
+        targetTime: '09:00:00',
+        programName: '看东方',
+      },
+    })
+    expect(capturedInputs[1].foregroundContextPackage?.scenario).toBe('atomic')
   })
 
   it('can stop a server-owned ReAct task without requiring a foreground rollback', async () => {

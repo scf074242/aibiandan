@@ -3,7 +3,9 @@ import { AtomicCommandCapability } from './atomicCommandCapability'
 import { buildAgentAuditSummary } from './agentAuditSummary'
 import { auditSchedulingAgentOperationalReadiness, auditSchedulingAgentV1Readiness } from './agentReadinessAudit'
 import { buildPendingLlmContext } from './agentSession'
-import { DefaultAgentCandidateJudge } from './candidateJudge'
+import { LlmAgentCandidateJudge } from './candidateJudge'
+import type { LLMClient } from '@/services/llm/llmClient'
+import { getLLMClient } from '@/services/llm/llmClient'
 import { CapabilityRegistry } from './capabilityRegistry'
 import { buildAgentLlmContextPackage } from './llmContextPackage'
 import { AgentPlaylistPolicy, type AgentCommandPolicy } from './playlistPolicy'
@@ -23,13 +25,16 @@ import type {
   SchedulingContextSourceContext,
   SchedulingContext,
   SchedulingDataGateway,
+  AgentTraceStep,
 } from './types'
 
 export interface SchedulingAgentRuntimeOptions {
   dataGateway: SchedulingDataGateway
   candidateJudge?: AgentCandidateJudge
+  llmClient?: Pick<LLMClient, 'chat'>
   intentInterpreter?: AgentIntentInterpreter
   capabilities?: AgentCapability[]
+  onTraceStep?: (step: AgentTraceStep) => void
 }
 
 export interface SchedulingAgentRuntimeCapabilitySummary {
@@ -59,13 +64,16 @@ export class SchedulingAgentRuntime {
   private readonly dataGateway: SchedulingDataGateway
   private readonly candidateJudge: AgentCandidateJudge
   private readonly intentInterpreter?: AgentIntentInterpreter
+  private readonly onTraceStep?: (step: AgentTraceStep) => void
   private readonly registry = new CapabilityRegistry()
   private readonly playlistPolicy = new AgentPlaylistPolicy()
 
   constructor(options: SchedulingAgentRuntimeOptions) {
     this.dataGateway = options.dataGateway
-    this.candidateJudge = options.candidateJudge ?? new DefaultAgentCandidateJudge()
+    this.candidateJudge = options.candidateJudge
+      ?? new LlmAgentCandidateJudge({ llmClient: options.llmClient ?? getLLMClient() })
     this.intentInterpreter = options.intentInterpreter
+    this.onTraceStep = options.onTraceStep
     const capabilities = options.capabilities ?? [new AtomicCommandCapability()]
     capabilities.forEach((capability) => this.registry.register(capability))
   }
@@ -142,8 +150,8 @@ export class SchedulingAgentRuntime {
         {
           id: 'llm_intent_contract',
           appliesTo: ['move', 'batch_move', 'insert', 'replace', 'delete', 'batch_delete', 'query', 'validate'],
-          mode: 'reroute',
-          description: 'LLM interpretation must return structured intent, confidence, slots, and only pending actions allowed by the current pending task; low-confidence output falls back to deterministic capability handling.',
+          mode: 'block',
+          description: 'LLM interpretation must return structured intent, confidence, slots, and only pending actions allowed by the current pending task; low-confidence or failed output stops before capability execution.',
         },
         {
           id: 'capability_route_conflict',
@@ -219,7 +227,7 @@ export class SchedulingAgentRuntime {
   }
 
   async submit(input: AgentSubmitInput): Promise<AgentResult> {
-    const trace = new DefaultAgentTraceRecorder()
+    const trace = new DefaultAgentTraceRecorder(this.onTraceStep)
     trace.record('idle', '接收 agent 指令', {
       channelId: input.channelId,
       date: input.date,
@@ -227,6 +235,28 @@ export class SchedulingAgentRuntime {
     })
 
     const effectiveInput = await this.buildEffectiveInput(input, trace)
+    if (this.intentInterpreter && !effectiveInput.interpretation) {
+      trace.record('failed', 'LLM interpretation did not produce a structured command; capability fallback is disabled.', {
+        userInput: effectiveInput.userInput,
+        pendingIntent: effectiveInput.pendingTask?.intent,
+      })
+      return {
+        status: 'failed',
+        input: effectiveInput,
+        decision: {
+          constraintReport: {
+            ok: false,
+            issues: [{
+              code: 'llm_intent_unavailable',
+              severity: 'critical',
+              message: '这次模型没有正常理解这条指令，系统不会用本地关键词规则代替模型继续执行。',
+            }],
+          },
+        },
+        explanation: '这次模型没有正常理解这条指令，我没有改动播单。你可以直接说“重试”，或者把时间、节目名再说一遍。',
+        trace: trace.getTrace(),
+      }
+    }
     const capabilityMatches = this.registry.resolveAll(effectiveInput)
     if (capabilityMatches.length === 0) {
       trace.record('needs_clarification', '没有匹配到可处理的 capability', {
@@ -348,15 +378,22 @@ export class SchedulingAgentRuntime {
 
     try {
       trace.record('understanding', '调用 Agent intent interpreter 生成结构化意图', {
-        source: 'llm_first',
+        source: 'llm_only',
         ...buildLlmCallTrace('attempted'),
       })
       const interpreterInput = await this.buildInterpreterInput(input, trace)
       const interpretation = await this.intentInterpreter.interpret(interpreterInput)
       if (!interpretation?.intent) {
-        trace.record('understanding', 'Agent intent interpreter 未返回可执行意图，回退到能力包解析', {
+        trace.record('understanding', 'Agent intent interpreter 未返回可执行意图，本轮停止，不走本地关键词兜底', {
           interpretation,
           ...buildLlmCallTrace('rejected', 'no_structured_intent'),
+        })
+        return input
+      }
+      if (interpretation.source === 'llm' && !this.hasUserReadableLlmUnderstanding(interpretation)) {
+        trace.record('understanding', 'Agent intent interpreter 未返回可读理解说明，本轮停止，不走本地话术兜底', {
+          interpretation,
+          ...buildLlmCallTrace('rejected', 'missing_user_readable_understanding'),
         })
         return input
       }
@@ -364,6 +401,7 @@ export class SchedulingAgentRuntime {
         intent: interpretation.intent,
         confidence: interpretation.confidence,
         source: interpretation.source,
+        contextMode: interpretation.contextMode,
         slots: interpretation.slots,
         assistantFeedback: interpretation.assistantFeedback,
         streamingHint: interpretation.streamingHint,
@@ -374,12 +412,24 @@ export class SchedulingAgentRuntime {
         interpretation,
       }
     } catch (error) {
-      trace.record('understanding', 'Agent intent interpreter 调用失败，回退到能力包解析', {
+      trace.record('understanding', 'Agent intent interpreter 调用失败，本轮停止，不走本地关键词兜底', {
         error: error instanceof Error ? error.message : String(error),
         ...buildLlmCallTrace('failed', error instanceof Error ? error.message : String(error)),
       })
       return input
     }
+  }
+
+  private hasUserReadableLlmUnderstanding(interpretation: NonNullable<AgentSubmitInput['interpretation']>): boolean {
+    const candidates = [interpretation.assistantFeedback, interpretation.reasoning]
+      .map((value) => typeof value === 'string' ? value.trim() : '')
+      .filter(Boolean)
+    return candidates.some((value) => {
+      if (value.length < 4) return false
+      if (/^(?:\{|\[)/u.test(value)) return false
+      if (/intent|slots|confidence|pendingAction|taskPlan|runtime|JSON/i.test(value)) return false
+      return /[\u4e00-\u9fa5]/u.test(value)
+    })
   }
 
   private async buildInterpreterInput(

@@ -14,7 +14,7 @@
 
 - `ChatPanel` 负责用户输入、消息展示、pending 面板、上传草案、确认/取消/继续。
 - `schedulingAgentRuntimeFacade` 承接正式前台运行入口。
-- `agentPlanner` 和 intent interpreter 负责 LLM-first 理解。
+- `agentPlanner` 和 intent interpreter 负责 LLM-only 理解。
 - `reactTaskRuntime` 保存 ReAct 任务的轮次、观察和失败恢复状态。
 - `demoRuntimeFacade` 内仍承载大量实际业务运行逻辑，需要逐步拆出。
 - `atomicCapabilities` 负责前台原子读写和批量替换。
@@ -146,7 +146,7 @@
 完成标志：
 
 - 前台没有可见 API key。
-- LLM-first 仍然成立，pending 快捷确认之外不回退到本地关键词分类器。
+- LLM-only 仍然成立，pending 快捷确认之外不回退到本地关键词分类器。
 
 ### 阶段 3：ReAct runtime 迁移
 

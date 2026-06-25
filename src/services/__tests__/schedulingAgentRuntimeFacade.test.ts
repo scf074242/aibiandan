@@ -48,7 +48,7 @@ describe('SchedulingAgentRuntimeFacade formal agent boundary', () => {
             objective: '先核验金山区热门景点素材，再决定是否更新草案',
             maxTurns: 3,
             batchSize: 4,
-            stopCondition: '素材方向明确后进入草案确认，不直接写正式播单',
+            stopCondition: '素材方向明确后更新草案，不直接写正式播单',
             nextActions: [
               {
                 type: 'research_check',
@@ -231,6 +231,8 @@ describe('SchedulingAgentRuntimeFacade formal agent boundary', () => {
     const payload = JSON.parse(capturedMessages[1]?.content ?? '{}')
 
     expect(systemPrompt).toContain('foregroundContext.activeReactTask')
+    expect(systemPrompt).toContain('没有给具体节目，也没有给明确位置，不要返回裸 atomic_command')
+    expect(systemPrompt).toContain('不要擅自把缺少位置的轮播插入理解成“队列末尾”')
     expect(payload.foregroundContext.activeReactTask).toMatchObject({
       id: 'react-task-retry',
       status: 'failed',
@@ -260,7 +262,7 @@ describe('SchedulingAgentRuntimeFacade formal agent boundary', () => {
         objective: '核验金山区景点素材',
         maxTurns: 99,
         batchSize: 99,
-        stopCondition: '需要用户确认后才更新草案',
+        stopCondition: '素材方向明确后直接更新草案',
         nextActions: [
           {
             type: 'research_check',
@@ -275,7 +277,7 @@ describe('SchedulingAgentRuntimeFacade formal agent boundary', () => {
     expect(run.status).toBe('acting')
     expect(run.limits).toEqual({ maxTurns: 5, batchSize: 10 })
     expect(run.steps).toHaveLength(1)
-    expect(run.stopCondition).toBe('需要用户确认后才更新草案')
+    expect(run.stopCondition).toBe('素材方向明确后直接更新草案')
   })
 
   it('keeps ReAct continuation deliberately small: next actions, one retry, and turn limit', () => {

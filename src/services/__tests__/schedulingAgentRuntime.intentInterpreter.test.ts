@@ -100,7 +100,7 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     expect(result.trace.some((step) => step.label.includes('interpreter'))).toBe(true)
   })
 
-  it('keeps LLM-first delete intent but recovers explicit target time before target lookup', async () => {
+  it('keeps LLM-only delete intent and does not recover a missed target time locally', async () => {
     const dataGateway = buildGateway([])
     const interpreter: AgentIntentInterpreter = {
       interpret: vi.fn(async () => ({
@@ -124,19 +124,13 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     })
 
     expect(interpreter.interpret).toHaveBeenCalledTimes(1)
-    expect(result.status).toBe('blocked')
-    expect(result.decision.pendingTask).toBeUndefined()
-    expect(result.decision.constraintReport?.issues[0]).toMatchObject({
-      code: 'target_not_found',
-      severity: 'critical',
+    expect(result.status).toBe('needs_clarification')
+    expect(result.decision.command).toBeUndefined()
+    expect(result.decision.pendingTask).toMatchObject({
+      intent: 'delete',
+      phase: 'needs_clarification',
+      missingSlots: ['targetTime'],
     })
-    expect(result.trace).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        detail: expect.objectContaining({
-          targetTime: '09:00:00',
-        }),
-      }),
-    ]))
   })
 
   it('uses structured absolute move target time without adding local parsing rules', async () => {
@@ -530,7 +524,7 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
         phase: 'needs_clarification',
         collectedSlotKeys: ['targetProgramName'],
         missingSlots: ['targetItemId'],
-        allowedActions: ['continue_pending', 'start_new_task', 'cancel_pending'],
+        allowedActions: ['start_new_task', 'cancel_pending'],
         attemptCount: 0,
         maxAttempts: 3,
         targetOptionCount: 2,
@@ -649,7 +643,7 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     expect(context.scheduleItems.map((item) => item.id)).toEqual(['item-morning-anchor-1'])
   })
 
-  it('falls back to capability parsing when the interpreter fails', async () => {
+  it('blocks instead of falling back to capability parsing when the interpreter fails', async () => {
     const dataGateway = buildGateway([buildItem()])
     const interpreter: AgentIntentInterpreter = {
       interpret: vi.fn(async () => {
@@ -668,19 +662,13 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     })
 
     expect(interpreter.interpret).toHaveBeenCalledTimes(1)
-    expect(result.status).toBe('executed')
-    expect(result.decision.intent).toBe('move')
-    expect(result.decision.auditSummary?.llmUsage).toMatchObject({
-      callsAttempted: 0,
-      callsSucceeded: 0,
-      callsRejected: 0,
-      callsFailed: 0,
-      calls: [],
-    })
+    expect(result.status).toBe('failed')
+    expect(result.decision.constraintReport?.issues[0]?.code).toBe('llm_intent_unavailable')
+    expect(result.explanation).toContain('没有改动播单')
     expect(result.trace.some((step) => String(step.detail?.error ?? '').includes('mock interpreter unavailable'))).toBe(true)
   })
 
-  it('records failed LLM interpreter calls separately from deterministic fallback execution', async () => {
+  it('records failed LLM interpreter calls and blocks without deterministic fallback execution', async () => {
     const dataGateway = buildGateway([buildItem()])
     const pendingTask = createPendingTask({
       intent: 'insert',
@@ -710,23 +698,49 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
       pendingTask,
     })
 
-    expect(result.status).toBe('needs_clarification')
-    expect(result.decision.intent).toBe('insert')
-    expect(result.decision.auditSummary?.llmUsage).toMatchObject({
-      callsAttempted: 1,
-      callsSucceeded: 0,
-      callsRejected: 0,
-      callsFailed: 1,
-      calls: [
-        { stage: 'intent_interpreter', status: 'attempted' },
-        { stage: 'intent_interpreter', status: 'failed', reason: 'llm unavailable' },
-      ],
+    expect(result.status).toBe('failed')
+    expect(result.decision.constraintReport?.issues[0]?.code).toBe('llm_intent_unavailable')
+    expect(result.explanation).toContain('没有改动播单')
+    expect(result.trace.some((step) => (
+      step.detail?.llmCall
+      && (step.detail.llmCall as { status?: string }).status === 'failed'
+    ))).toBe(true)
+  })
+
+  it('blocks when the LLM returns structure but no editor-readable understanding', async () => {
+    const dataGateway = buildGateway([], [buildCandidate()])
+    const interpreter: AgentIntentInterpreter = {
+      usesLlm: true,
+      interpret: vi.fn(async () => ({
+        intent: 'insert',
+        confidence: 0.92,
+        source: 'llm',
+        slots: {
+          targetTime: '10:00:00',
+          programHint: 'Morning News',
+        },
+        reasoning: 'intent=insert slots.targetTime=10:00 slots.programHint=Morning News',
+      })),
+    }
+    const runtime = new SchedulingAgentRuntime({
+      dataGateway,
+      intentInterpreter: interpreter,
     })
-    expect(result.decision.auditSummary?.keyPoints).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('LLM 调用：尝试=1，成功=0，拒绝=0，失败=1'),
-      ]),
-    )
+
+    const result = await runtime.submit({
+      userInput: '10点插入Morning News',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(interpreter.interpret).toHaveBeenCalledTimes(1)
+    expect(result.status).toBe('failed')
+    expect(result.decision.constraintReport?.issues[0]?.code).toBe('llm_intent_unavailable')
+    expect(result.explanation).toContain('没有改动播单')
+    expect(result.trace.some((step) => (
+      step.detail?.llmCall
+      && (step.detail.llmCall as { reason?: string }).reason === 'missing_user_readable_understanding'
+    ))).toBe(true)
   })
 
   it('passes pending structured context to the interpreter and consumes follow-up slots', async () => {
@@ -843,15 +857,19 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
       pendingTask,
     })
 
-    expect(result.status).toBe('executed')
-    expect(result.decision.command).toMatchObject({
+    expect(result.status).toBe('needs_clarification')
+    expect(result.decision.command).toBeUndefined()
+    expect(result.decision.pendingTask).toMatchObject({
       intent: 'insert',
-      candidateId: 'candidate-shanghai-news',
-      candidateName: '上海早新闻',
-      insertTime: '2026-03-25T16:00:00+08:00',
-    })
-    expect(result.decision.command).not.toMatchObject({
-      candidateName: '航吧',
+      phase: 'needs_clarification',
+      collectedSlots: {
+        targetTime: expect.objectContaining({
+          value: '16:00:00',
+        }),
+        programHint: expect.objectContaining({
+          value: '航吧',
+        }),
+      },
     })
   })
 
@@ -1053,6 +1071,7 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
           confidence: 0.92,
           queryKind: 'program_lookup',
           keyword: 'Morning Anchor',
+          assistantFeedback: '我理解你想查询《Morning Anchor》在当前轮播单里的位置。',
         }),
       }
     })
@@ -1138,7 +1157,138 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     expect(result.trace.some((step) => step.label.includes('compact evidence package'))).toBe(true)
   })
 
-  it('prompts the LLM to extract programme-name targets for Chinese move and delete commands', async () => {
+  it('uses the unified contextual interpreter for precise atomic commands', async () => {
+    let systemPrompt = ''
+    let userPayload: Record<string, unknown> | undefined
+    const chat = vi.fn(async (messages) => {
+      systemPrompt = String(messages.find((message: { role: string }) => message.role === 'system')?.content ?? '')
+      const userMessage = messages.find((message: { role: string }) => message.role === 'user')
+      userPayload = JSON.parse(String(userMessage?.content ?? '{}'))
+      return {
+        content: JSON.stringify({
+          intent: 'insert',
+          confidence: 0.94,
+          slots: {
+            targetTime: '09:00:00',
+            programHint: '看东方',
+          },
+          assistantFeedback: '我理解你想在9点插入《看东方》，我会先核对候选节目和当前时段。',
+        }),
+      }
+    })
+    const interpreter = new LlmAgentIntentInterpreter({ chat })
+
+    const result = await interpreter.interpret({
+      userInput: '在9点插入节目看东方',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(chat).toHaveBeenCalledTimes(1)
+    expect(systemPrompt).toContain('broadcast scheduling agent that supports both TV playlists and rotation playlists')
+    expect(systemPrompt).toContain('evidencePackage.playlistSemantics')
+    expect(systemPrompt).not.toContain('atomic-command context interpreter')
+    expect(userPayload).toMatchObject({
+      userInput: '在9点插入节目看东方',
+    })
+    expect(result).toMatchObject({
+      intent: 'insert',
+      confidence: 0.94,
+      contextMode: 'scenario_context',
+      slots: {
+        targetTime: '09:00:00',
+        programHint: '看东方',
+      },
+    })
+  })
+
+  it('drops premature completion wording from LLM drafts instead of rewriting it locally', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        intent: 'insert',
+        confidence: 0.94,
+        slots: {
+          targetTime: '09:00:00',
+          programHint: '看东方',
+        },
+        assistantFeedback: '好的，已在9点插入节目《看东方》。',
+      }),
+    }))
+    const interpreter = new LlmAgentIntentInterpreter({ chat })
+
+    const result = await interpreter.interpret({
+      userInput: '在9点插入节目看东方',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(result?.assistantFeedback).toBeUndefined()
+  })
+
+  it('handles composite commands in the same contextual pass', async () => {
+    const systemPrompts: string[] = []
+    const chat = vi.fn(async (messages) => {
+      systemPrompts.push(String(messages.find((message: { role: string }) => message.role === 'system')?.content ?? ''))
+      return {
+        content: JSON.stringify({
+          intent: 'insert',
+          confidence: 0.91,
+          slots: {
+            targetTime: '09:00:00',
+            programHint: '看东方',
+          },
+          taskPlanDraft: {
+            isComposite: true,
+            goal: '插入看东方并后移后续节目',
+            stages: [
+              {
+                type: 'atomic',
+                action: 'insert',
+                target: {
+                  targetTime: '09:00:00',
+                  replacementHint: '看东方',
+                },
+                summary: '在9点插入看东方',
+              },
+              {
+                type: 'atomic',
+                action: 'move',
+                target: {
+                  rangeStart: '09:00:00',
+                },
+                summary: '后续节目按需后移',
+              },
+            ],
+          },
+          assistantFeedback: '我理解这是先插入《看东方》，再处理后续节目位置，我会按顺序核对。',
+        }),
+      }
+    })
+    const interpreter = new LlmAgentIntentInterpreter({ chat })
+
+    const result = await interpreter.interpret({
+      userInput: '9点插入看东方，其余节目后移',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(chat).toHaveBeenCalledTimes(1)
+    expect(systemPrompts[0]).toContain('broadcast scheduling agent that supports both TV playlists and rotation playlists')
+    expect(systemPrompts[0]).not.toContain('atomic-command context interpreter')
+    expect(result).toMatchObject({
+      intent: 'insert',
+      contextMode: 'scenario_context',
+      taskPlanDraft: {
+        isComposite: true,
+        stages: [
+          expect.objectContaining({ type: 'atomic', action: 'insert' }),
+          expect.objectContaining({ type: 'atomic', action: 'move' }),
+        ],
+      },
+    })
+  })
+
+  it('prompts the full LLM to extract programme-name targets for Chinese move and delete commands', async () => {
     let systemPrompt = ''
     const chat = vi.fn(async (messages) => {
       systemPrompt = String(messages.find((message: { role: string }) => message.role === 'system')?.content ?? '')
@@ -1156,13 +1306,14 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     const interpreter = new LlmAgentIntentInterpreter({ chat })
 
     const result = await interpreter.interpret({
-      userInput: '把《看东方》移到 10 点',
+      userInput: '参考草案后，把《看东方》移到 10 点',
       channelId: 'dragon',
       date,
     })
 
     expect(result).toMatchObject({
       intent: 'move',
+      contextMode: 'scenario_context',
       slots: {
         targetProgramName: '看东方',
         newStartTime: '10:00:00',
@@ -1350,6 +1501,7 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
         intent: 'query',
         confidence: 0.93,
         queryKind: 'schedule_summary',
+        assistantFeedback: '我理解你现在想先查看今天已经排了什么节目，这会作为新的查询处理。',
       }),
     }))
     const interpreter = new LlmAgentIntentInterpreter({ chat })
@@ -2117,8 +2269,8 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
 
     expect(result.status).toBe('needs_selection')
     expect(result.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
-      source: 'fallback',
+      method: 'candidate_judge_llm',
+      source: 'none',
       candidateOptionIds: ['candidate-low-rating', 'candidate-high-rating'],
     })
     expect(result.decision.pendingTask).toMatchObject({
@@ -2181,7 +2333,7 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
 
     expect(result.status).toBe('needs_confirmation')
     expect(result.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
+      method: 'candidate_judge_llm',
       source: 'fallback',
       selectedCandidateId: 'candidate-ready',
       professionalAssessment: {
@@ -2303,8 +2455,8 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
 
     expect(result.status).toBe('needs_selection')
     expect(result.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
-      source: 'fallback',
+      method: 'candidate_judge_llm',
+      source: 'none',
       candidateOptionIds: ['candidate-morning-drama', 'candidate-morning-news'],
     })
     expect(result.decision.pendingTask).toMatchObject({
@@ -2385,8 +2537,8 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
 
     expect(result.status).toBe('needs_selection')
     expect(result.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
-      source: 'fallback',
+      method: 'candidate_judge_llm',
+      source: 'none',
       candidateOptionIds: ['candidate-documentary-special', 'candidate-sports-special'],
     })
     expect(result.decision.pendingTask).toMatchObject({
@@ -2455,8 +2607,8 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
 
     expect(result.status).toBe('needs_selection')
     expect(result.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
-      source: 'fallback',
+      method: 'candidate_judge_llm',
+      source: 'none',
       candidateOptionIds: ['candidate-replacement-drama', 'candidate-replacement-news'],
     })
     expect(result.decision.pendingTask).toMatchObject({

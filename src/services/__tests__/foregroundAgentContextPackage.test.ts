@@ -497,6 +497,74 @@ describe('foreground agent context package', () => {
     })
   })
 
+  it('does not turn Agent pending clarification into a foreground review gate', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '就在已插入的看东方节目后',
+      currentWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingWorkspaceKey: 'rotation:playlist-rotation-1',
+      pendingAtomicContext: {
+        action: 'insert',
+        phase: 'clarifying',
+        slots: {
+          programName: '看东方',
+        },
+        missingFields: ['target_time'],
+        summary: '还需要补充插入节目的位置。',
+        agentPendingTask: {
+          taskId: 'pending-agent-insert-position',
+          intent: 'insert',
+          phase: 'needs_clarification',
+          originalInput: '继续插入一个看东方节目',
+          collectedInput: '继续插入一个看东方节目',
+          missingSlots: ['targetTime'],
+          slots: {
+            programName: '看东方',
+          },
+          updatedAt: 1,
+        },
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: false,
+      canUsePendingReview: false,
+      shouldExpire: false,
+    })
+  })
+
+  it('does not turn candidate recommendations into a foreground review gate', () => {
+    const lifecycle = resolvePendingReviewLifecycle({
+      latestUserInput: '换成1点插入',
+      currentWorkspaceKey: 'tv:playlist-tv-1',
+      pendingWorkspaceKey: 'tv:playlist-tv-1',
+      pendingAtomicContext: {
+        action: 'insert',
+        phase: 'recommending_insert',
+        slots: {
+          targetTime: '09:00:00',
+          programName: '看东方',
+        },
+        missingFields: ['candidateId'],
+        summary: '待确认插入节目',
+        reasoning: '候选较多，需要编排员选择。',
+        originalUserInput: '在9点插入节目看东方',
+        collectedUserInput: '在9点插入节目看东方',
+        targetCandidates: [{
+          id: 'candidate-kan-dongfang-111',
+          programName: '看东方第111期：新春特别行动',
+          startTime: '00:00:00',
+          endTime: '01:00:00',
+        }],
+      },
+    })
+
+    expect(lifecycle).toEqual({
+      hasPendingReview: false,
+      canUsePendingReview: false,
+      shouldExpire: false,
+    })
+  })
+
   it('keeps a composite task pending confirmation when the user confirms inside the same workspace', () => {
     const lifecycle = resolvePendingReviewLifecycle({
       latestUserInput: '确认',
@@ -566,7 +634,7 @@ describe('foreground agent context package', () => {
         reasoning: '素材核验后等待用户确认是否只更新草案。',
         originalUserInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
         collectedUserInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
-        followUpQuestion: '需要我把这个方向更新到草案吗？',
+        followUpQuestion: '我可以把这个方向更新到草案。',
         layoutDraftSuggestion: {
           purpose: 'candidate_precheck',
           targetSegmentIndex: 1,
@@ -683,7 +751,7 @@ describe('foreground agent context package', () => {
         reasoning: '素材核验后等待用户确认是否只更新草案。',
         originalUserInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
         collectedUserInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
-        followUpQuestion: '需要我把这个方向更新到草案吗？',
+        followUpQuestion: '我可以把这个方向更新到草案。',
         layoutDraftSuggestion: {
           purpose: 'candidate_precheck',
           targetSegmentIndex: 1,
@@ -776,7 +844,7 @@ describe('foreground agent context package', () => {
     })
   })
 
-  it('does not treat plain confirmation wording as an answer to a candidate-selection review', () => {
+  it('does not treat candidate-selection context as a foreground review even with plain confirmation wording', () => {
     const lifecycle = resolvePendingReviewLifecycle({
       latestUserInput: '确认',
       currentWorkspaceKey: 'tv:playlist-tv-1',
@@ -802,14 +870,13 @@ describe('foreground agent context package', () => {
     })
 
     expect(lifecycle).toEqual({
-      hasPendingReview: true,
+      hasPendingReview: false,
       canUsePendingReview: false,
-      shouldExpire: true,
-      expireReason: 'next_non_answer',
+      shouldExpire: false,
     })
   })
 
-  it('keeps a candidate-selection review only when the user actually selects an option', () => {
+  it('keeps candidate-selection context out of the foreground review lifecycle even when the user selects an option', () => {
     const lifecycle = resolvePendingReviewLifecycle({
       latestUserInput: '选第一个',
       currentWorkspaceKey: 'tv:playlist-tv-1',
@@ -835,8 +902,8 @@ describe('foreground agent context package', () => {
     })
 
     expect(lifecycle).toEqual({
-      hasPendingReview: true,
-      canUsePendingReview: true,
+      hasPendingReview: false,
+      canUsePendingReview: false,
       shouldExpire: false,
     })
   })
@@ -871,7 +938,7 @@ describe('foreground agent context package', () => {
         maxTurns: 3,
         batchSize: 4,
       },
-      stopCondition: '素材方向明确后进入草案确认，不直接写正式播单',
+      stopCondition: '素材方向明确后更新草案，不直接写正式播单',
       steps: [{
         id: 'step-1',
         turn: 1,

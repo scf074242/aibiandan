@@ -139,5 +139,5 @@ const buildAllowedActions = (phase: AgentPendingTask['phase']): AgentPendingActi
   if (phase === 'needs_confirmation') {
     return ['confirm', 'reject', 'start_new_task', 'cancel_pending']
   }
-  return ['continue_pending', 'start_new_task', 'cancel_pending']
+  return ['start_new_task', 'cancel_pending']
 }

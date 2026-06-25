@@ -127,13 +127,13 @@ describe('orchestration demo program library', () => {
 
   it('makes periodic TV programs visibly sequential in title and issue number', () => {
     const kanDongfang111 = orchestrationDemoCandidates.find((candidate) =>
-      candidate.programName === '看东方111期新春特别行动',
+      candidate.programName === '看东方第111期：新春特别行动',
     )
     const noonNews001 = orchestrationDemoCandidates.find((candidate) =>
-      candidate.programName === '午间30分001期午间新闻',
+      candidate.programName === '午间30分第001期：午间新闻',
     )
     const health001 = orchestrationDemoCandidates.find((candidate) =>
-      candidate.programName === '名医话养生001期午后调养篇',
+      candidate.programName === '名医话养生第001期：午后调养篇',
     )
 
     expect(kanDongfang111).toBeTruthy()
@@ -151,23 +151,22 @@ describe('orchestration demo program library', () => {
 
     expect(libraryKanDongfangIssues.map((candidate) => candidate.issueNo)).toEqual(['0111', '0112', '0113'])
     expect(libraryKanDongfangIssues.map((candidate) => candidate.programCode.slice(-4))).toEqual(['0111', '0112', '0113'])
-    expect(libraryKanDongfangIssues.every((candidate) => /^看东方\d+期/.test(candidate.programName))).toBe(true)
+    expect(libraryKanDongfangIssues.every((candidate) => /^[^第]+第\d+期：/.test(candidate.programName))).toBe(true)
     expect(libraryNoonNewsIssues.map((candidate) => candidate.issueNo)).toEqual(['0001', '0002', '0003'])
-    expect(libraryNoonNewsIssues.every((candidate) => /^午间30分\d{3}期/.test(candidate.programName))).toBe(true)
+    expect(libraryNoonNewsIssues.every((candidate) => /^午间30分第\d{3}期：/.test(candidate.programName))).toBe(true)
   })
 
-  it('keeps temporary TV event and guide titles free from forced issue wording', () => {
-    const temporaryTitles = [
-      '发布会现场直播',
-      '城市活动暖场短片',
-      '外场连线预告',
-      '上海现场集锦',
-    ]
+  it('makes recurring event and live-guide program instances distinguishable by issue and topic', () => {
+    const recurringProgramIds = ['G101006', 'G101007', 'G101008', 'G101009', 'G101010']
+    recurringProgramIds.forEach((programId) => {
+      const candidates = orchestrationDemoCandidates
+        .filter((candidate) => candidate.programId === programId)
+        .slice(0, 3)
 
-    temporaryTitles.forEach((title) => {
-      const candidates = orchestrationDemoCandidates.filter((candidate) => candidate.programName === title)
-      expect(candidates.length).toBeGreaterThan(0)
-      expect(candidates.every((candidate) => !/\d+期/.test(candidate.programName))).toBe(true)
+      expect(candidates).toHaveLength(3)
+      expect(candidates.map((candidate) => candidate.issueNo)).toEqual(['0111', '0112', '0113'])
+      expect(candidates.every((candidate) => /第\d{4}期：.+/.test(candidate.programName))).toBe(true)
+      expect(new Set(candidates.map((candidate) => candidate.programName)).size).toBe(candidates.length)
     })
   })
 

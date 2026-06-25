@@ -222,7 +222,7 @@ export const foregroundAgentScenarioRegressionCases: ForegroundAgentScenarioRegr
     playlist: 'mixed',
     userRequest: '继续按刚才的要求处理',
     preconditions: ['模型请求超时或失败', '本轮还没有写草案或正式播单'],
-    expectedEditorExperience: ['说明没有修改草案或播单', '用户可以说重试或继续恢复上一条需求'],
+    expectedEditorExperience: ['说明没有修改草案或播单', '用户可以说重试；如果要处理长程任务，需要重新说清楚目标'],
     expectedRuntimeBoundary: ['statusHint=failed', 'details.noMutation=true', 'details.canRetry=true'],
     evidenceLayers: ['foreground_runtime', 'source_contract'],
     status: 'covered_after_goal29',

@@ -180,6 +180,188 @@ describe('SchedulingAgentRuntime natural-language atomic command matrix', () => 
     })
   })
 
+  it('uses the existing rotation queue item as the anchor for inserting after a programme', async () => {
+    const currentItem = buildNlMatrixItem({
+      id: 'rotation-east-existing',
+      programName: '看东方111期新春特别行动',
+      startTime: '00:00:00',
+      endTime: '01:00:00',
+      duration: 3600,
+      programType: 'news',
+    })
+    const nextEast = buildNlMatrixCandidate({
+      id: 'candidate-east-112',
+      programId: 'candidate-east-112',
+      programCode: 'candidate-east-112',
+      programName: '看东方112期春日特别行动',
+      instanceName: '看东方112期春日特别行动',
+      columnId: 'rotation-news',
+      columnName: '看东方',
+      duration: 3600,
+      programType: 'news',
+      contentTags: ['看东方', '新闻资讯'],
+    })
+    const dataGateway = new InMemorySchedulingDataGateway([{
+      channelId: nlMatrixChannelId,
+      date: nlMatrixDate,
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: 2 * 3600,
+      scheduleItems: [currentItem],
+      programCandidates: [nextEast],
+      broadcastReadiness: [],
+      historySchedules: [],
+      layoutBounds: { start: '00:00:00', end: '02:00:00' },
+    }])
+    const runtime = new SchedulingAgentRuntime({ dataGateway })
+
+    const result = await runtime.submit({
+      userInput: '看东方后继续插入一个看东方节目',
+      channelId: nlMatrixChannelId,
+      date: nlMatrixDate,
+      interpretation: {
+        intent: 'insert',
+        confidence: 0.94,
+        source: 'test',
+        pendingAction: 'continue_pending',
+        slots: {
+          targetTime: '01:00:00',
+          programHint: '看东方',
+        },
+        assistantFeedback: '我会接在当前轮播单里已排的《看东方》后面继续插入。',
+      },
+    })
+
+    expect(result.status).toBe('needs_confirmation')
+    expect(result.decision.pendingTask?.collectedSlots.targetTime?.value).toBe('01:00:00')
+    expect(result.decision.command).toMatchObject({
+      intent: 'insert',
+      insertTime: `${nlMatrixDate}T01:00:00+08:00`,
+    })
+  })
+
+  it('continues a pending rotation insert when the editor clarifies the position as after the inserted programme', async () => {
+    const currentItem = buildNlMatrixItem({
+      id: 'rotation-east-existing',
+      programName: '看东方111期新春特别行动',
+      startTime: '00:00:00',
+      endTime: '01:00:00',
+      duration: 3600,
+      programType: 'news',
+    })
+    const nextEast = buildNlMatrixCandidate({
+      id: 'candidate-east-112',
+      programId: 'candidate-east-112',
+      programCode: 'candidate-east-112',
+      programName: '看东方112期春日特别行动',
+      instanceName: '看东方112期春日特别行动',
+      columnId: 'rotation-news',
+      columnName: '看东方',
+      duration: 3600,
+      programType: 'news',
+      contentTags: ['看东方', '新闻资讯'],
+    })
+    const dataGateway = new InMemorySchedulingDataGateway([{
+      channelId: nlMatrixChannelId,
+      date: nlMatrixDate,
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: 2 * 3600,
+      scheduleItems: [currentItem],
+      programCandidates: [nextEast],
+      broadcastReadiness: [],
+      historySchedules: [],
+      layoutBounds: { start: '00:00:00', end: '02:00:00' },
+    }])
+    const runtime = new SchedulingAgentRuntime({ dataGateway })
+
+    const first = await runtime.submit({
+      userInput: '继续插入一个看东方节目',
+      channelId: nlMatrixChannelId,
+      date: nlMatrixDate,
+      interpretation: {
+        intent: 'insert',
+        confidence: 0.9,
+        source: 'test',
+        slots: { programHint: '看东方' },
+        assistantFeedback: '我知道你想继续插入《看东方》，还需要确认插入位置。',
+      },
+    })
+    expect(first.status).toBe('needs_clarification')
+    const pendingTask = first.decision.pendingTask
+    expect(pendingTask?.missingSlots).toContain('targetTime')
+
+    const second = await runtime.submit({
+      userInput: '就在已插入的看东方节目后',
+      channelId: nlMatrixChannelId,
+      date: nlMatrixDate,
+      pendingTask,
+      interpretation: {
+        intent: 'insert',
+        confidence: 0.92,
+        source: 'test',
+        pendingAction: 'continue_pending',
+        slots: { targetTime: '01:00:00' },
+        assistantFeedback: '我会接在当前轮播单里已排的《看东方》后面继续插入。',
+      },
+    })
+
+    expect(second.status).toBe('needs_confirmation')
+    expect(second.decision.pendingTask?.collectedSlots.targetTime?.value).toBe('01:00:00')
+    expect(second.decision.pendingTask?.collectedSlots.programHint?.value).toBe('看东方')
+  })
+
+  it('keeps one oclock wording relative for rotation moves instead of drifting to +13 hours', async () => {
+    const currentItem = buildNlMatrixItem({
+      id: 'rotation-east-existing',
+      programName: '看东方111期新春特别行动',
+      startTime: '00:00:00',
+      endTime: '01:00:00',
+      duration: 3600,
+      programType: 'news',
+    })
+    const dataGateway = new InMemorySchedulingDataGateway([{
+      channelId: nlMatrixChannelId,
+      date: nlMatrixDate,
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: 2 * 3600,
+      scheduleItems: [currentItem],
+      programCandidates: [],
+      broadcastReadiness: [],
+      historySchedules: [],
+      layoutBounds: { start: '00:00:00', end: '02:00:00' },
+    }])
+    const runtime = new SchedulingAgentRuntime({ dataGateway })
+
+    const result = await runtime.submit({
+      userInput: '1点的看东方向后移动1小时',
+      channelId: nlMatrixChannelId,
+      date: nlMatrixDate,
+      interpretation: {
+        intent: 'move',
+        confidence: 0.93,
+        source: 'test',
+        slots: {
+          targetTime: '13:00:00',
+          targetProgramName: '看东方',
+          offsetSeconds: 3600,
+          direction: 'forward',
+        },
+        assistantFeedback: '我会按当前轮播队列里的《看东方》这一条，向后顺延1小时。',
+      },
+    })
+
+    expect(result.status).toBe('executed')
+    expect(result.decision.command).toMatchObject({
+      intent: 'move',
+      newStartTime: `${nlMatrixDate}T01:00:00+08:00`,
+    })
+    expect(result.decision.command).not.toMatchObject({
+      newStartTime: `${nlMatrixDate}T13:00:00+08:00`,
+    })
+  })
+
   it('retries candidate matching with LLM keyword rewrites before asking for a new programme hint', async () => {
     const rewrittenCandidate = buildNlMatrixCandidate({
       id: 'candidate-shanghai-morning-news',
@@ -237,7 +419,7 @@ describe('SchedulingAgentRuntime natural-language atomic command matrix', () => 
       expect.arrayContaining([
         expect.objectContaining({
           detail: expect.objectContaining({
-            matchedBy: 'rewritten_keywords',
+            matchedBy: 'llm_alternatives',
             attempts: expect.arrayContaining([
               expect.objectContaining({
                 keyword: '上海早新闻',
@@ -295,7 +477,7 @@ describe('SchedulingAgentRuntime natural-language atomic command matrix', () => 
     expect(result.decision.queryResult).toMatchObject({
       kind: 'candidate_lookup',
       totalCount: 1,
-      candidateSearchMatchedBy: 'rewritten_keywords',
+      candidateSearchMatchedBy: 'llm_alternatives',
       candidates: [
         expect.objectContaining({
           id: 'candidate-city-flower-road',
@@ -314,7 +496,7 @@ describe('SchedulingAgentRuntime natural-language atomic command matrix', () => 
       expect.arrayContaining([
         expect.objectContaining({
           detail: expect.objectContaining({
-            matchedBy: 'rewritten_keywords',
+            matchedBy: 'llm_alternatives',
             attempts: expect.arrayContaining([
               expect.objectContaining({
                 keyword: '城市形象 春日花路 短片',

@@ -1,5 +1,6 @@
 import type { ColumnDefinition, DeleteCommand, DraftFeasibilityReport, InsertCommand, LayoutDraft, LayoutReference, LlmFailureInfo, MoveCommand, OrchestrationCommand, ReplaceCommand, ScheduleItemSnapshot, ScheduleState, TaskClassification, TaskMode, ValidationReport } from '@/types/orchestration'
 import { getLLMClient } from '@/services/llm/llmClient'
+import type { LLMRequestTrace } from '@/types/llm'
 import type { LayoutIntentSegment } from '@/types/orchestration'
 import type { PlaylistType, ProgramCandidate, RotationPlaylistStrategy } from '@/types/orchestration'
 import type { DraftSegmentSelectionPolicy, DraftSelectionPriority, LayoutDraftStrategyBasis, LayoutDraftStrategyKind, LayoutDraftStrategyProfile } from '@/types/orchestration'
@@ -11,9 +12,6 @@ import type { MicroEditIntent } from '@/services/intentRecognizer'
 import { getParamExtractor } from '@/services/paramExtractor'
 import type { DeleteParams, InsertParams, MoveParams, ReplaceParams } from '@/services/paramExtractor'
 import { getCandidateService } from '@/services/candidateService'
-import { getAtomicContinuationClassifier } from '@/services/atomicContinuationClassifier'
-import type { AtomicContinuationDecision } from '@/services/atomicContinuationClassifier'
-import { getAtomicFollowUpParser } from '@/services/atomicFollowUpParser'
 import { getInsertCandidateResolver } from '@/services/insertCandidateResolver'
 import { getInsertCommandExecutor } from '@/services/insertCommandExecutor'
 import { getReplaceCommandExecutor } from '@/services/replaceCommandExecutor'
@@ -22,6 +20,7 @@ import { getScheduleTargetResolver } from '@/services/scheduleTargetResolver'
 import { getEffectiveColumnDefinition, getEffectiveLayoutReference, getRuntimeLayoutEntry } from '@/services/orchestration/runtimeLayoutRegistry'
 import { getLayoutDraftService } from '@/services/layoutDraftService'
 import { cleanLayoutDraftSemanticLabel } from '@/services/layoutDraftSemanticCleaner'
+import { draftSegmentPartsMatch } from '@/services/draftSegmentLabelMatcher'
 import { getLayoutDraftCompiler } from '@/services/layoutDraftCompiler'
 import { getLayoutDraftValidator } from '@/services/layoutDraftValidator'
 import { getLayoutDraftFeasibilityService } from '@/services/layoutDraftFeasibilityService'
@@ -36,11 +35,12 @@ import { SchedulingAgentRuntime, type SchedulingAgentRuntimeCapabilitySummary } 
 import { RuntimeSchedulingDataGateway, type RuntimeScheduleSourceItem } from '@/services/agent/runtimeSchedulingDataGateway'
 import { createRuntimeSchedulingDataReader } from '@/services/agent/runtimeSchedulingDataAdapters'
 import { buildSearchFacets as buildAgentSearchFacets } from '@/services/agent/searchFacets'
+import { buildAgentLlmContextPackage } from '@/services/agent/llmContextPackage'
 import { LlmAgentIntentInterpreter } from '@/services/agent/llmAgentIntentInterpreter'
 import { buildPendingLlmContext, type AgentPendingLlmContext } from '@/services/agent/agentSession'
 import type { SchedulingAgentOperationalReadinessAudit } from '@/services/agent/agentReadinessAudit'
-import type { AgentIntentInterpretation, AgentPendingTask, AgentResult, AgentSubmitInput, AgentTaskPlanDraft, AtomicCommandIntent } from '@/services/agent/types'
-import { looksLikeProgramSchedulingRequest, parseSchedulingTimeRange } from '@/services/schedulingIntentHeuristics'
+import type { AgentCandidateRecommendation, AgentIntentInterpretation, AgentLlmContextPackage, AgentPendingTask, AgentResult, AgentSubmitInput, AgentTaskPlanDraft, AgentTraceStep, AtomicCommandIntent } from '@/services/agent/types'
+import { looksLikeProgramSchedulingRequest, normalizeSchedulingText, parseSchedulingTimeRange, stripProtectedSchedulingClauses } from '@/services/schedulingIntentHeuristics'
 import { detectMovingItemSequenceViolation } from '@/services/scheduleSequenceGuard'
 import { getOrchestrationDemoLayout } from '@/mock/orchestrationMock'
 import {
@@ -48,7 +48,6 @@ import {
   buildPendingAtomicContextFromInsertRecommendation,
   buildPendingAtomicContextFromTargetSelection,
   deriveAtomicMissingFieldsFromSlots,
-  mergeRuntimeAtomicSlots,
   type RuntimeAtomicAction,
   type RuntimeAtomicMissingField,
   type RuntimePendingAtomicContext,
@@ -60,7 +59,6 @@ import {
 } from './pendingAtomicContext'
 import {
   getPendingAtomicContextService,
-  type PendingAtomicLifecycleBlockReason,
 } from './pendingAtomicContextService'
 import {
   DEFAULT_SCHEDULING_TASK_LIMITS,
@@ -89,6 +87,14 @@ import { isRecoverableLlmError } from '@/services/llm/llmFailure'
 export type RuntimeDetailMap = Record<string, unknown>
 export type RuntimeProcessType = 'planning' | 'selection' | 'execution' | 'validation' | 'general' | 'error'
 export interface RuntimeFeedback { content: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; processType: RuntimeProcessType; processTypeLabel: string }
+export interface RuntimeProgressEvent {
+  id?: string
+  content: string
+  thinking?: string
+  details?: RuntimeDetailMap
+  processType: RuntimeProcessType
+  processTypeLabel: string
+}
 export interface RuntimeScheduleItem { id: string; programCode?: string; programName?: string; startTime: string; endTime: string; duration?: number; programType?: string }
 export interface RuntimePendingCommand { pendingId?: string; command: OrchestrationCommand; commands?: OrchestrationCommand[]; summary: string; successMessage?: string; reasoning: string; details?: RuntimeDetailMap }
 export interface RuntimePendingTargetSelection { pendingId?: string; action: 'delete' | 'move' | 'replace'; summary: string; reasoning: string; targetTime: string; programName?: string; candidates: RuntimeScheduleItem[]; selectedItemId: string | null; moveConfig?: { direction?: 'forward' | 'backward'; offsetSeconds?: number; absoluteNewStartTime?: string }; replaceProgramName?: string; resolutionDetails?: RuntimeDetailMap }
@@ -142,7 +148,7 @@ export interface RuntimeAnalysisContext {
 }
 export interface RuntimeExecutionPlan { command: OrchestrationCommand; successMessage?: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap }
 export interface RuntimeExecutedResult { success: boolean; command: OrchestrationCommand; message: string; error?: string; summary: string; thinking?: string; explanation?: string; details?: RuntimeDetailMap; data?: unknown; affectedTimeRanges?: { start: string; end: string }[]; validationReport?: ValidationReport; validationSummary?: RuntimeDetailMap; scheduleSnapshot?: unknown; playlistPatch?: unknown }
-export interface RuntimeSubmitInput { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[]; currentLayoutDraft?: LayoutDraft | null; currentLayoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'> | null; analysisContext?: RuntimeAnalysisContext | null; pendingTargetSelection?: RuntimePendingTargetSelection | null; pendingInsertRecommendation?: RuntimePendingInsertRecommendation | null; pendingAtomicClarification?: RuntimePendingAtomicClarification | null; pendingAtomicContext?: RuntimePendingAtomicContext | null; activeReactTaskRun?: ReactTaskRun | null; foregroundContextPackage?: ForegroundAgentContextPackage; history?: string[]; agentCoreEnabled?: boolean; layoutDraftEnabled?: boolean; preferDraftFirstFormalOrchestration?: boolean; preferLayoutDraftRefine?: boolean; inputSource?: 'user' | 'quick_action' | 'system' }
+export interface RuntimeSubmitInput { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[]; currentLayoutDraft?: LayoutDraft | null; currentLayoutDraftMode?: Extract<TaskMode, 'full_generate' | 'partial_generate'> | null; analysisContext?: RuntimeAnalysisContext | null; pendingTargetSelection?: RuntimePendingTargetSelection | null; pendingInsertRecommendation?: RuntimePendingInsertRecommendation | null; pendingAtomicClarification?: RuntimePendingAtomicClarification | null; pendingAtomicContext?: RuntimePendingAtomicContext | null; activeReactTaskRun?: ReactTaskRun | null; foregroundContextPackage?: ForegroundAgentContextPackage; history?: string[]; agentCoreEnabled?: boolean; layoutDraftEnabled?: boolean; preferDraftFirstFormalOrchestration?: boolean; preferLayoutDraftRefine?: boolean; inputSource?: 'user' | 'quick_action' | 'system'; onProgress?: (event: RuntimeProgressEvent) => void }
 export interface RuntimeResolveTargetSelectionInput { channelId: string; date: string; pendingTargetSelection: RuntimePendingTargetSelection; scheduleState?: ScheduleState }
 export interface RuntimeResolveInsertRecommendationInput { scheduleState: ScheduleState; pendingInsertRecommendation: RuntimePendingInsertRecommendation; currentSchedule?: RuntimeScheduleItem[]; userInput?: string }
 export interface RuntimeExecutePendingCommandInput {
@@ -205,10 +211,8 @@ type AgentCoreRunResult = {
   result: AgentResult
   capabilitySummary: SchedulingAgentRuntimeCapabilitySummary
   operationalReadiness: SchedulingAgentOperationalReadinessAudit
+  llmRequestTraces: LLMRequestTrace[]
 }
-type RuntimePendingAtomicContinuationResult =
-  | { kind: 'decision'; decision: RuntimeDecision }
-  | { kind: 'clear_pending_and_continue'; input: RuntimeSubmitInput }
 
 const DEFAULT_BROADCAST_WINDOW = { start: '06:00:00', end: '23:59:59' }
 const toClockText = (value: string) => value.includes('T') ? (value.split('T')[1]?.slice(0, 8) ?? value) : (value.length === 5 ? `${value}:00` : value)
@@ -257,8 +261,6 @@ export class DemoRuntimeFacade {
   private readonly intentRecognizer = getIntentRecognizer(this.llmClient)
   private readonly layoutIntentRecognizer = getLayoutIntentRecognizer(this.llmClient)
   private readonly paramExtractor = getParamExtractor(this.llmClient)
-  private readonly atomicContinuationClassifier = getAtomicContinuationClassifier()
-  private readonly atomicFollowUpParser = getAtomicFollowUpParser()
   private readonly pendingAtomicContextService = getPendingAtomicContextService()
   private readonly candidateService = getCandidateService()
   private readonly insertCandidateResolver = getInsertCandidateResolver()
@@ -373,9 +375,9 @@ export class DemoRuntimeFacade {
         : ''
       const structureHint = rotationDurationSeconds
         ? '你可以继续补充主要内容、栏目类型或上传轮播草案。'
-        : '当前还不知道轮播要排多长，也没有轮播草案，很难直接编排；建议先说明总时长、主要内容、选择策略，或上传/生成轮播草案。'
+        : '当前还不知道轮播要排多长，空草案里也还没有内容块；建议先说明总时长、主要内容、选择策略，或上传/生成轮播草案。'
       return this.buildPlaylistStateChangedDecision(
-        `已新建轮播单${durationText}，${rotationStrategy === 'content_match' ? '默认按内容匹配优先选择节目' : `本次按${this.describeRotationStrategy(rotationStrategy)}选择节目`}。轮播单按时长制处理，从 0 点起算，不绑定具体日期和电视频道时段。${structureHint}`,
+        `已新建轮播单${durationText}，${rotationStrategy === 'content_match' ? '默认按内容匹配优先选择节目' : `本次按${this.describeRotationStrategy(rotationStrategy)}选择节目`}。轮播单按时长制处理，不绑定具体日期和电视频道时段。${structureHint}`,
         'rotation',
         rotationStrategy,
         rotationDurationSeconds ?? undefined,
@@ -384,7 +386,7 @@ export class DemoRuntimeFacade {
         undefined,
         undefined,
         {
-          layoutDraftStatus: 'missing',
+          layoutDraftStatus: 'empty',
           needsStructuredBasis: !rotationDurationSeconds,
           suggestedActions: rotationDurationSeconds
             ? ['补充主要内容', '上传轮播草案', '按当前时长补排']
@@ -610,7 +612,7 @@ export class DemoRuntimeFacade {
     llmFailure: LlmFailureInfo,
     reasoning?: string,
   ): RuntimeDecision {
-    const retryHint = '你可以直接说“重试”或“继续”，我会按刚才这句话再试一次。'
+    const retryHint = '你可以直接说“重试”，我会按刚才这句话再试一次。'
     const content = llmFailure.reason === 'timeout'
       ? `这次模型没有及时返回，我还没有修改草案或播单。${retryHint}`
       : `这次模型服务没有正常返回，我还没有修改草案或播单。${retryHint}`
@@ -647,7 +649,55 @@ export class DemoRuntimeFacade {
     if (plan.llmFailure) {
       return this.buildRecoverableLlmFailureDecision(input, plan.llmFailure, plan.reasoning)
     }
+    this.emitAgentPlannerProgress(input, plan)
     return await this.executeAgentPlan(input, plan)
+  }
+
+  private emitAgentPlannerProgress(input: RuntimeSubmitInput, plan: AgentPlan): void {
+    const event = this.buildAgentPlannerProgressEvent(input, plan)
+    if (!event) return
+    try {
+      input.onProgress?.(event)
+    } catch {
+      // Progress messages must never block the scheduling action itself.
+    }
+  }
+
+  private buildAgentPlannerProgressEvent(input: RuntimeSubmitInput, plan: AgentPlan): RuntimeProgressEvent | null {
+    const content = this.normalizeAgentPlannerProgressDraft(plan.assistantReplyDraft)
+    if (!content || !this.shouldExposeAgentPlannerProgress(plan)) return null
+    const actionTypes = plan.actions.map((action) => action.type)
+    return {
+      id: `agent-planner:${input.scheduleState.playlistId ?? input.scheduleState.playlistType}:${actionTypes.join('+')}:${content}`,
+      content,
+      thinking: plan.reasoning,
+      processType: 'planning',
+      processTypeLabel: '已理解',
+      details: {
+        progressStage: 'agent_planner',
+        source: 'llm_assistantReplyDraft',
+        plannerActions: actionTypes,
+        noMutation: true,
+      },
+    }
+  }
+
+  private shouldExposeAgentPlannerProgress(plan: AgentPlan): boolean {
+    const actionTypes = new Set(plan.actions.map((action) => action.type))
+    return actionTypes.has('atomic_command')
+      || actionTypes.has('research_check')
+      || actionTypes.has('prepare_layout_draft')
+      || actionTypes.has('refine_layout_draft')
+      || actionTypes.has('commit_layout_draft')
+      || actionTypes.has('formal_orchestration')
+      || plan.mode === 'react'
+  }
+
+  private normalizeAgentPlannerProgressDraft(value?: string): string {
+    const content = value?.trim() ?? ''
+    if (content.length < 4) return ''
+    if (/"actions"|"assistantReplyDraft"|"reasoning"|taskPlan|runtime|JSON|confidence/u.test(content)) return ''
+    return content
   }
 
   private buildMissingPlaylistWorkspaceDecision(reasoning?: string): RuntimeDecision {
@@ -788,13 +838,27 @@ export class DemoRuntimeFacade {
       }, input)
     }
 
-    if (actions.some((action) => action.type === 'atomic_command')) {
+    const atomicAction = actions.find((action): action is Extract<AgentPlannerAction, { type: 'atomic_command' }> => action.type === 'atomic_command')
+    if (atomicAction) {
       if (input.scheduleState.playlistType === 'none') {
         return this.buildMissingPlaylistWorkspaceDecision(plan.reasoning)
       }
       if (input.agentCoreEnabled) {
-        const agentCoreDecision = await this.tryHandleAgentCoreInstruction(input)
+        const agentCoreDecision = await this.tryHandleAgentCoreInstruction(input, atomicAction, plan)
         if (agentCoreDecision) return agentCoreDecision
+        return {
+          kind: 'message',
+          statusHint: 'needs_clarification',
+          feedback: createFeedback(
+            plan.assistantReplyDraft || '我还需要你补充一下要改哪张播单、哪个位置或哪个节目。',
+            'general',
+            '需要澄清',
+            {
+              explanation: plan.reasoning || 'LLM-only 理解层没有形成可执行原子命令；已停止旧本地兜底。',
+              details: { noLocalFallback: true },
+            },
+          ),
+        }
       }
       const atomicDecision = await this.tryHandleAtomicInstruction(input)
       if (atomicDecision) return atomicDecision
@@ -810,7 +874,10 @@ export class DemoRuntimeFacade {
         plan.assistantReplyDraft || clarifyAction?.question || '我还需要你再补充一下具体想怎么编排。',
         'general',
         '需要澄清',
-        { explanation: plan.reasoning },
+        {
+          explanation: plan.reasoning,
+          details: { noMutation: true },
+        },
       ),
     }
   }
@@ -1085,11 +1152,34 @@ export class DemoRuntimeFacade {
         topNames: group.candidates.slice(0, 3).map((candidate) => candidate.programName),
       })),
     }
+
+    if (action.purpose === 'candidate_precheck' && observation.candidateCount > 0 && !action.targetTime) {
+      return this.buildResearchInsertRecommendationDecision(input, plan, action, observation, '')
+    }
+
     const synthesizedReply = await this.synthesizeResearchCheckReply(input, plan, action, observation)
-    const safeContent = this.sanitizeResearchCheckReply(
-      synthesizedReply || this.buildResearchCheckFallbackReply(action, observation),
-      observation.candidateCount,
-    )
+    const safeContent = synthesizedReply
+      ? this.sanitizeResearchCheckReply(synthesizedReply)
+      : null
+    if (!safeContent) {
+      return {
+        kind: 'message',
+        statusHint: 'failed',
+        feedback: createFeedback(
+          '这次模型没有给出适合直接展示的查证结论，我没有修改草案或播单。你可以直接说“重试”，或补充更具体的节目方向。',
+          'error',
+          '模型回复不可用',
+          {
+            explanation: plan.reasoning,
+            details: {
+              ...observation,
+              noMutation: true,
+              failureCode: 'research_synthesis_unusable',
+            },
+          },
+        ),
+      }
+    }
     const feedback = createFeedback(
       safeContent,
       'planning',
@@ -1101,15 +1191,11 @@ export class DemoRuntimeFacade {
     )
 
     if (observation.candidateCount > 0) {
-      if (action.purpose === 'candidate_precheck' && action.targetTime) {
+      if (action.purpose === 'candidate_precheck') {
         return this.buildResearchInsertRecommendationDecision(input, plan, action, observation, safeContent)
       }
       const suggestion = this.buildDraftResearchSuggestion(input, plan, action, observation)
-      return {
-        kind: 'pending_atomic_context',
-        feedback,
-        pendingAtomicContext: this.buildDraftResearchPendingContext(input, suggestion),
-      }
+      return await this.buildDraftResearchUpdateDecision(input, plan, suggestion, safeContent, observation)
     }
 
     return {
@@ -1141,18 +1227,26 @@ export class DemoRuntimeFacade {
     }
     const targetTime = action.targetTime
     if (!targetTime) {
+      const missingTargetMessage = input.scheduleState.playlistType === 'rotation'
+        ? '我已经查到了一些素材方向，但还不知道要插入到轮播队列的哪个位置。请补一句例如“放到队列开头”“放到队列末尾”，或说明接在哪个节目后面。'
+        : '我已经查到了一些素材方向，但还不知道要插入到哪个时间点。请补一句例如“放到9点”。'
       return {
         kind: 'message',
         statusHint: 'needs_clarification',
         feedback: createFeedback(
-          '我已经查到了一些素材方向，但还不知道要插入到哪个时间点。请补一句例如“放到9点”。',
+          missingTargetMessage,
           'selection',
-          '缺少插入时间',
+          input.scheduleState.playlistType === 'rotation' ? '缺少插入位置' : '缺少插入时间',
           {
             explanation: plan.reasoning,
             details: {
               noMutation: true,
+              purpose: action.purpose ?? 'candidate_precheck',
+              queries: Array.isArray((observation as RuntimeDetailMap).queries)
+                ? (observation as RuntimeDetailMap).queries
+                : undefined,
               candidateCount: observation.candidateCount,
+              topCandidates: observation.topCandidates.slice(0, 5),
             },
           },
         ),
@@ -1179,9 +1273,9 @@ export class DemoRuntimeFacade {
       plan.reasoning || 'LLM planner 先查证素材，再进入插入候选选择。',
       recommendedCandidates,
     )
-    return this.buildPendingInsertRecommendationDecision(
+    return this.buildInsertRecommendationAdvisoryDecision(
       pendingInsertRecommendation,
-      `${safeContent} 我先不替你自动选节目，请从下面候选里选一个，再确认是否插入 ${targetTime}。`,
+      safeContent,
     )
   }
 
@@ -1251,9 +1345,9 @@ export class DemoRuntimeFacade {
     return this.pendingAtomicContextService.initialize({
       action: null,
       phase: 'draft_research_confirmation',
-      summary: `是否把“${suggestion.semanticLabel}”更新到${targetText}草案`,
-      reasoning: '我已经按你的要求查过草案段和素材库；如果你确认，只会更新版面草案，不会写入正式播单。',
-      confirmationNote: '请确认是否把这个方向更新到草案。确认后我只改草案，不会开始正式编排。',
+      summary: `把“${suggestion.semanticLabel}”更新到${targetText}草案`,
+      reasoning: '我已经按你的要求查过草案段和素材库；这一步只会更新版面草案，不会写入正式播单。',
+      confirmationNote: '这一步只改草案，不会开始正式编排。',
       originalUserInput: input.userInput,
       collectedUserInput: input.userInput,
       slots: {
@@ -1262,12 +1356,108 @@ export class DemoRuntimeFacade {
         rawProgramText: suggestion.topCandidates[0]?.programName,
       },
       missingFields: ['selection'],
-      followUpQuestion: '需要我把这个方向更新到草案吗？',
+      followUpQuestion: '我可以把这个方向更新到草案。',
       layoutDraftSuggestion: suggestion,
       attemptCount: 0,
       createdAt: now,
       updatedAt: now,
     })
+  }
+
+  private async buildDraftResearchUpdateDecision(
+    input: RuntimeSubmitInput,
+    plan: AgentPlan,
+    suggestion: RuntimeDraftResearchSuggestion,
+    safeContent: string,
+    observation: RuntimeDetailMap,
+  ): Promise<RuntimeDecision> {
+    const draft = input.currentLayoutDraft
+    if (!draft) {
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          `${this.normalizeResearchReplyForDirectDraftUpdate(safeContent)} 当前还没有可更新的草案，你可以先生成或上传草案。`,
+          'planning',
+          '需要草案',
+          {
+            explanation: plan.reasoning,
+            details: {
+              ...observation,
+              noMutation: true,
+              draftUpdatePolicy: 'draft_updates_do_not_require_confirmation',
+            },
+          },
+        ),
+      }
+    }
+
+    const updatedDraft = this.applyDraftResearchSuggestion(draft, suggestion)
+    if (!updatedDraft) {
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          `${this.normalizeResearchReplyForDirectDraftUpdate(safeContent)} 我还不能确定要更新草案的哪一段。你可以补一句“更新到第一段”或直接说明段落名称。`,
+          'planning',
+          '需要草案段',
+          {
+            explanation: plan.reasoning,
+            details: {
+              ...observation,
+              noMutation: true,
+              suggestion,
+              draftUpdatePolicy: 'draft_updates_do_not_require_confirmation',
+            },
+          },
+        ),
+      }
+    }
+
+    const feasibilityReport = await this.buildLayoutDraftFeasibilityReport(input, updatedDraft)
+    const targetText = suggestion.targetSegmentIndex
+      ? `第 ${suggestion.targetSegmentIndex} 段`
+      : suggestion.targetSegmentLabel ?? '对应段落'
+    return {
+      kind: 'layout_draft',
+      feedback: createFeedback(
+        `${this.normalizeResearchReplyForDirectDraftUpdate(safeContent)} 已把“${suggestion.semanticLabel}”更新到左侧草案的${targetText}。正式播单还没有开始编排；如果这版草案可以了，你可以直接说“按这个开始编排”。`,
+        'planning',
+        '版面草案',
+        {
+          explanation: plan.reasoning,
+          details: {
+            ...observation,
+            draftId: updatedDraft.id,
+            updatedSegment: {
+              targetSegmentIndex: suggestion.targetSegmentIndex,
+              targetSegmentLabel: suggestion.targetSegmentLabel,
+              semanticLabel: suggestion.semanticLabel,
+              queryHints: suggestion.queries,
+              candidateNames: suggestion.topCandidates.slice(0, 5).map((candidate) => candidate.programName),
+            },
+            noFormalPlaylistWrite: true,
+            draftUpdatePolicy: 'draft_updates_do_not_require_confirmation',
+            feasibilitySummary: feasibilityReport.summary,
+          },
+        },
+      ),
+      draft: updatedDraft,
+      feasibilityReport,
+      orchestrationMode: input.currentLayoutDraftMode ?? this.resolvePreferredOrchestrationMode(input),
+    }
+  }
+
+  private normalizeResearchReplyForDirectDraftUpdate(content: string): string {
+    const normalized = content
+      .replace(/确认前我不会更新草案，也不会写入节目。[需请]?要我把这个方向更新到草案吗？?/gu, '')
+      .replace(/确认前我不会更新草案，也不会写入节目。/gu, '')
+      .replace(/需要我把这个方向更新到草案吗？?/gu, '')
+      .replace(/请确认是否把这个方向更新到草案。?/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/[，,；;：:]+$/u, '')
+    return normalized || '我已经查过草案段和素材库，整理出可更新的方向。'
   }
 
   private resolveResearchDraftSegment(
@@ -1279,17 +1469,7 @@ export class DemoRuntimeFacade {
     const normalizedLabel = (action.targetSegmentLabel ?? action.semanticLabel ?? '').replace(/\s+/g, '').toLowerCase()
     let index = action.targetSegmentIndex ? action.targetSegmentIndex - 1 : -1
     if (index < 0 && normalizedLabel) {
-      index = slots.findIndex((slot, slotIndex) => {
-        const column = draft.columns.find((item) => item.columnId === slot.columnId)
-        const segment = draft.durationSegments?.[slotIndex]
-        const haystack = [
-          column?.semanticLabel,
-          column?.columnName,
-          segment?.label,
-          ...(column?.queryHints ?? []),
-        ].filter(Boolean).join('').replace(/\s+/g, '').toLowerCase()
-        return haystack.includes(normalizedLabel) || normalizedLabel.includes(haystack)
-      })
+      index = this.resolveDraftSlotIndexByLabel(draft, normalizedLabel)
     }
     if (index < 0 || index >= slots.length) return null
     const slot = slots[index]!
@@ -1306,6 +1486,21 @@ export class DemoRuntimeFacade {
       targetDurationText: durationSegment?.targetDurationSeconds ? this.formatDurationText(durationSegment.targetDurationSeconds) : undefined,
       selectionPriority: durationSegment?.selectionPriority,
     }
+  }
+
+  private resolveDraftSlotIndexByLabel(draft: LayoutDraft, label: string | undefined): number {
+    if (!label?.trim()) return -1
+    return draft.layoutReference.slots.findIndex((slot, index) => {
+      const column = draft.columns.find((item) => item.columnId === slot.columnId)
+      const segment = draft.durationSegments?.[index]
+      return draftSegmentPartsMatch([
+        column?.semanticLabel,
+        column?.columnName,
+        segment?.label,
+        segment?.contentHint,
+        ...(column?.queryHints ?? []),
+      ], label)
+    })
   }
 
   private buildResearchQueries(
@@ -1336,6 +1531,18 @@ export class DemoRuntimeFacade {
   private normalizeResearchProgramTypes(programTypeHint?: string): string[] | undefined {
     if (!programTypeHint) return undefined
     const normalized = programTypeHint.trim().toLowerCase()
+    if (!normalized) return undefined
+    const aliasRules: Array<[RegExp, string[]]> = [
+      [/宣传片|短片|短视频|垫片|城市形象|promo|short[-_\s]?clip|short[-_\s]?video/u, ['short_clip', 'short_video']],
+      [/电视剧|剧集|连续剧|drama|series/u, ['drama']],
+      [/新闻|资讯|news/u, ['news', 'news_magazine']],
+      [/纪录片|纪实|documentary/u, ['documentary']],
+      [/少儿|儿童|kids/u, ['kids']],
+      [/健康|养生|health/u, ['health']],
+      [/评论|观察|commentary/u, ['commentary']],
+    ]
+    const aliasMatch = aliasRules.find(([pattern]) => pattern.test(normalized))
+    if (aliasMatch) return aliasMatch[1]
     const knownTypes = new Set([
       'news',
       'news_magazine',
@@ -1346,6 +1553,7 @@ export class DemoRuntimeFacade {
       'kids',
       'documentary',
       'tv',
+      'short_clip',
       'short_video',
     ])
     return knownTypes.has(normalized) ? [normalized] : undefined
@@ -1369,8 +1577,8 @@ export class DemoRuntimeFacade {
           role: 'system',
           content: [
             '你是 AI 编审助手。根据工具观察结果，用编排员听得懂的话回复。',
-            '你只能说已经检查草案或查过素材库；不能说已经更新草案、不能说已经写入正式播单。',
-            '如果素材看起来够用，给出你建议选哪些方向，并在结尾问“需要我把这个方向更新到草案吗？”',
+            '你只能说已经检查草案或查过素材库；不能说已经写入正式播单。',
+            '如果素材看起来够用，给出你建议选哪些方向。本地会把可定位的草案调整直接更新到草案，不需要用户确认；不要追问“是否更新草案”。',
             '如果素材不足，说明缺什么，并建议用户换关键词、补充主题或上传素材。',
             '不要输出 JSON、runtime、taskPlan、置信度、候选数这类技术词。',
           ].join('\n'),
@@ -1399,34 +1607,18 @@ export class DemoRuntimeFacade {
     }
   }
 
-  private sanitizeResearchCheckReply(content: string, candidateCount: number): string {
+  private sanitizeResearchCheckReply(content: string): string | null {
     const trimmed = content.trim()
     if (
       trimmed.startsWith('{')
       || /"reactTask"|"actions"|"assistantReplyDraft"|"reasoning"|taskPlan|runtime/u.test(trimmed)
     ) {
-      return candidateCount > 0
-        ? '我先查了当前草案段和素材库，找到了一些可以继续核验的素材方向。确认前我不会更新草案，也不会写入节目。需要我把这个方向更新到草案吗？'
-        : '我先查了当前草案段和素材库，但还没有找到足够合适的素材。确认前我不会更新草案，也不会写入节目。你可以换一个关键词，或补充更具体的主题。'
+      return null
     }
     if (/(已经|已|正在|开始|马上).{0,16}(写入|更新草案|修改草案|正式编排|排入节目|生成节目)/u.test(content)) {
-      return candidateCount > 0
-        ? '我先查了当前草案段和素材库，找到了一些可以继续核验的素材方向。确认前我不会更新草案，也不会写入节目。需要我把这个方向更新到草案吗？'
-        : '我先查了当前草案段和素材库，但还没有找到足够合适的素材。确认前我不会更新草案，也不会写入节目。你可以换一个关键词，或补充更具体的主题。'
+      return null
     }
     return content
-  }
-
-  private buildResearchCheckFallbackReply(
-    action: Extract<AgentPlannerAction, { type: 'research_check' }>,
-    observation: RuntimeDetailMap,
-  ): string {
-    const label = action.semanticLabel
-      ?? action.targetSegmentLabel
-      ?? (typeof (observation.draftSegment as RuntimeDetailMap | null)?.label === 'string' ? (observation.draftSegment as RuntimeDetailMap).label as string : '这个草案块')
-    return observation.candidateCount
-      ? `我先按“${label}”查了素材库，已经有一些可以继续核验的方向。确认前我不会更新草案，也不会写入节目。需要我把这个方向更新到草案吗？`
-      : `我先按“${label}”查了素材库，暂时没找到足够合适的素材。你可以换一个关键词，或补充更具体的主题。`
   }
 
   private hasExplicitPlannerPlaylistTypeCue(userInput: string): boolean {
@@ -1444,6 +1636,9 @@ export class DemoRuntimeFacade {
     const rotationStrategy = createAction.playlistType === 'rotation'
       ? createAction.rotationStrategy ?? 'content_match'
       : undefined
+    const rotationDurationSeconds = createAction.playlistType === 'rotation'
+      ? createAction.rotationDurationSeconds
+      : undefined
     const effectiveInput: RuntimeSubmitInput = {
       ...input,
       scheduleState: {
@@ -1451,7 +1646,7 @@ export class DemoRuntimeFacade {
         playlistId,
         playlistType: createAction.playlistType,
         rotationStrategy,
-        rotationDurationSeconds: createAction.rotationDurationSeconds ?? input.scheduleState.rotationDurationSeconds,
+        rotationDurationSeconds,
       },
       currentLayoutDraft: createAction.playlistType === 'rotation' ? null : input.currentLayoutDraft,
     }
@@ -1470,9 +1665,9 @@ export class DemoRuntimeFacade {
     if (createAction.playlistType === 'tv') {
       const defaultLayout = getOrchestrationDemoLayout(input.scheduleState.channelId, input.scheduleState.date)
       return this.buildPlaylistStateChangedDecision(
-        plan.assistantReplyDraft || (defaultLayout
+        defaultLayout
           ? '已新建电视播单，并加载当前频道日期的版面草案。'
-          : '已新建电视播单，但当前没有读取到该频道日期的版面草案。'),
+          : '已新建电视播单，但当前没有读取到该频道日期的版面草案。',
         'tv',
         undefined,
         undefined,
@@ -1496,18 +1691,18 @@ export class DemoRuntimeFacade {
     }
 
     return this.buildPlaylistStateChangedDecision(
-      plan.assistantReplyDraft || (linkedDraft
+      linkedDraft
         ? '已新建轮播单，并按你的描述整理了一份轮播草案。确认前不会写入正式节目。'
-        : '已新建轮播单。你可以继续说明主题、总时长或上传轮播草案。'),
+        : '已新建轮播单，并准备了一个空轮播草案。你可以继续说明主题、总时长，或上传已有草案。',
       'rotation',
       rotationStrategy,
-      createAction.rotationDurationSeconds,
+      rotationDurationSeconds,
       playlistId,
       undefined,
       undefined,
       undefined,
       {
-        layoutDraftStatus: linkedDraft ? 'loaded' : 'missing',
+        layoutDraftStatus: linkedDraft ? 'loaded' : 'empty',
         layoutDraftSource: linkedDraft?.layoutDraft.source,
         layoutDraftSegmentCount: linkedDraft?.layoutDraft.durationSegments?.length ?? linkedDraft?.layoutDraft.layoutReference.slots.length,
         plannerActions: plan.actions.map((action) => action.type),
@@ -1558,15 +1753,12 @@ export class DemoRuntimeFacade {
     const semanticLabel = action.semanticLabel?.trim()
     const normalizedSegments = this.normalizeStructuredSegments(action.segments)
     if ((normalizedSegments?.length ?? 0) > 1) return normalizedSegments
-    const explicitTargetLabel = this.extractExplicitDraftRefineTargetLabel(input.userInput)
-    const ordinalLabel = explicitTargetLabel
-      ?? (normalizedSegments?.length === 1
-      ? normalizedSegments[0]?.semanticLabel
-      : semanticLabel)
-    const ordinalSegment = ordinalLabel
-      ? this.resolveOrdinalDraftRefineSegment(input, action, ordinalLabel)
+    const replacementLabel = normalizedSegments?.[0]?.semanticLabel
+      ?? semanticLabel
+    const targetedSegment = replacementLabel
+      ? this.resolveTargetedDraftRefineSegment(input, action, replacementLabel, normalizedSegments?.[0]?.programTypeHint)
       : undefined
-    if (ordinalSegment) return [ordinalSegment]
+    if (targetedSegment) return [targetedSegment]
     if (normalizedSegments?.length) return normalizedSegments
     if (!semanticLabel) return undefined
     if (targetTimeRange) {
@@ -1580,67 +1772,33 @@ export class DemoRuntimeFacade {
     return undefined
   }
 
-  private resolveOrdinalDraftRefineSegment(
+  private resolveTargetedDraftRefineSegment(
     input: RuntimeSubmitInput,
     action: Extract<AgentPlannerAction, { type: 'prepare_layout_draft' | 'refine_layout_draft' }>,
     semanticLabel: string,
+    programTypeHint?: string,
   ): LayoutIntentSegment | undefined {
     if (
       action.type !== 'refine_layout_draft'
-      && action.type !== 'prepare_layout_draft'
-      || input.scheduleState.playlistType !== 'rotation'
       || !input.currentLayoutDraft
+      || (!action.targetSegmentIndex && !action.targetSegmentLabel)
     ) return undefined
-    const ordinalIndex = this.resolveDraftOrdinalIndex(input.userInput)
-    if (ordinalIndex === null) return undefined
+    const slotIndex = action.targetSegmentIndex
+      ? action.targetSegmentIndex - 1
+      : this.resolveDraftSlotIndexByLabel(input.currentLayoutDraft, action.targetSegmentLabel)
+    if (slotIndex < 0) return undefined
     const slots = [...input.currentLayoutDraft.layoutReference.slots]
       .sort((left, right) => toClockText(left.startTime).localeCompare(toClockText(right.startTime)))
-    const slot = slots[ordinalIndex]
+    const slot = slots[slotIndex]
     if (!slot) return undefined
-    const explicitTargetLabel = this.extractExplicitDraftRefineTargetLabel(input.userInput)
-    const resolvedLabel = explicitTargetLabel ?? semanticLabel
     return {
       start: toClockText(slot.startTime),
       end: toClockText(slot.endTime),
-      semanticLabel: resolvedLabel,
-      programTypeHint: action.programTypeHint,
+      semanticLabel,
+      programTypeHint: programTypeHint ?? action.programTypeHint,
     }
   }
 
-  private extractExplicitDraftRefineTargetLabel(userInput: string): string | undefined {
-    const normalized = userInput.replace(/\s+/g, '')
-    const match = normalized.match(/(?:改成|换成|调整为|调整成|改为|变成|替换成|替换为)(.+)$/u)
-    const rawTarget = match?.[1]
-      ?.replace(/(?:再|然后|并且|，|。|；|;).*$/u, '')
-      .trim()
-    return cleanLayoutDraftSemanticLabel(rawTarget, { stripLeadingPoliteCue: true })
-  }
-
-  private resolveDraftOrdinalIndex(userInput: string): number | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    const match = normalized.match(/第([一二两三四五六七八九十\d]+)(?:个)?(?:小时|时段|段|块|内容块)/u)
-      ?? normalized.match(/([一二两三四五六七八九十\d]+)(?:个)?(?:小时|时段|段|块|内容块)/u)
-    const token = match?.[1]
-    if (!token) return null
-    const map: Record<string, number> = {
-      一: 0,
-      二: 1,
-      两: 1,
-      三: 2,
-      四: 3,
-      五: 4,
-      六: 5,
-      七: 6,
-      八: 7,
-      九: 8,
-      十: 9,
-    }
-    if (/^\d+$/.test(token)) {
-      const index = Number(token) - 1
-      return index >= 0 ? index : null
-    }
-    return Object.prototype.hasOwnProperty.call(map, token) ? map[token]! : null
-  }
 
   async submitInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision> {
     input = this.withUploadedLayoutDraftContext(input)
@@ -1653,27 +1811,46 @@ export class DemoRuntimeFacade {
       return this.submitInstruction(this.clearPendingAtomicState(input))
     }
 
-    if (input.pendingAtomicContext?.compositeTaskRun) {
-      const continuedCompositeDecision = await this.continueCompositeTaskRun(input, input.pendingAtomicContext.compositeTaskRun)
-      if (continuedCompositeDecision) return continuedCompositeDecision
-    }
-
-    if (input.pendingAtomicContext?.agentPendingTask) {
-      if (this.shouldStartFreshTaskOverPendingAgent(input)) {
-        return this.submitInstruction(this.clearPendingAtomicState(input))
-      }
-      return this.continueAgentCorePendingTask(input, input.pendingAtomicContext.agentPendingTask)
-    }
-
-    const pendingAtomicContextContinuation = await this.tryContinuePendingAtomicContext(input)
-    if (pendingAtomicContextContinuation) {
-      if (pendingAtomicContextContinuation.kind === 'decision') return pendingAtomicContextContinuation.decision
-      input = pendingAtomicContextContinuation.input
-    }
-
-    if (input.agentCoreEnabled && input.inputSource === 'quick_action' && this.isBarePlaylistCreationInstruction(input.userInput)) {
+    if (
+      input.agentCoreEnabled
+      && (input.inputSource === 'quick_action' || input.inputSource === 'user')
+      && this.isBarePlaylistCreationInstruction(input.userInput)
+    ) {
       const playlistStateDecision = await this.tryHandlePlaylistStateInstruction(input)
       if (playlistStateDecision) return playlistStateDecision
+    }
+
+    const normalizedAgentInput = input.userInput.replace(/\s+/g, '')
+    if (
+      input.agentCoreEnabled
+      && !this.isLayoutDraftFlowEnabled(input)
+      && this.isExplicitLayoutDraftPreparationInstruction(normalizedAgentInput)
+    ) {
+      return this.buildLayoutDraftDisabledDecision('前台当前未开启版面草案流程，本轮不会调用模型尝试生成草案。')
+    }
+
+    if (
+      input.agentCoreEnabled
+      && this.isLayoutDraftFlowEnabled(input)
+      && !this.isExplicitLayoutDraftPreparationInstruction(normalizedAgentInput)
+      && (
+        this.isLayoutDraftCommitInstruction(input.userInput)
+        || (
+          this.shouldAttachLayoutDraftToOrchestration(input.userInput)
+          && this.isFormalOrchestrationInstruction(normalizedAgentInput)
+        )
+      )
+    ) {
+      return await this.commitLayoutDraft(input, {
+        mode: 'layout_commit',
+        confidence: 0.95,
+        reasoning: '用户明确要求参考当前版面草案进入正式编排。',
+      })
+    }
+
+    if (this.shouldUseAtomicLlmSpecialist(input)) {
+      const agentCoreDecision = await this.tryHandleAgentCoreInstruction(input)
+      if (agentCoreDecision) return agentCoreDecision
     }
 
     if (input.agentCoreEnabled && (input.inputSource === 'user' || input.inputSource === 'quick_action')) {
@@ -1727,10 +1904,7 @@ export class DemoRuntimeFacade {
       input.currentLayoutDraft
       && input.preferLayoutDraftRefine
       && !this.isFormalOrchestrationInstruction(input.userInput.replace(/\s+/g, ''))
-      && (
-        this.shouldRouteToLayoutDraftRefine(input.userInput)
-        || this.shouldRouteToLayoutDraftContinuation(input.userInput)
-      )
+      && this.shouldRouteToLayoutDraftRefine(input.userInput)
     ) {
       const deterministicRefineDecision = await this.tryBuildDeterministicLayoutDraftRefineDecision(input)
       if (deterministicRefineDecision) return deterministicRefineDecision
@@ -1782,9 +1956,6 @@ export class DemoRuntimeFacade {
         reasoning: '用户确认当前待确认版面草案，准备进入正式编排。',
       })
     }
-
-    const pendingAtomicDecision = await this.tryContinuePendingAtomicClarification(effectiveInput)
-    if (pendingAtomicDecision) return pendingAtomicDecision
 
     const layoutDraftClearDecision = this.isLayoutDraftFlowEnabled(effectiveInput)
       ? this.tryClearLayoutDraft(effectiveInput)
@@ -1846,10 +2017,12 @@ export class DemoRuntimeFacade {
       )
     }
 
-    const atomicDecision = effectiveInput.scheduleState.playlistType === 'none'
-      ? this.buildMissingPlaylistWorkspaceDecision()
-      : await this.tryHandleAtomicInstruction(effectiveInput)
-    if (atomicDecision) return atomicDecision
+    if (!effectiveInput.agentCoreEnabled) {
+      const atomicDecision = effectiveInput.scheduleState.playlistType === 'none'
+        ? this.buildMissingPlaylistWorkspaceDecision()
+        : await this.tryHandleAtomicInstruction(effectiveInput)
+      if (atomicDecision) return atomicDecision
+    }
 
     if (this.shouldTryDirectFormalOrchestration(effectiveInput)) {
       const formalOrchestrationDecision = this.tryBuildFormalOrchestrationDecision(effectiveInput)
@@ -1882,10 +2055,6 @@ export class DemoRuntimeFacade {
       hasUploadedLayout: Boolean(getRuntimeLayoutEntry(effectiveInput.scheduleState.channelId, effectiveInput.scheduleState.date)?.templateMode),
       hasDefaultLayout: Boolean(getOrchestrationDemoLayout(effectiveInput.scheduleState.channelId, effectiveInput.scheduleState.date)),
     })
-    if (this.isAtomicFallbackIntent(layoutRecognition)) {
-      const pendingAtomicClarification = this.buildPendingAtomicClarification(effectiveInput, layoutRecognition.reasoning)
-      return this.buildPendingAtomicClarificationDecision(pendingAtomicClarification)
-    }
     if (this.isConfidentLayoutIntent(layoutRecognition)) {
       if (!this.isLayoutDraftFlowEnabled(effectiveInput)) return this.buildLayoutDraftDisabledDecision(layoutRecognition.reasoning)
       const classification = this.convertLayoutIntentToClassification(layoutRecognition, effectiveInput.userInput)
@@ -1912,11 +2081,7 @@ export class DemoRuntimeFacade {
     }
     if (classification.mode === 'micro_edit') {
       const result = await this.buildMicroEditCommand(effectiveInput, classification.reasoning)
-      return this.buildMicroEditDecisionWithContinuationFallback(
-        effectiveInput,
-        result,
-        classification.reasoning,
-      )
+      return this.buildMicroEditDecision(result, classification.reasoning)
     }
     if (classification.mode === 'validate_only') {
       if (effectiveInput.agentCoreEnabled) {
@@ -2692,7 +2857,18 @@ export class DemoRuntimeFacade {
     const mode: TaskMode = recognition.mode === 'clarify' || recognition.mode === 'atomic_fallback'
       ? 'clarify'
       : recognition.mode
-    return { mode, confidence: recognition.confidence, reasoning: recognition.reasoning, suggestedParams: { userIntent: recognition.semanticLabel || userInput, targetTimeRange: recognition.targetTimeRange, ignoreExistingLayout: recognition.ignoreExistingLayout, semanticLabel: recognition.semanticLabel, programTypeHint: recognition.programTypeHint, segments: recognition.segments } }
+    const targetTimeRange = this.resolveProtectedAwareLayoutTargetTimeRange(userInput, recognition.targetTimeRange)
+    return { mode, confidence: recognition.confidence, reasoning: recognition.reasoning, suggestedParams: { userIntent: recognition.semanticLabel || userInput, targetTimeRange, ignoreExistingLayout: recognition.ignoreExistingLayout, semanticLabel: recognition.semanticLabel, programTypeHint: recognition.programTypeHint, segments: recognition.segments } }
+  }
+
+  private resolveProtectedAwareLayoutTargetTimeRange(
+    userInput: string,
+    fallback?: { start: string; end: string },
+  ): { start: string; end: string } | undefined {
+    const normalized = normalizeSchedulingText(userInput)
+    const actionable = stripProtectedSchedulingClauses(userInput)
+    if (actionable !== normalized) return parseSchedulingTimeRange(userInput) ?? fallback
+    return fallback
   }
   private shouldApplyIntentOnExistingDraft(classification: TaskClassification, currentDraft?: LayoutDraft | null): boolean {
     if (classification.suggestedParams?.segments?.length) return true
@@ -2713,31 +2889,35 @@ export class DemoRuntimeFacade {
   }
   private normalizeStructuredSegments(segments?: LayoutIntentSegment[]): LayoutIntentSegment[] | undefined { return segments?.filter((segment) => Boolean(segment.start && segment.end)) }
 
+  private shouldUseAtomicLlmSpecialist(input: RuntimeSubmitInput): boolean {
+    if (!input.agentCoreEnabled) return false
+    if (input.inputSource !== 'user' && input.inputSource !== 'quick_action') return false
+    if (!input.foregroundContextPackage || input.foregroundContextPackage.scenario !== 'atomic') return false
+    if (input.scheduleState.playlistType === 'none') return false
+    const normalized = input.userInput.replace(/\s+/g, '')
+    if (this.isExplicitLayoutDraftPreparationInstruction(normalized)) return false
+    if (this.isLayoutDraftCommitInstruction(input.userInput)) return false
+    if (this.isLikelyRotationDraftSegmentEdit(input)) return false
+    return true
+  }
+
+  private isLikelyRotationDraftSegmentEdit(input: RuntimeSubmitInput): boolean {
+    if (input.scheduleState.playlistType !== 'rotation' || !input.currentLayoutDraft) return false
+    const normalized = input.userInput.replace(/\s+/g, '').toLowerCase()
+    if (!/(草案|内容块|第.{0,4}段|第.{0,4}小时|换成|改成|调整为|调整成|变成)/u.test(normalized)) return false
+    const labels = [
+      ...input.currentLayoutDraft.columns.map((column) => column.semanticLabel ?? column.columnName ?? ''),
+      ...(input.currentLayoutDraft.durationSegments ?? []).map((segment) => segment.label ?? ''),
+    ]
+      .map((label) => label.replace(/\s+/g, '').toLowerCase())
+      .filter((label) => label.length >= 2)
+    return labels.some((label) => normalized.includes(label))
+  }
+
   private resolveRotationStructuredSegments(
-    input: RuntimeSubmitInput,
     suggested: TaskClassification['suggestedParams'],
   ): LayoutIntentSegment[] | undefined {
     const normalizedSegments = this.normalizeStructuredSegments(suggested?.segments)
-    if ((normalizedSegments?.length ?? 0) > 1) return normalizedSegments
-    const explicitTargetLabel = this.extractExplicitDraftRefineTargetLabel(input.userInput)
-    const ordinalIndex = explicitTargetLabel ? this.resolveDraftOrdinalIndex(input.userInput) : null
-    if (
-      input.scheduleState.playlistType === 'rotation'
-      && input.currentLayoutDraft
-      && ordinalIndex !== null
-    ) {
-      const slots = [...input.currentLayoutDraft.layoutReference.slots]
-        .sort((left, right) => toClockText(left.startTime).localeCompare(toClockText(right.startTime)))
-      const slot = slots[ordinalIndex]
-      if (slot) {
-        return [{
-          start: toClockText(slot.startTime),
-          end: toClockText(slot.endTime),
-          semanticLabel: explicitTargetLabel,
-          programTypeHint: suggested?.programTypeHint,
-        }]
-      }
-    }
     return normalizedSegments
   }
   private resolvePreferredOrchestrationMode(input: RuntimeSubmitInput): Extract<TaskMode, 'full_generate' | 'partial_generate'> {
@@ -2753,14 +2933,17 @@ export class DemoRuntimeFacade {
     return null
   }
 
-  private async tryHandleAgentCoreInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision | null> {
-    if (input.preferLayoutDraftRefine) return null
-    if (input.currentLayoutDraft && this.shouldRouteToLayoutDraftRefine(input.userInput)) return null
-    if (!this.shouldAttemptAgentCoreInstruction(input.userInput)) return null
+  private async tryHandleAgentCoreInstruction(
+    input: RuntimeSubmitInput,
+    plannerAtomicAction?: Extract<AgentPlannerAction, { type: 'atomic_command' }>,
+    plan?: AgentPlan,
+  ): Promise<RuntimeDecision | null> {
+    if (!input.agentCoreEnabled && !this.shouldAttemptAgentCoreInstruction(input.userInput)) return null
 
-    const agentRun = await this.runAgentCore(input)
+    const plannerInterpretation = this.buildPlannerAtomicInterpretation(input, plannerAtomicAction, plan)
+    const agentRun = await this.runAgentCore(input, undefined, plannerInterpretation)
     if (agentRun.result.status === 'needs_clarification' && !agentRun.result.decision.pendingTask && agentRun.result.decision.constraintReport?.issues[0]?.code === 'unsupported_intent') {
-      return null
+      return input.agentCoreEnabled ? this.buildAgentCoreDecision(input, agentRun) : null
     }
     return this.buildAgentCoreDecision(input, agentRun)
   }
@@ -2837,39 +3020,7 @@ export class DemoRuntimeFacade {
       }
     }
 
-    const keyword = this.cleanScheduleQueryKeyword(this.extractAgentCandidateKeywordFallbackStable(input.userInput, 'query'))
-    if (!keyword) return null
-    const matches = input.currentSchedule.filter((item) => {
-      const haystack = [item.programName, item.programCode, item.programType]
-        .filter((value): value is string => Boolean(value))
-        .join(' ')
-      return haystack.includes(keyword)
-    })
-    const content = matches.length > 0
-      ? `播单中找到 ${matches.length} 个匹配节目：${matches.map((item) => `${toClockText(item.startTime)} ${item.programName || item.programCode || item.id}`).join('；')}。`
-      : `我查了当前${playlistLabel}，没有找到和“${keyword}”匹配的已编排节目。`
-
-    return {
-      kind: 'message',
-      statusHint: 'completed',
-      feedback: createFeedback(content, 'general', '查询结果', {
-        details: {
-          queryKind: 'program_lookup',
-          keyword,
-          matchedCount: matches.length,
-          matches: matches.map((item) => asRuntimeItem(item)),
-          playlistType: input.scheduleState.playlistType,
-          queryResult: {
-            kind: 'program_lookup',
-            keyword,
-            scheduleItems: matches.map((item) => asRuntimeItem(item)),
-            totalCount: matches.length,
-            playlistType: input.scheduleState.playlistType,
-          },
-          agentEvidenceBudget: this.buildDeterministicQueryEvidenceBudget(input),
-        },
-      }),
-    }
+    return null
   }
 
   private isScheduleOverviewQuery(normalized: string): boolean {
@@ -2877,13 +3028,6 @@ export class DemoRuntimeFacade {
       return false
     }
     return !/(候选|节目库|素材库|推荐|可用|可播|在哪|哪里|几?点播|播出时间|排在几点|节目名|名称|标题|栏目)/u.test(normalized)
-  }
-
-  private cleanScheduleQueryKeyword(value: string | undefined): string | undefined {
-    const cleaned = value
-      ?.replace(/(?:\u5728\u54ea\u513f|\u5728\u54ea\u91cc|\u5728\u54ea|\u54ea\u91cc|\u54ea\u513f|\u6392\u5728\u51e0\u70b9|\u51e0\u70b9\u64ad|\u4ec0\u4e48\u65f6\u5019\u64ad|\u64ad\u51fa\u65f6\u95f4)$/u, '')
-      .trim()
-    return this.cleanAgentCandidateKeywordStable(cleaned)
   }
 
   private buildDeterministicQueryEvidenceBudget(input: RuntimeSubmitInput): RuntimeDetailMap {
@@ -3402,9 +3546,6 @@ export class DemoRuntimeFacade {
   }
 
   private async tryBuildCompositeTaskDecision(input: RuntimeSubmitInput): Promise<RuntimeDecision | null> {
-    const insertShiftDecision = await this.tryBuildInsertWithShiftTaskDecision(input)
-    if (insertShiftDecision) return insertShiftDecision
-
     const deleteTimeRange = this.extractCompositeBatchDeleteTimeRange(input.userInput)
     if (deleteTimeRange) {
       const { start, end } = deleteTimeRange.range
@@ -3653,9 +3794,9 @@ export class DemoRuntimeFacade {
         targetItems: matchedItems,
       },
     }
-    return this.buildPendingInsertRecommendationDecision(
+    return this.buildInsertRecommendationAdvisoryDecision(
       pendingInsertRecommendation,
-      `我找到了 ${matchedItems.length} 条要替换的节目，也找到了 ${recommendedCandidates.length} 个“${replacementHint}”候选。请先确认具体用哪一个，我不会自动套用候选。`,
+      `我找到了 ${matchedItems.length} 条要替换的节目，也找到了 ${recommendedCandidates.length} 个“${replacementHint}”候选。现在还不能替你直接选其中一个。`,
       undefined,
     )
   }
@@ -3902,152 +4043,6 @@ export class DemoRuntimeFacade {
       createdAt: taskRun.createdAt,
       updatedAt: taskRun.updatedAt,
     })
-  }
-
-  private async tryBuildInsertWithShiftTaskDecision(input: RuntimeSubmitInput): Promise<RuntimeDecision | null> {
-    if (!this.hasInsertShiftCompositeCue(input.userInput)) return null
-    const clock = parseAtomicClockExpression(input.userInput)
-    const targetTime = clock?.targetTime
-    const programHint = this.extractInsertShiftProgramName(input.userInput)
-    if (!targetTime || !programHint) return null
-    const targetSeconds = clockToSeconds(targetTime)
-    const occupied = input.currentSchedule.some((item) => {
-      const start = clockToSeconds(item.startTime)
-      const end = clockToSeconds(item.endTime)
-      return start <= targetSeconds && targetSeconds < end
-    })
-    if (!occupied) return null
-
-    const params: InsertParams = {
-      targetTime,
-      programName: programHint,
-      rawProgramText: programHint,
-      semanticLabel: programHint,
-      programTypeHint: this.inferInsertProgramTypeHint(programHint),
-      expectedDurationSeconds: this.extractInsertDurationSeconds(input.userInput) ?? undefined,
-    }
-    const columnId = findSlotColumnIdByTime(input.scheduleState.channelId, input.scheduleState.date, normalizeDateTime(input.scheduleState.date, targetTime))
-    const { candidates, searchMode, blockedByDuration } = await this.searchInsertCandidates({
-      scheduleState: input.scheduleState,
-      params,
-      columnId,
-      currentSchedule: [],
-    })
-    if (blockedByDuration) {
-      return {
-        kind: 'message',
-        statusHint: 'failed',
-        feedback: createFeedback(
-          `我理解你想在 ${targetTime} 插入《${programHint}》，并把已有节目后移，但没有找到时长为 ${this.formatDurationText(params.expectedDurationSeconds ?? 0)} 的候选。你可以换节目名，或明确允许放宽时长。`,
-          'selection',
-          '时长不匹配',
-          {
-            explanation: '插入顺延任务必须先命中符合用户明确时长的候选。不能用其他时长候选替代。',
-            details: { programHint, targetTime, expectedDurationSeconds: params.expectedDurationSeconds },
-          },
-        ),
-      }
-    }
-    const resolution = this.insertCandidateResolver.resolve({
-      channelId: input.scheduleState.channelId,
-      columnId,
-      params,
-      candidates,
-      searchMode,
-    })
-    if (resolution.status === 'needs_clarification') {
-      return {
-        kind: 'message',
-        statusHint: 'needs_clarification',
-        feedback: createFeedback(
-          `我理解你想在 ${targetTime} 插入《${programHint}》，并把已有节目后移，但还没找到可以确认的节目候选。你可以换一个栏目名或节目名。`,
-          'selection',
-          '未找到候选',
-          {
-            explanation: resolution.reasoning,
-            details: { programHint, targetTime, expectedDurationSeconds: params.expectedDurationSeconds },
-          },
-        ),
-      }
-    }
-    if (resolution.status === 'needs_recommendation') {
-      const pendingInsertRecommendation = this.buildPendingInsertRecommendation(
-        params,
-        input.userInput,
-        resolution.reasoning,
-        this.mapRuntimeInsertRecommendationCandidates(resolution.candidates),
-        { resumeCompositeTask: { kind: 'insert_with_shift' } },
-      )
-      return this.buildPendingInsertRecommendationDecision(
-        pendingInsertRecommendation,
-        `我找到了 ${pendingInsertRecommendation.recommendedCandidates.length} 个可插入候选。因为插入后还要顺延已有节目，我需要你先确认具体用哪一个。`,
-      )
-    }
-
-    const selectedCandidate = resolution.selectedCandidate
-
-    const affectedItems = input.currentSchedule.filter((item) => {
-      const start = clockToSeconds(item.startTime)
-      const end = clockToSeconds(item.endTime)
-      return start >= targetSeconds || (start <= targetSeconds && targetSeconds < end)
-    })
-    if (affectedItems.length > DEFAULT_SCHEDULING_TASK_LIMITS.maxStepsPerStage) {
-      return {
-        kind: 'message',
-        statusHint: 'needs_confirmation',
-        feedback: createFeedback(
-          `${targetTime} 后会影响 ${affectedItems.length} 条节目，单次最多先处理 ${DEFAULT_SCHEDULING_TASK_LIMITS.maxStepsPerStage} 条。请缩小时间范围，或改成局部后移。`,
-          'planning',
-          '需要分批',
-          {
-            explanation: '插入顺延影响范围超过单个 stage 上限。',
-            details: { affectedItems, taskLimit: DEFAULT_SCHEDULING_TASK_LIMITS.maxStepsPerStage },
-          },
-        ),
-      }
-    }
-
-    const taskRun = this.buildInsertWithShiftTaskRun(input, targetTime, selectedCandidate, affectedItems)
-    const pendingContext: RuntimePendingAtomicContext = this.pendingAtomicContextService.initialize({
-      action: 'insert',
-      phase: 'clarifying',
-      summary: this.describeCompositeTaskSummary(taskRun),
-      reasoning: this.describeCompositeTaskConfirmation(taskRun),
-      confirmationNote: this.describeCompositeTaskConfirmation(taskRun),
-      originalUserInput: input.userInput,
-      collectedUserInput: input.userInput,
-      slots: {
-        targetTime,
-        programName: selectedCandidate.programName,
-        rawProgramText: programHint,
-        offsetSeconds: selectedCandidate.duration,
-        direction: 'forward',
-      },
-      missingFields: ['selection'],
-      followUpQuestion: this.describeCompositeTaskConfirmation(taskRun),
-      compositeTaskRun: taskRun,
-      attemptCount: 0,
-      createdAt: taskRun.createdAt,
-      updatedAt: taskRun.updatedAt,
-    })
-
-    return {
-      kind: 'pending_atomic_context',
-      feedback: createFeedback(
-        this.describeCompositeTaskConfirmation(taskRun),
-        'planning',
-        '待确认',
-        {
-          explanation: '已把插入冲突处理编译为后移加插入的复合任务计划。',
-          details: {
-            taskRun,
-            selectedCandidate,
-            affectedItems,
-          },
-        },
-      ),
-      pendingAtomicContext: pendingContext,
-    }
   }
 
   private buildInsertWithShiftTaskRun(
@@ -4801,34 +4796,6 @@ export class DemoRuntimeFacade {
       || /(按|参考|按照).*(草案|版面).*(补齐|补排|空窗|空档|空位)/u.test(normalized)
   }
 
-  private hasInsertShiftCompositeCue(userInput: string): boolean {
-    const normalized = userInput.replace(/\s+/g, '')
-    return /(插入|添加|安排|排入|放置)/u.test(normalized)
-      && /(已有节目|有节目|原有节目|原来的节目|其余节目|其他节目|后面节目|后续节目|受影响节目|占位|占着|冲突|如果.*有|若.*有)/u.test(normalized)
-      && /(后移|顺延|往后|向后|推后|延后)/u.test(normalized)
-  }
-
-  private extractInsertShiftProgramName(userInput: string): string | undefined {
-    const normalized = userInput.replace(/\s+/g, '')
-    const patterns = [
-      /(?:在|到)?\d{1,2}(?::\d{2})?(?:点|:00)?(?:强制)?(?:插入|添加|安排|排入|放置)(.+?)(?:，|,|。|\.|如果|若|已有节目|有节目|原有节目|原来的节目|其余节目|其他节目|后面节目|后续节目|受影响节目|占位|占着|冲突|就后移|后移|顺延|往后|向后|推后|延后|$)/u,
-      /(?:插入|添加|安排|排入|放置)(.+?)(?:到|在)\d{1,2}(?::\d{2})?(?:点|:00)?/u,
-    ]
-    for (const pattern of patterns) {
-      const value = pattern.exec(normalized)?.[1]
-      const cleaned = this.normalizeAtomicProgramHint(value)
-      if (cleaned && cleaned.length >= 2) return cleaned
-    }
-    return this.extractAtomicProgramHint(userInput, 'insert')
-  }
-
-  private extractInsertDurationSeconds(userInput: string): number | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    const durationToken = '(?:一刻钟|三刻钟|半个?小时|(?:(?:\\d+(?:\\.\\d+)?)|[零〇一二两三四五六七八九十]{1,3})(?:个)?小时|(?:(?:\\d+)|[零〇一二两三四五六七八九十]{1,3})(?:分钟|分))'
-    const match = new RegExp(durationToken, 'u').exec(normalized)
-    return match?.[0] ? this.parseSequentialDurationSeconds(match[0]) : null
-  }
-
   private formatDurationText(seconds: number): string {
     if (seconds % 3600 === 0) return `${seconds / 3600}小时`
     if (seconds % 60 === 0) return `${seconds / 60}分钟`
@@ -4927,7 +4894,7 @@ export class DemoRuntimeFacade {
   }
 
   private isCompositeTaskConfirmInput(normalized: string): boolean {
-    return /^(?:确认|确定|执行|继续|下一批|继续执行|确认执行|可以|好的|好|ok|yes)$/iu.test(normalized)
+    return /^(?:确认|确定|执行|下一批|确认执行|可以|好的|好|ok|yes)$/iu.test(normalized)
   }
 
   private isCompositeTaskCancelInput(normalized: string): boolean {
@@ -4949,11 +4916,78 @@ export class DemoRuntimeFacade {
     }
   }
 
-  private async runAgentCore(input: RuntimeSubmitInput, pendingTask?: AgentPendingTask): Promise<AgentCoreRunResult> {
+  private buildPlannerAtomicInterpretation(
+    input: RuntimeSubmitInput,
+    action?: Extract<AgentPlannerAction, { type: 'atomic_command' }>,
+    plan?: AgentPlan,
+  ): AgentIntentInterpretation | undefined {
+    if (!action?.intent) return undefined
+    const anchoredTargetTime = action.targetTime ?? this.resolvePlannerTvLayoutAnchorTime(input, action)
+    const slots = {
+      targetTime: anchoredTargetTime,
+      newStartTime: action.newStartTime,
+      rangeStart: action.rangeStart,
+      rangeEnd: action.rangeEnd,
+      programHint: action.programHint,
+      replacementHint: action.replacementHint,
+      offsetSeconds: action.offsetSeconds,
+      direction: action.direction,
+      candidateId: action.candidateId,
+      targetItemId: action.targetItemId,
+      targetProgramName: action.targetProgramName,
+    }
+    const hasSlots = Object.values(slots).some((value) => value !== undefined && value !== '')
+    return {
+      intent: action.intent as AtomicCommandIntent,
+      confidence: hasSlots ? 0.88 : 0.78,
+      source: 'llm',
+      slots,
+      keyword: action.keyword,
+      searchAlternatives: action.searchAlternatives,
+      reasoning: plan?.reasoning,
+      assistantFeedback: plan?.assistantReplyDraft,
+      contextMode: 'scenario_context',
+    }
+  }
+
+  private resolvePlannerTvLayoutAnchorTime(
+    input: RuntimeSubmitInput,
+    action: Extract<AgentPlannerAction, { type: 'atomic_command' }>,
+  ): string | undefined {
+    if (input.scheduleState.playlistType !== 'tv' || !input.currentLayoutDraft) return undefined
+    const labels = [
+      action.targetProgramName,
+      action.programHint,
+      action.keyword,
+      ...(action.searchAlternatives ?? []),
+    ].filter((value): value is string => Boolean(value?.trim()))
+    if (!labels.length) return undefined
+    const normalize = (value: string) => value.replace(/[\s《》“”"'，,。:：；;、\-—_]/g, '').toLowerCase()
+    const normalizedLabels = labels.map(normalize).filter(Boolean)
+    for (const [index, slot] of input.currentLayoutDraft.layoutReference.slots.entries()) {
+      const column = input.currentLayoutDraft.columns.find((item) => item.columnId === slot.columnId)
+      const anchorLabel = column?.semanticLabel ?? column?.columnName ?? input.currentLayoutDraft.durationSegments?.[index]?.label ?? ''
+      const normalizedAnchor = normalize(anchorLabel)
+      if (!normalizedAnchor) continue
+      if (normalizedLabels.some((label) => label.includes(normalizedAnchor) || normalizedAnchor.includes(label))) {
+        return toClockText(slot.startTime)
+      }
+    }
+    return undefined
+  }
+
+  private async runAgentCore(
+    input: RuntimeSubmitInput,
+    pendingTask?: AgentPendingTask,
+    plannerInterpretation?: AgentIntentInterpretation,
+  ): Promise<AgentCoreRunResult> {
     const dataGateway = this.buildAgentCoreDataGateway(input)
+    const llmTraceSnapshotBefore = this.readLlmRequestTraceSnapshot()
     const runtime = new SchedulingAgentRuntime({
       dataGateway,
+      llmClient: this.llmClient,
       intentInterpreter: new LlmAgentIntentInterpreter(this.llmClient),
+      onTraceStep: (step) => this.handleAgentTraceProgress(input, step),
     })
     const capabilitySummary = runtime.describeCapabilities()
     const operationalReadiness = await runtime.auditOperationalReadiness({
@@ -4961,7 +4995,7 @@ export class DemoRuntimeFacade {
       channelId: input.scheduleState.channelId,
       date: input.scheduleState.date,
     })
-    const result = await runtime.submit({
+    const agentInput: AgentSubmitInput = {
       userInput: input.userInput,
       channelId: input.scheduleState.channelId,
       date: input.scheduleState.date,
@@ -4969,13 +5003,172 @@ export class DemoRuntimeFacade {
       pendingTask,
       interpretation: pendingTask
         ? this.resolveDeterministicPendingAgentInterpretation(input.userInput, pendingTask)
-        : undefined,
+        : plannerInterpretation,
+      llmContextPackage: pendingTask ? undefined : await this.buildAgentLlmContextWithLayoutAnchors(input, dataGateway),
+    }
+    const result = await runtime.submit({
+      ...agentInput,
     })
+    const llmRequestTraces = this.diffLlmRequestTraces(llmTraceSnapshotBefore, this.readLlmRequestTraceSnapshot())
     return {
       result,
       capabilitySummary,
       operationalReadiness,
+      llmRequestTraces,
     }
+  }
+
+  private handleAgentTraceProgress(input: RuntimeSubmitInput, step: AgentTraceStep): void {
+    const event = this.buildAgentTraceProgressEvent(input, step)
+    if (!event) return
+    try {
+      input.onProgress?.(event)
+    } catch {
+      // Progress messages are explanatory only and must not block execution.
+    }
+  }
+
+  private buildAgentTraceProgressEvent(input: RuntimeSubmitInput, step: AgentTraceStep): RuntimeProgressEvent | null {
+    const detail = step.detail ?? {}
+    if (step.status === 'understanding' && step.label === 'Agent intent interpreter 返回结构化意图') {
+      const assistantFeedback = typeof detail.assistantFeedback === 'string' ? detail.assistantFeedback.trim() : ''
+      const reasoning = typeof detail.reasoning === 'string' ? detail.reasoning.trim() : ''
+      const content = assistantFeedback || reasoning
+      if (!content) return null
+      return {
+        id: `agent-trace:${input.scheduleState.playlistId ?? input.scheduleState.playlistType}:understanding:${step.sequence}`,
+        content,
+        processType: 'planning',
+        processTypeLabel: '理解需求',
+        details: {
+          progressStage: 'intent_understood',
+          intent: detail.intent,
+          slots: detail.slots,
+          noMutation: true,
+        },
+      }
+    }
+
+    if (step.status === 'planning' && step.label === '调用节目查询服务查找候选') {
+      const keyword = typeof detail.keyword === 'string' ? detail.keyword.trim() : ''
+      const alternatives = Array.isArray(detail.searchAlternatives)
+        ? detail.searchAlternatives.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : []
+      const keywords = Array.from(new Set([keyword, ...alternatives].filter(Boolean))).slice(0, 4)
+      const keywordText = keywords.length > 0 ? keywords.join(' / ') : '当前节目线索'
+      const targetTime = typeof detail.targetTime === 'string' ? detail.targetTime : ''
+      const timeText = targetTime ? `，位置按 ${targetTime}` : ''
+      return {
+        id: `agent-trace:${input.scheduleState.playlistId ?? input.scheduleState.playlistType}:candidate-search:${step.sequence}`,
+        content: `正在按 ${keywordText} 查节目库${timeText}。`,
+        processType: 'selection',
+        processTypeLabel: '查节目库',
+        details: {
+          progressStage: 'candidate_lookup',
+          searchKeywords: keywords,
+          targetTime,
+          noMutation: true,
+        },
+      }
+    }
+
+    if (
+      step.status === 'planning'
+      && (
+        step.label === 'Candidate search retried with rewritten keywords.'
+        || step.label === 'Candidate search retried with LLM-provided alternatives.'
+      )
+    ) {
+      const attempts = Array.isArray(detail.attempts)
+        ? detail.attempts.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+        : []
+      const retryKeywords = attempts
+        .map((attempt) => typeof attempt.keyword === 'string' ? attempt.keyword.trim() : '')
+        .filter(Boolean)
+        .slice(1, 5)
+      if (retryKeywords.length === 0) return null
+      return {
+        id: `agent-trace:${input.scheduleState.playlistId ?? input.scheduleState.playlistType}:candidate-retry:${step.sequence}`,
+        content: `原来的线索还不够，我按 ${retryKeywords.join(' / ')} 再查一次节目库。`,
+        processType: 'selection',
+        processTypeLabel: '继续查找',
+        details: {
+          progressStage: 'candidate_lookup_retry',
+          searchKeywords: retryKeywords,
+          noMutation: true,
+        },
+      }
+    }
+
+    // 新增分支：LLM 候选决策完成（C13：不出现"置信度""匹配度"等技术词）
+    if (step.status === 'planning' && step.label === 'LLM 候选决策完成') {
+      const reasoning = typeof detail.reasoning === 'string' ? detail.reasoning.trim() : ''
+      const considerations = Array.isArray(detail.considerations)
+        ? detail.considerations.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : []
+      const selectedName = typeof detail.selectedCandidateName === 'string' ? detail.selectedCandidateName.trim() : ''
+      const selectedCandidateId = typeof detail.selectedCandidateId === 'string' ? detail.selectedCandidateId : null
+      const candidateCount = typeof detail.candidateCount === 'number' ? detail.candidateCount : 0
+      const decisionType = typeof detail.decisionType === 'string' ? detail.decisionType : ''
+
+      let decisionText: string
+      if (decisionType === 'auto_select' && selectedName) {
+        decisionText = `在 ${candidateCount} 个候选中选择「${selectedName}」`
+      } else if (decisionType === 'needs_clarification') {
+        decisionText = `查到 ${candidateCount} 个候选，需要你确认具体排哪个`
+      } else if (decisionType === 'unable_to_decide') {
+        decisionText = `查到 ${candidateCount} 个候选，但暂时无法给出有把握的选择`
+      } else {
+        decisionText = `查到 ${candidateCount} 个候选`
+      }
+      const reasoningText = reasoning ? `，理由：${reasoning}` : ''
+      const considerationsText = considerations.length > 0 ? `。评估要点：${considerations.join('；')}` : ''
+
+      return {
+        id: `agent-trace:${input.scheduleState.playlistId ?? input.scheduleState.playlistType}:candidate-decision:${step.sequence}`,
+        content: `${decisionText}${reasoningText}${considerationsText}。`,
+        processType: 'selection',
+        processTypeLabel: '候选决策',
+        details: {
+          progressStage: 'candidate_decision',
+          selectedCandidateId,
+          selectedCandidateName: selectedName,
+          reasoning,
+          considerations,
+          candidateCount,
+          decisionType,
+          noMutation: true,
+        },
+      }
+    }
+
+    return null
+  }
+
+  private readLlmRequestTraceSnapshot(): LLMRequestTrace[] {
+    const reader = this.llmClient as { getRecentRequestTraces?: () => LLMRequestTrace[] }
+    return typeof reader.getRecentRequestTraces === 'function'
+      ? reader.getRecentRequestTraces()
+      : []
+  }
+
+  private diffLlmRequestTraces(before: LLMRequestTrace[], after: LLMRequestTrace[]): LLMRequestTrace[] {
+    const beforeKeys = new Set(before.map((trace) => this.getLlmRequestTraceKey(trace)))
+    return after
+      .filter((trace) => !beforeKeys.has(this.getLlmRequestTraceKey(trace)))
+      .reverse()
+  }
+
+  private getLlmRequestTraceKey(trace: LLMRequestTrace): string {
+    return [
+      trace.label,
+      trace.startedAt,
+      trace.durationMs,
+      trace.timeoutMs,
+      trace.attemptCount,
+      trace.success ? 'ok' : 'failed',
+      trace.error ?? '',
+    ].join('|')
   }
 
   private resolveDeterministicPendingAgentInterpretation(
@@ -5013,9 +5206,44 @@ export class DemoRuntimeFacade {
     return undefined
   }
 
+  private async buildAgentLlmContextWithLayoutAnchors(
+    input: RuntimeSubmitInput,
+    dataGateway: RuntimeSchedulingDataGateway,
+  ): Promise<AgentLlmContextPackage | undefined> {
+    if (!input.currentLayoutDraft || input.scheduleState.playlistType !== 'tv') return undefined
+    const anchors = this.buildLayoutDraftAnchorsForAgent(input.currentLayoutDraft)
+    if (!anchors.length) return undefined
+    try {
+      const context = await dataGateway.loadContext({
+        userInput: input.userInput,
+        channelId: input.scheduleState.channelId,
+        date: input.scheduleState.date,
+        playlistId: input.scheduleState.playlistId,
+      })
+      return {
+        ...buildAgentLlmContextPackage(context, { userInput: input.userInput }),
+        layoutDraftAnchors: anchors,
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  private buildLayoutDraftAnchorsForAgent(draft: LayoutDraft): NonNullable<AgentLlmContextPackage['layoutDraftAnchors']> {
+    return draft.layoutReference.slots.slice(0, 24).map((slot, index) => {
+      const column = draft.columns.find((item) => item.columnId === slot.columnId)
+      const segment = draft.durationSegments?.[index]
+      const label = column?.semanticLabel ?? column?.columnName ?? segment?.label ?? slot.id
+      return {
+        label,
+        startTime: toClockText(slot.startTime),
+        endTime: toClockText(slot.endTime),
+        queryHints: column?.queryHints?.slice(0, 6),
+      }
+    }).filter((anchor) => Boolean(anchor.label))
+  }
+
   private shouldStartFreshTaskOverPendingAgent(input: RuntimeSubmitInput): boolean {
-    const pendingTask = input.pendingAtomicContext?.agentPendingTask
-    if (!pendingTask) return false
     const normalized = input.userInput.replace(/\s+/g, '')
     if (
       this.isExplicitPendingConfirm(normalized)
@@ -5023,28 +5251,6 @@ export class DemoRuntimeFacade {
       || this.isExplicitPendingReject(normalized)
     ) {
       return false
-    }
-    const newAction = this.detectAtomicAction(normalized)
-    if (!newAction) return false
-    const pendingAction = this.mapAgentIntentToRuntimeAction(pendingTask.intent)
-    if (pendingTask.phase === 'needs_clarification' && newAction === pendingAction) return false
-    if (newAction !== pendingAction) return true
-    return this.hasFreshAtomicCommandShape(input.userInput, newAction)
-  }
-
-  private hasFreshAtomicCommandShape(userInput: string, action: RuntimeAtomicAction): boolean {
-    const normalized = userInput.replace(/\s+/g, '')
-    if (action === 'move') {
-      return Boolean(parseAtomicClockExpression(normalized) && parseAtomicOffset(normalized))
-    }
-    if (action === 'insert') {
-      return Boolean(parseAtomicClockExpression(normalized) && this.extractAtomicProgramHint(userInput, 'insert'))
-    }
-    if (action === 'replace') {
-      return Boolean(parseAtomicClockExpression(normalized) && this.extractAtomicReplacementProgramName(userInput))
-    }
-    if (action === 'delete') {
-      return Boolean(parseAtomicClockExpression(normalized) || this.extractAtomicProgramHint(userInput, 'delete'))
     }
     return false
   }
@@ -5197,26 +5403,16 @@ export class DemoRuntimeFacade {
   private resolveAgentCandidateKeyword(input: AgentSubmitInput): string | undefined {
     const interpretation = input.interpretation
     const pendingKeyword = this.resolvePendingAgentCandidateKeyword(input.pendingTask)
-    const pendingTimeOnlyFollowUp = Boolean(input.pendingTask && this.isAgentPendingTimeOnlyFollowUp(input.userInput))
-    const pendingFollowUpKeyword = input.pendingTask
-      && !this.isAgentPendingControlInput(input.userInput)
-      && !pendingTimeOnlyFollowUp
-      ? this.extractAgentCandidateKeywordFallbackStable(input.userInput, input.pendingTask.intent)
-      : undefined
     if (!interpretation?.intent) {
-      return pendingFollowUpKeyword ?? pendingKeyword ?? this.extractAgentCandidateKeywordFallbackStable(input.userInput)
+      return pendingKeyword
     }
     if (interpretation.intent === 'insert') {
-      return (pendingTimeOnlyFollowUp ? undefined : this.cleanAgentCandidateKeywordStable(interpretation.slots?.programHint))
-        ?? pendingFollowUpKeyword
+      return this.cleanAgentCandidateKeywordStable(interpretation.slots?.programHint)
         ?? pendingKeyword
-        ?? (pendingTimeOnlyFollowUp ? undefined : this.extractAgentCandidateKeywordFallbackStable(input.userInput, interpretation.intent))
     }
     if (interpretation.intent === 'replace') {
-      return (pendingTimeOnlyFollowUp ? undefined : this.cleanAgentCandidateKeywordStable(interpretation.slots?.replacementHint))
-        ?? pendingFollowUpKeyword
+      return this.cleanAgentCandidateKeywordStable(interpretation.slots?.replacementHint)
         ?? pendingKeyword
-        ?? (pendingTimeOnlyFollowUp ? undefined : this.extractAgentCandidateKeywordFallbackStable(input.userInput, interpretation.intent))
     }
     if (interpretation.intent === 'query' && interpretation.queryKind === 'candidate_lookup') {
       return this.cleanAgentCandidateKeywordStable(
@@ -5224,7 +5420,7 @@ export class DemoRuntimeFacade {
         ?? interpretation.slots?.programHint
         ?? interpretation.slots?.replacementHint
         ?? interpretation.slots?.targetProgramName,
-      ) ?? pendingFollowUpKeyword ?? pendingKeyword ?? this.extractAgentCandidateKeywordFallbackStable(input.userInput, interpretation.intent)
+      ) ?? pendingKeyword
     }
     return undefined
   }
@@ -5253,53 +5449,6 @@ export class DemoRuntimeFacade {
     return undefined
   }
 
-  private cleanAgentCandidateKeyword(value: string | undefined): string | undefined {
-    const cleaned = value
-      ?.replace(/\s+/g, '')
-      .replace(/^(?:节目|栏目|内容|素材|候选|可用|可播)+/u, '')
-      .replace(/(?:节目|栏目|内容|素材|候选|可用|可播)$/u, '')
-      .trim()
-    const finalLabel = cleaned ? this.cleanLayoutDraftActionNoise(cleaned) : ''
-    return finalLabel.length >= 2 ? finalLabel : undefined
-  }
-
-  private extractAgentCandidateKeywordFallback(
-    userInput: string,
-    intent?: AtomicCommandIntent,
-  ): string | undefined {
-    let normalized = userInput
-      .replace(/\s+/g, '')
-      .replace(/\d{1,2}[:：]\d{1,2}(?::\d{1,2})?/g, '')
-      .replace(/\d{1,2}点(?:\d{1,2}分?)?/g, '')
-      .replace(/[，。！？；：、,.!?;:]/gu, '')
-
-    const resolvedIntent = intent ?? this.inferAgentCandidateKeywordIntent(normalized)
-    if (!resolvedIntent) return undefined
-
-    if (resolvedIntent === 'replace') {
-      normalized = /(?:替换成|替换为|换成|改成|改为|换播|替换)(?:节目|栏目|内容|素材)?(.+)$/u.exec(normalized)?.[1] ?? normalized
-    } else if (resolvedIntent === 'insert') {
-      normalized = /(?:插入|添加|安排|排入|放置|加一条|加个|来一段|放一段)(?:节目|栏目|内容|素材)?(.+)$/u.exec(normalized)?.[1] ?? normalized
-    } else if (resolvedIntent === 'query') {
-      normalized = normalized
-        .replace(/^(?:请|帮我|帮忙|查一下|查询|查找|查看|看看|找|搜索|当前|现在)+/u, '')
-        .replace(/(?:节目库|素材库|候选库|候选|可用|可播|有哪些|是什么|有什么|里面|情况)+/gu, '')
-    }
-
-    const cleaned = normalized
-      .replace(/^(?:请|帮我|帮忙|在|到|给|把|将|的|一个|一条|一段|节目|栏目|内容|素材|候选|可用|可播)+/u, '')
-      .replace(/(?:节目|栏目|内容|素材|候选|可用|可播|一下)$/u, '')
-      .trim()
-    return this.cleanAgentCandidateKeyword(cleaned)
-  }
-
-  private inferAgentCandidateKeywordIntent(userInput: string): Extract<AtomicCommandIntent, 'insert' | 'replace' | 'query'> | undefined {
-    if (/(?:替换成|替换为|换成|改成|改为|换播|替换)/u.test(userInput)) return 'replace'
-    if (/(?:插入|添加|安排|排入|放置|加一条|加个|来一段|放一段)/u.test(userInput)) return 'insert'
-    if (/(?:查一下|查询|查找|查看|看看|找|搜索|候选|可用|可播|有哪些|是什么|有什么|节目库|素材库|候选库)/u.test(userInput)) return 'query'
-    return undefined
-  }
-
   private cleanAgentCandidateKeywordStable(value: string | undefined): string | undefined {
     const cleaned = value
       ?.replace(/\s+/g, '')
@@ -5307,63 +5456,13 @@ export class DemoRuntimeFacade {
       .replace(/^(?:\u8282\u76ee|\u680f\u76ee|\u5185\u5bb9|\u7d20\u6750|\u5019\u9009|\u53ef\u7528|\u53ef\u64ad)+/u, '')
       .replace(/(?:\u8282\u76ee|\u680f\u76ee|\u5185\u5bb9|\u7d20\u6750|\u5019\u9009|\u53ef\u7528|\u53ef\u64ad)$/u, '')
       .trim()
-    if (cleaned && /^(?:\u5c31|\u90a3|\u90a3\u5c31|\u5427|\u554a|\u5440|\u5462|\u597d|\u597d\u7684|\u53ef\u4ee5|\u884c|\u5b9a|\u653e|\u6392|\u5b89\u6392|\u63d2|\u63d2\u5165)+$/u.test(cleaned)) return undefined
+    if (cleaned && /^(?:\u5c31|\u90a3|\u90a3\u5c31|\u5427|\u554a|\u5440|\u5462|\u597d|\u597d\u7684|\u53ef\u4ee5|\u884c|\u5b9a|\u653e|\u6392|\u5b89\u6392|\u63d2|\u63d2\u5165|\u66ff\u6362|\u66ff\u6362\u6210|\u66ff\u6362\u4e3a|\u6362\u6210|\u6362\u5230|\u6539\u6210|\u6539\u4e3a|\u6539\u5230|\u6539\u5728|\u6362|\u6539|\u6210|\u4e3a)+$/u.test(cleaned)) return undefined
     return cleaned && cleaned.length >= 2 ? cleaned : undefined
-  }
-
-  private extractAgentCandidateKeywordFallbackStable(
-    userInput: string,
-    intent?: AtomicCommandIntent,
-  ): string | undefined {
-    let normalized = userInput
-      .replace(/\s+/g, '')
-      .replace(/\d{1,2}[:\uff1a]\d{1,2}(?::\d{1,2})?/g, '')
-      .replace(/\d{1,2}\u70b9(?:\d{1,2}\u5206?)?/g, '')
-      .replace(/[\uff0c\u3002\uff01\uff1f\uff1b\uff1a\u3001,.!?;:]/gu, '')
-
-    const resolvedIntent = intent ?? this.inferAgentCandidateKeywordIntentStable(normalized)
-    if (!resolvedIntent) return undefined
-
-    if (resolvedIntent === 'replace') {
-      normalized = /(?:\u66ff\u6362\u6210|\u66ff\u6362\u4e3a|\u6362\u6210|\u6539\u6210|\u6539\u4e3a|\u6362\u64ad|\u66ff\u6362)(?:\u8282\u76ee|\u680f\u76ee|\u5185\u5bb9|\u7d20\u6750)?(.+)$/u.exec(normalized)?.[1] ?? normalized
-    } else if (resolvedIntent === 'insert') {
-      normalized = /(?:\u63d2\u5165|\u6dfb\u52a0|\u5b89\u6392|\u6392\u5165|\u653e\u7f6e|\u52a0\u4e00\u6761|\u52a0\u4e2a|\u6765\u4e00\u6bb5|\u653e\u4e00\u6bb5)(?:\u8282\u76ee|\u680f\u76ee|\u5185\u5bb9|\u7d20\u6750)?(.+)$/u.exec(normalized)?.[1] ?? normalized
-    } else if (resolvedIntent === 'query') {
-      normalized = normalized
-        .replace(/^(?:\u8bf7|\u5e2e\u6211|\u5e2e\u5fd9|\u67e5\u4e00\u4e0b|\u67e5\u8be2|\u67e5\u627e|\u67e5\u770b|\u770b\u770b|\u627e|\u641c\u7d22|\u5f53\u524d|\u73b0\u5728)+/u, '')
-        .replace(/(?:\u8282\u76ee\u5e93|\u7d20\u6750\u5e93|\u5019\u9009\u5e93|\u5019\u9009|\u53ef\u7528|\u53ef\u64ad|\u6709\u54ea\u4e9b|\u662f\u4ec0\u4e48|\u6709\u4ec0\u4e48|\u91cc\u9762|\u60c5\u51b5)+/gu, '')
-    }
-
-    const cleaned = normalized
-      .replace(/^(?:\u8bf7|\u5e2e\u6211|\u5e2e\u5fd9|\u5728|\u5230|\u7ed9|\u628a|\u5c06|\u7684|\u4e00\u4e2a|\u4e00\u6761|\u4e00\u6bb5|\u8282\u76ee|\u680f\u76ee|\u5185\u5bb9|\u7d20\u6750|\u5019\u9009|\u53ef\u7528|\u53ef\u64ad)+/u, '')
-      .replace(/(?:\u8282\u76ee|\u680f\u76ee|\u5185\u5bb9|\u7d20\u6750|\u5019\u9009|\u53ef\u7528|\u53ef\u64ad|\u4e00\u4e0b)$/u, '')
-      .trim()
-    return this.cleanAgentCandidateKeywordStable(cleaned)
-  }
-
-  private inferAgentCandidateKeywordIntentStable(userInput: string): Extract<AtomicCommandIntent, 'insert' | 'replace' | 'query'> | undefined {
-    if (/(?:\u66ff\u6362\u6210|\u66ff\u6362\u4e3a|\u6362\u6210|\u6539\u6210|\u6539\u4e3a|\u6362\u64ad|\u66ff\u6362)/u.test(userInput)) return 'replace'
-    if (/(?:\u63d2\u5165|\u6dfb\u52a0|\u5b89\u6392|\u6392\u5165|\u653e\u7f6e|\u52a0\u4e00\u6761|\u52a0\u4e2a|\u6765\u4e00\u6bb5|\u653e\u4e00\u6bb5)/u.test(userInput)) return 'insert'
-    if (/(?:\u67e5\u4e00\u4e0b|\u67e5\u8be2|\u67e5\u627e|\u67e5\u770b|\u770b\u770b|\u627e|\u641c\u7d22|\u5019\u9009|\u53ef\u7528|\u53ef\u64ad|\u6709\u54ea\u4e9b|\u662f\u4ec0\u4e48|\u6709\u4ec0\u4e48|\u8282\u76ee\u5e93|\u7d20\u6750\u5e93|\u5019\u9009\u5e93)/u.test(userInput)) return 'query'
-    return undefined
   }
 
   private isAgentPendingControlInput(userInput: string): boolean {
     const normalized = userInput.replace(/\s+/g, '')
     return /^(?:\u786e\u8ba4|\u597d\u7684|\u53ef\u4ee5|\u6267\u884c|\u63d0\u4ea4|\u662f|\u5bf9|\u53d6\u6d88|\u4e0d\u8981|\u7b97\u4e86|\u62d2\u7edd)$/u.test(normalized)
-  }
-
-  private isAgentPendingTimeOnlyFollowUp(userInput: string): boolean {
-    const clock = parseAtomicClockExpression(userInput)
-    if (!clock) return false
-    const residue = userInput
-      .replace(/\s+/g, '')
-      .replace(clock.matchedText, '')
-      .replace(/[\uff0c\u3002\uff01\uff1f\uff1b\uff1a\u3001,.!?;:]/gu, '')
-      .replace(/^(?:\u5c31|\u90a3|\u90a3\u5c31|\u597d\u7684|\u597d|\u53ef\u4ee5|\u884c|\u5b9a|\u653e|\u6392|\u5b89\u6392|\u63d2|\u63d2\u5165|\u5728|\u5230|\u5427|\u554a|\u5440|\u5462)+/u, '')
-      .replace(/(?:\u5c31|\u5427|\u554a|\u5440|\u5462|\u53ef\u4ee5|\u884c|\u597d\u7684|\u597d)$/u, '')
-      .trim()
-    return residue.length === 0
   }
 
   private buildAgentTimeOverlapBlockedMessage(result: AgentResult, issue?: { detail?: Record<string, unknown> }): string {
@@ -5439,6 +5538,11 @@ export class DemoRuntimeFacade {
     }
 
     const llmFeedback = result.input.interpretation?.assistantFeedback?.trim()
+    if (result.status === 'needs_selection' && this.isAgentCandidateRecommendationResult(result)) {
+      const recommendationContent = this.buildAgentCandidateRecommendationContent(result, llmFeedback)
+      if (recommendationContent) return recommendationContent
+    }
+
     if (
       (result.status === 'needs_clarification' || result.status === 'needs_confirmation')
       && llmFeedback
@@ -5446,6 +5550,27 @@ export class DemoRuntimeFacade {
       && !this.isStaleAgentConfirmationFeedback(llmFeedback, result)
     ) {
       return this.withoutAgentCandidateSearchBrief(llmFeedback, result)
+    }
+
+    if (intent === 'validate' || commandIntent === 'validate') {
+      return this.buildAgentValidationUserFacingContent(result.validationReport)
+    }
+
+    if (result.status === 'executed') {
+      if (intent === 'query') {
+        const queryContent = this.buildAgentQueryUserFacingContent(result.decision.queryResult)
+        return queryContent.includes('没有改动播单') ? queryContent : `${queryContent} 现在只是分析，没有改动播单。`
+      }
+      if (
+        llmFeedback
+        && this.isBusinessReadableAgentExplanation(llmFeedback)
+        && !this.isStaleAgentConfirmationFeedback(llmFeedback, result)
+      ) {
+        const basisText = this.withoutAgentCandidateSearchBrief(llmFeedback, result)
+        const separator = /[。！？!?]$/u.test(basisText) ? '' : '。'
+        return `${basisText}${separator}操作已完成，并已写入当前播单。`
+      }
+      return '操作已完成，并已写入当前播单。'
     }
 
     const explanation = result.explanation?.trim() ?? ''
@@ -5500,10 +5625,6 @@ export class DemoRuntimeFacade {
       return '这条指令还缺少关键信息。我先记下你刚才说的内容，你可以直接补一句时间、节目名或确认方式。'
     }
 
-    if (intent === 'validate' || commandIntent === 'validate') {
-      return this.buildAgentValidationUserFacingContent(result.validationReport)
-    }
-
     if (result.status === 'blocked' || result.status === 'failed') {
       if (issue?.code === 'time_overlap') {
         return this.buildAgentTimeOverlapBlockedMessage(result, issue)
@@ -5538,11 +5659,6 @@ export class DemoRuntimeFacade {
       return issue?.message && this.isBusinessReadableAgentExplanation(issue.message)
         ? issue.message
         : '这次操作没有通过编排规则校验，我没有写入播单。你可以换一个目标时间、节目或素材后继续。'
-    }
-
-    if (result.status === 'executed') {
-      if (intent === 'query') return this.buildAgentQueryUserFacingContent(result.decision.queryResult)
-      return '操作已完成，并已写入当前播单。'
     }
 
     return explanation || '我已经完成本轮判断。'
@@ -5621,8 +5737,25 @@ export class DemoRuntimeFacade {
       const auditSummary = result.decision.auditSummary as { contextSources?: Record<string, unknown> } | undefined
       const candidateSource = auditSummary?.contextSources?.candidates as Record<string, unknown> | undefined
       const recordCount = typeof candidateSource?.recordCount === 'number' ? candidateSource.recordCount : undefined
-      if (typeof recordCount === 'number') {
-        lines.push(recordCount > 0 ? `已找到 ${recordCount} 个可参考候选。` : '已查找候选，暂时没有找到可直接采用的节目。')
+      const recommendedCount = result.decision.pendingTask?.recommendations?.length
+        ?? result.decision.recommendations?.length
+        ?? 0
+      const targetOptionCount = result.decision.pendingTask?.targetOptions?.length ?? 0
+      if (result.status === 'executed') {
+        const selectedSequence = result.decision.candidateSelection?.selectedSequence
+        lines.push(typeof selectedSequence === 'number' && selectedSequence > 0
+          ? `已按期数规则收敛到第 ${selectedSequence} 期，并写入当前播单。`
+          : '已按当前播单规则收敛候选，并写入当前播单。')
+      } else if (recommendedCount > 0) {
+        lines.push(recommendedCount === 1
+          ? '已筛出 1 个可用候选。'
+          : `已筛出 ${recommendedCount} 个可选候选。`)
+      } else if (targetOptionCount > 0) {
+        lines.push(targetOptionCount === 1
+          ? '已定位到 1 个相关节目。'
+          : `已定位到 ${targetOptionCount} 个相关节目。`)
+      } else if (typeof recordCount === 'number') {
+        lines.push(recordCount > 0 ? '已按节目线索查找，并按当前播单规则筛选。' : '已查找候选，暂时没有找到可直接采用的节目。')
       } else {
         lines.push('已按节目线索查找候选。')
       }
@@ -5665,7 +5798,7 @@ export class DemoRuntimeFacade {
       if (queryResult.candidates.length === 0) {
         return `我查了候选库，暂时没有找到匹配${keyword}的可用节目或素材。`
       }
-      const rewriteText = queryResult.candidateSearchMatchedBy === 'rewritten_keywords'
+      const rewriteText = queryResult.candidateSearchMatchedBy === 'llm_alternatives'
         ? '我先按原关键词查了一遍，又用模型给出的相近关键词继续检索，'
         : ''
       const candidateText = queryResult.candidates
@@ -5779,8 +5912,14 @@ export class DemoRuntimeFacade {
   }
 
   private async buildAgentCoreDecision(input: RuntimeSubmitInput, agentRun: AgentCoreRunResult): Promise<RuntimeDecision> {
-    const { result, capabilitySummary, operationalReadiness } = agentRun
-    const userFacingContent = this.buildAgentUserFacingContent(result)
+    const { result, capabilitySummary, operationalReadiness, llmRequestTraces } = agentRun
+    let userFacingContent = this.buildAgentUserFacingContent(result)
+    if (
+      input.pendingAtomicContext?.agentPendingTask
+      && result.input.interpretation?.pendingAction === 'start_new_task'
+    ) {
+      userFacingContent = `上一条待确认操作已失效，本轮按新的指令重新判断。\n${userFacingContent}`
+    }
     if (result.status === 'executed' && result.executionResult?.committed) {
       return {
         kind: 'agent_execution',
@@ -5791,7 +5930,7 @@ export class DemoRuntimeFacade {
           '执行完成',
           {
             explanation: '已完成理解、检查和写入。',
-            details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness),
+            details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness, llmRequestTraces),
           },
         ),
       }
@@ -5807,7 +5946,7 @@ export class DemoRuntimeFacade {
           '已取消',
           {
             explanation: result.decision.constraintReport?.issues[0]?.message ?? '用户取消了当前待确认修改，没有写入当前播单。',
-            details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness),
+            details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness, llmRequestTraces),
           },
         ),
       }
@@ -5824,7 +5963,7 @@ export class DemoRuntimeFacade {
           '已阻断',
           {
             explanation: result.decision.constraintReport?.issues[0]?.message ?? '确认前播单已变化，上一版修改已作废。',
-            details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness),
+            details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness, llmRequestTraces),
           },
         ),
       }
@@ -5833,8 +5972,48 @@ export class DemoRuntimeFacade {
     const compiledTaskPlanDecision = await this.tryBuildAgentTaskPlanDraftDecision(input, result)
     if (compiledTaskPlanDecision) return compiledTaskPlanDecision
 
+    if (this.isAgentCandidateRecommendationResult(result)) {
+      return {
+        kind: 'message',
+        statusHint: 'needs_clarification',
+        feedback: createFeedback(
+          userFacingContent,
+          'planning',
+          '候选建议',
+          {
+            explanation: '候选不唯一，本轮只给出推荐和补充方向，不创建待确认写入。',
+            details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness, llmRequestTraces),
+          },
+        ),
+      }
+    }
+
     if (result.decision.pendingTask) {
       const pendingContext = this.buildAgentPendingAtomicContext(input, result, userFacingContent)
+      if (result.status !== 'needs_confirmation') {
+        return {
+          kind: 'message',
+          statusHint: result.status === 'needs_selection'
+            ? 'needs_clarification'
+            : result.status === 'blocked'
+              ? 'failed'
+              : result.status === 'executed'
+                ? 'completed'
+                : result.status,
+          feedback: createFeedback(
+            userFacingContent,
+            result.status === 'needs_selection' ? 'planning' : 'general',
+            result.status === 'needs_selection' ? '候选建议' : '需要补充信息',
+            {
+              explanation: '这不是待确认写入；我会把候选和缺少的信息放进详情，下一句仍交给 LLM 结合上下文判断。',
+              details: {
+                ...this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness, llmRequestTraces),
+                conversationAtomicContext: this.pendingAtomicContextService.initialize(pendingContext),
+              },
+            },
+          ),
+        }
+      }
       return {
         kind: 'pending_atomic_context',
         feedback: createFeedback(
@@ -5843,7 +6022,7 @@ export class DemoRuntimeFacade {
           result.status === 'needs_confirmation' ? '待确认' : '待补参',
           {
             explanation: '已记下这次要处理的内容，下一句可以直接补充。',
-            details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness),
+            details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness, llmRequestTraces),
           },
         ),
         pendingAtomicContext: this.pendingAtomicContextService.initialize(pendingContext),
@@ -5860,10 +6039,56 @@ export class DemoRuntimeFacade {
         failed ? '已阻断' : '已判断',
         {
           explanation: result.decision.constraintReport?.issues[0]?.message ?? '已完成本轮判断。',
-          details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness),
+          details: this.buildAgentCoreDetails(result, capabilitySummary, operationalReadiness, llmRequestTraces),
         },
       ),
     }
+  }
+
+  private isAgentCandidateRecommendationResult(result: AgentResult): boolean {
+    const pendingTask = result.decision.pendingTask
+    if (!pendingTask || pendingTask.phase !== 'needs_selection') return false
+    return true
+  }
+
+  private buildAgentCandidateRecommendationContent(result: AgentResult, llmFeedback?: string): string | null {
+    const recommendations = result.decision.pendingTask?.recommendations ?? result.decision.recommendations ?? []
+    if (recommendations.length === 0) return null
+    const intent = result.decision.intent
+    const actionText = intent === 'replace' ? '替换' : '插入'
+    const targetTime = this.readAgentPendingStringSlot(result.decision.pendingTask, 'targetTime')
+      ?? result.input.interpretation?.slots?.targetTime
+    const safeLlmBasis = llmFeedback
+      && this.isBusinessReadableAgentExplanation(llmFeedback)
+      && !this.isCandidateSelectionPendingLikeFeedback(llmFeedback)
+      ? this.withoutAgentCandidateSearchBrief(llmFeedback, result)
+      : ''
+    const basis = safeLlmBasis || `我按你给的线索查了候选库，找到了几个可能适合${actionText}的节目。`
+    const candidateLines = recommendations
+      .slice(0, 5)
+      .map((recommendation, index) => this.formatCandidateRecommendationLine(recommendation, index))
+    const guide = intent === 'replace'
+      ? '你可以补充想替换成的期数、版本、时长、栏目或内容方向，我再继续缩小范围；等信息足够明确后，我再帮你生成可写入的修改。'
+      : '你可以补充期数、版本、时长、栏目或内容方向，我再继续缩小范围；等信息足够明确后，我再帮你排入。'
+    return [
+      `${basis}现在还不能替你直接选其中一个。${targetTime ? `目标位置是 ${toClockText(targetTime)}。` : ''}`,
+      candidateLines.join('\n'),
+      guide,
+    ].filter(Boolean).join('\n')
+  }
+
+  private formatCandidateRecommendationLine(recommendation: AgentCandidateRecommendation, index: number): string {
+    const durationText = typeof recommendation.duration === 'number' && recommendation.duration > 0
+      ? `，${this.formatDurationText(recommendation.duration)}`
+      : ''
+    const reason = recommendation.reason && this.isBusinessReadableAgentExplanation(recommendation.reason)
+      ? `，${recommendation.reason}`
+      : ''
+    return `${index + 1}. 《${recommendation.programName}》${durationText}${reason}`
+  }
+
+  private isCandidateSelectionPendingLikeFeedback(value: string): boolean {
+    return /待确认|确认后|让我选|让你选|你选一个|选择候选|选择哪一个|候选选择|再写入/u.test(value)
   }
 
   private async tryBuildAgentTaskPlanDraftDecision(input: RuntimeSubmitInput, result: AgentResult): Promise<RuntimeDecision | null> {
@@ -5977,6 +6202,7 @@ export class DemoRuntimeFacade {
     result: AgentResult,
     capabilitySummary: SchedulingAgentRuntimeCapabilitySummary,
     operationalReadiness: SchedulingAgentOperationalReadinessAudit,
+    llmRequestTraces: LLMRequestTrace[] = [],
   ): RuntimeDetailMap {
     return {
       agentCore: true,
@@ -5986,6 +6212,7 @@ export class DemoRuntimeFacade {
       intent: result.decision.intent,
       command: result.decision.command,
       assistantProcessSummary: this.buildAgentAssistantProcessSummary(result),
+      agentRunTraceSummary: this.buildAgentRunTraceSummary(result, llmRequestTraces),
       auditSummary: result.decision.auditSummary,
       agentEvidenceBudget: this.resolveAgentEvidenceBudget(result),
       candidateSelection: result.decision.candidateSelection,
@@ -5998,7 +6225,36 @@ export class DemoRuntimeFacade {
       constraintReport: result.decision.constraintReport,
       validationReport: result.validationReport,
       affectedItemIds: result.executionResult?.affectedItemIds,
+      llmRequestTraces: llmRequestTraces.length > 0 ? llmRequestTraces : undefined,
       trace: result.trace,
+    }
+  }
+
+  private buildAgentRunTraceSummary(result: AgentResult, llmRequestTraces: LLMRequestTrace[]): RuntimeDetailMap {
+    const lastStep = result.trace.at(-1)
+    const evidenceBudget = this.resolveAgentEvidenceBudget(result)
+    const pendingTask = result.decision.pendingTask
+    const issueCodes = result.decision.constraintReport?.issues
+      .map((issue) => issue.code)
+      .filter((code) => typeof code === 'string' && code.trim().length > 0) ?? []
+    const llmTotalDurationMs = llmRequestTraces.reduce((sum, trace) => sum + Math.max(0, trace.durationMs), 0)
+    const llmPromptCharCount = llmRequestTraces.reduce((sum, trace) => sum + Math.max(0, trace.promptCharCount ?? 0), 0)
+    return {
+      status: result.status,
+      intent: result.decision.intent,
+      totalElapsedMs: lastStep?.elapsedMs,
+      traceStepCount: result.trace.length,
+      llmCallCount: llmRequestTraces.length,
+      llmTotalDurationMs,
+      llmPromptCharCount: llmPromptCharCount > 0 ? llmPromptCharCount : undefined,
+      llmFailedCount: llmRequestTraces.filter((trace) => !trace.success).length,
+      llmLabels: Array.from(new Set(llmRequestTraces.map((trace) => trace.label))).slice(0, 5),
+      evidenceBudget,
+      pendingPhase: pendingTask?.phase,
+      recommendationCount: (result.decision.recommendations?.length ?? 0) || (pendingTask?.recommendations?.length ?? 0),
+      wroteFormalPlaylist: result.executionResult?.committed === true,
+      affectedItemCount: result.executionResult?.affectedItemIds.length ?? 0,
+      issueCodes,
     }
   }
 
@@ -6083,97 +6339,6 @@ export class DemoRuntimeFacade {
     return mapped.length ? Array.from(new Set(mapped)) : ['selection']
   }
 
-  private async tryContinuePendingAtomicContext(input: RuntimeSubmitInput): Promise<RuntimePendingAtomicContinuationResult | null> {
-    const pendingContext = input.pendingAtomicContext
-    if (!pendingContext) return null
-    if (pendingContext.phase === 'formal_rebuild_confirmation' || pendingContext.formalRebuildConfirmation) {
-      return this.continuePendingFormalRebuildConfirmation(input, pendingContext)
-    }
-    if (this.shouldBypassPendingAtomicClarification(input.userInput) || this.shouldInterruptPendingAtomicWithRangeScheduling(input.userInput)) {
-      return {
-        kind: 'clear_pending_and_continue',
-        input: this.clearPendingAtomicState(input),
-      }
-    }
-
-    const continuationDecision = this.atomicContinuationClassifier.classify({
-      pendingContext,
-      userInput: input.userInput,
-    })
-
-    if (continuationDecision.kind === 'cancel') {
-      return {
-        kind: 'decision',
-        decision: this.buildPendingAtomicCancelledDecision(pendingContext),
-      }
-    }
-    if (continuationDecision.kind === 'interrupt_as_new_task') {
-      return {
-        kind: 'clear_pending_and_continue',
-        input: this.clearPendingAtomicState(input),
-      }
-    }
-
-    const lifecycleBlockReason = this.pendingAtomicContextService.getBlockReason(pendingContext)
-    if (lifecycleBlockReason) {
-      return {
-        kind: 'decision',
-        decision: this.buildPendingAtomicLifecycleBlockedDecision(pendingContext, lifecycleBlockReason),
-      }
-    }
-
-    if (pendingContext.phase === 'draft_research_confirmation' || pendingContext.layoutDraftSuggestion) {
-      if (this.isDraftResearchSuggestionConfirm(input.userInput)) {
-        return {
-          kind: 'decision',
-          decision: await this.continuePendingDraftResearchSuggestion(input, pendingContext),
-        }
-      }
-      return {
-        kind: 'clear_pending_and_continue',
-        input: this.clearPendingAtomicState(input),
-      }
-    }
-
-    if (pendingContext.agentPendingTask) {
-      return {
-        kind: 'decision',
-        decision: await this.continueAgentCorePendingTask(input, pendingContext.agentPendingTask),
-      }
-    }
-
-    if (pendingContext.phase === 'clarifying') {
-      return {
-        kind: 'decision',
-        decision: await this.continuePendingAtomicClarifyingContext(input, pendingContext),
-      }
-    }
-
-    if (pendingContext.phase === 'selecting_target') {
-      return {
-        kind: 'decision',
-        decision: await this.continuePendingTargetSelection(input, pendingContext, continuationDecision),
-      }
-    }
-
-    if (pendingContext.phase === 'recommending_insert') {
-      return {
-        kind: 'decision',
-        decision: await this.continuePendingInsertRecommendation(input, pendingContext, continuationDecision),
-      }
-    }
-
-    return null
-  }
-
-  private shouldInterruptPendingAtomicWithRangeScheduling(userInput: string): boolean {
-    const normalized = userInput.replace(/\s+/g, '')
-    const hasRange = Boolean(parseAtomicTimeRange(userInput) ?? this.parseCompactHourRange(userInput))
-      || /\d{1,2}(?::\d{2})?\s*(?:-|—|~|～|到|至|鍒|鑷)\s*\d{1,2}(?::\d{2})?\s*(?:点|鐐)?/.test(normalized)
-    if (!hasRange) return false
-    return /(播单|节目单|编排|安排|排入|直播|栏目|节目|鎾崟|鑺傜洰鍗|缂栨帓|瀹夋帓|鎺掑叆|鐩存挱|鏍忕洰|鑺傜洰)/.test(normalized)
-  }
-
   private parseCompactHourRange(userInput: string): { start: string; end: string } | null {
     const normalized = userInput.replace(/\s+/g, '')
     const match = normalized.match(/(\d{1,2})(?::(\d{2}))?(?:点|时)?(?:-|—|~|～|到|至)(\d{1,2})(?::(\d{2}))?(?:点|时)?/)
@@ -6198,304 +6363,6 @@ export class DemoRuntimeFacade {
       pendingInsertRecommendation: null,
       pendingAtomicClarification: null,
       pendingAtomicContext: null,
-    }
-  }
-
-  private buildPendingAtomicCancelledDecision(pending: RuntimePendingAtomicContext): RuntimeDecision {
-    return {
-      kind: 'message',
-      statusHint: 'cancelled',
-      feedback: createFeedback(
-        `${pending.summary}已取消。`,
-        'general',
-        '已取消',
-        {
-          explanation: pending.reasoning,
-          details: {
-            action: pending.action,
-            phase: pending.phase,
-          },
-        },
-      ),
-    }
-  }
-
-  private buildPendingAtomicLifecycleBlockedDecision(
-    pending: RuntimePendingAtomicContext,
-    reason: PendingAtomicLifecycleBlockReason,
-  ): RuntimeDecision {
-    if (reason === 'expired') {
-      return {
-        kind: 'message',
-        statusHint: 'cancelled',
-        feedback: createFeedback(
-          '上一条待补充的修改任务已经超时失效，请重新描述完整需求。',
-          'general',
-          '上一条已失效',
-          {
-            explanation: pending.reasoning,
-            details: {
-              action: pending.action,
-              phase: pending.phase,
-              expiresAt: pending.expiresAt,
-            },
-          },
-        ),
-      }
-    }
-
-    return {
-      kind: 'message',
-      statusHint: 'failed',
-      feedback: createFeedback(
-        `这条待处理的修改任务已经连续尝试 ${pending.attemptCount} 次仍未补齐，我先结束这次处理。请重新描述完整需求。`,
-        'general',
-        '补参失败',
-        {
-          explanation: pending.reasoning,
-          details: {
-            action: pending.action,
-            phase: pending.phase,
-            attemptCount: pending.attemptCount,
-          },
-        },
-      ),
-    }
-  }
-
-  private rehydratePendingAtomicClarification(pending: RuntimePendingAtomicContext): RuntimePendingAtomicClarification {
-    const missingFields = pending.missingFields.map((field) => {
-      switch (field) {
-        case 'target_time':
-          return 'target'
-        case 'program_name':
-          return 'program'
-        case 'replacement_program':
-          return 'replacement'
-        case 'offset':
-          return 'offset'
-        default:
-          return 'target'
-      }
-    })
-
-    return {
-      action: pending.action,
-      summary: pending.summary,
-      reasoning: pending.reasoning,
-      originalUserInput: pending.originalUserInput,
-      collectedUserInput: pending.collectedUserInput,
-      targetTimeHint: pending.slots.targetTimeHint,
-      programNameHint: pending.slots.programName ?? pending.slots.rawProgramText,
-      slots: pending.slots,
-      missingFields,
-      followUpQuestion: pending.followUpQuestion,
-    }
-  }
-
-  private rehydratePendingTargetSelection(pending: RuntimePendingAtomicContext): RuntimePendingTargetSelection | null {
-    if (pending.phase !== 'selecting_target' || !pending.targetCandidates?.length || !pending.action || pending.action === 'insert') return null
-    return {
-      action: pending.action,
-      summary: pending.summary,
-      reasoning: pending.reasoning,
-      targetTime: pending.slots.targetTime ?? pending.slots.targetTimeHint ?? '',
-      programName: pending.slots.programName,
-      candidates: pending.targetCandidates,
-      selectedItemId: pending.selectedItemId ?? null,
-      moveConfig: pending.slots.direction && typeof pending.slots.offsetSeconds === 'number'
-        ? {
-            direction: pending.slots.direction,
-            offsetSeconds: pending.slots.offsetSeconds,
-          }
-        : undefined,
-      replaceProgramName: pending.slots.replacementProgramName,
-    }
-  }
-
-  private rehydratePendingInsertRecommendation(pending: RuntimePendingAtomicContext): RuntimePendingInsertRecommendation | null {
-    if (pending.phase !== 'recommending_insert' || !pending.insertRecommendations?.length) return null
-    return {
-      action: pending.action === 'replace' ? 'replace' : 'insert',
-      summary: pending.summary,
-      reasoning: pending.reasoning,
-      originalUserInput: pending.originalUserInput,
-      collectedUserInput: pending.collectedUserInput,
-      targetTime: pending.slots.targetTime ?? pending.slots.targetTimeHint ?? '',
-      rawProgramText: pending.slots.rawProgramText,
-      semanticLabel: pending.slots.semanticLabel,
-      programTypeHint: pending.slots.programTypeHint,
-      expectedDurationSeconds: pending.slots.expectedDurationSeconds,
-      targetItemId: pending.slots.targetItemId,
-      targetItemName: pending.slots.targetItemName,
-      recommendedCandidates: pending.insertRecommendations,
-      selectedCandidateId: pending.selectedCandidateId ?? null,
-      resumeCompositeTask: pending.resumeCompositeTask,
-    }
-  }
-
-  private isDraftResearchSuggestionConfirm(userInput: string): boolean {
-    const normalized = userInput.replace(/\s+/g, '')
-    return this.isExplicitPendingConfirm(normalized)
-      || /^(更新|更新草案|更新到草案|写入草案|改到草案|改进草案|采用|采纳|采用这个|采纳这个|就按这个|就这个|用这个|用这个方向|按这个方向|把这个更新到草案|把它更新到草案|没问题)$/iu.test(normalized)
-  }
-
-  private async continuePendingFormalRebuildConfirmation(
-    input: RuntimeSubmitInput,
-    pendingContext: RuntimePendingAtomicContext,
-  ): Promise<RuntimePendingAtomicContinuationResult> {
-    const normalized = input.userInput.replace(/\s+/g, '')
-    if (this.isExplicitPendingCancel(normalized) || this.isExplicitPendingReject(normalized)) {
-      return {
-        kind: 'decision',
-        decision: this.buildPendingAtomicCancelledDecision(pendingContext),
-      }
-    }
-    if (!this.isFormalRebuildConfirmationReply(normalized)) {
-      return {
-        kind: 'clear_pending_and_continue',
-        input: this.clearPendingAtomicState(input),
-      }
-    }
-
-    const confirmation = pendingContext.formalRebuildConfirmation
-    if (!confirmation) {
-      return {
-        kind: 'decision',
-        decision: {
-          kind: 'message',
-          statusHint: 'needs_clarification',
-          feedback: createFeedback(
-            '这次重新编排确认已经失效，请重新告诉我要按草案编排，还是重新排整张播单。',
-            'planning',
-            '重新编排确认',
-            {
-              details: {
-                noMutation: true,
-                pendingContext,
-              },
-            },
-          ),
-        },
-      }
-    }
-
-    const resumedInput: RuntimeSubmitInput = {
-      ...this.clearPendingAtomicState(input),
-      userInput: confirmation.userInput,
-    }
-
-    if (confirmation.actionKind === 'commit_layout_draft') {
-      return {
-        kind: 'decision',
-        decision: await this.commitLayoutDraft(resumedInput, {
-          mode: 'layout_commit',
-          confidence: 0.9,
-          reasoning: confirmation.reasoning || pendingContext.reasoning,
-          suggestedParams: {
-            orchestrationMode: confirmation.mode,
-          },
-        }, { skipFormalRebuildGate: true }),
-      }
-    }
-
-    return {
-      kind: 'decision',
-      decision: this.buildFormalOrchestrationDecision(
-        resumedInput,
-        confirmation.mode,
-        confirmation.reasoning || pendingContext.reasoning,
-        { skipFormalRebuildGate: true },
-      ),
-    }
-  }
-
-  private isFormalRebuildConfirmationReply(normalized: string): boolean {
-    return this.isExplicitPendingConfirm(normalized)
-      || /^(确认重新编排|确认重排|重新编排|重排|确认覆盖|覆盖吧|开始重新编排|开始重排|开始编排|按这个重新编排|按草案重新编排|按当前草案重新编排|按这个开始编排|可以重新编排|可以重排)$/iu.test(normalized)
-  }
-
-  private async continuePendingDraftResearchSuggestion(
-    input: RuntimeSubmitInput,
-    pendingContext: RuntimePendingAtomicContext,
-  ): Promise<RuntimeDecision> {
-    const suggestion = pendingContext.layoutDraftSuggestion
-    const draft = input.currentLayoutDraft
-    if (!suggestion || !draft) {
-      return {
-        kind: 'message',
-        statusHint: 'needs_clarification',
-        feedback: createFeedback(
-          '刚才那条草案建议已经没有可用的草案上下文了。你可以重新告诉我要调整哪一段草案。',
-          'planning',
-          '草案建议失效',
-          {
-            details: {
-              noMutation: true,
-              pendingContext,
-            },
-          },
-        ),
-      }
-    }
-
-    const updatedDraft = this.applyDraftResearchSuggestion(draft, suggestion)
-    if (!updatedDraft) {
-      return {
-        kind: 'message',
-        statusHint: 'needs_clarification',
-        feedback: createFeedback(
-          '我还不能确定要把这条建议写到草案的哪一段。你可以说“更新到第一段”或直接重新说明要调整的段落。',
-          'planning',
-          '需要确认草案段',
-          {
-            details: {
-              noMutation: true,
-              suggestion,
-              draftSegments: draft.layoutReference.slots.map((slot, index) => {
-                const column = draft.columns.find((item) => item.columnId === slot.columnId)
-                return {
-                  index: index + 1,
-                  start: toClockText(slot.startTime),
-                  end: toClockText(slot.endTime),
-                  label: column?.semanticLabel ?? column?.columnName ?? slot.columnId,
-                }
-              }),
-            },
-          },
-        ),
-      }
-    }
-
-    const feasibilityReport = await this.buildLayoutDraftFeasibilityReport(input, updatedDraft)
-    const targetText = suggestion.targetSegmentIndex
-      ? `第 ${suggestion.targetSegmentIndex} 段`
-      : suggestion.targetSegmentLabel ?? '对应段落'
-    return {
-      kind: 'layout_draft',
-      feedback: createFeedback(
-        `已把“${suggestion.semanticLabel}”更新到草案的${targetText}。正式播单还没有开始编排；如果这版草案可以了，你可以直接说“按这个开始编排”。`,
-        'planning',
-        '版面草案',
-        {
-          explanation: pendingContext.reasoning,
-          details: {
-            draftId: updatedDraft.id,
-            updatedSegment: {
-              targetSegmentIndex: suggestion.targetSegmentIndex,
-              targetSegmentLabel: suggestion.targetSegmentLabel,
-              semanticLabel: suggestion.semanticLabel,
-              queryHints: suggestion.queries,
-              candidateNames: suggestion.topCandidates.slice(0, 5).map((candidate) => candidate.programName),
-            },
-            noFormalPlaylistWrite: true,
-            feasibilitySummary: feasibilityReport.summary,
-          },
-        },
-      ),
-      draft: updatedDraft,
-      feasibilityReport,
-      orchestrationMode: input.currentLayoutDraftMode ?? this.resolvePreferredOrchestrationMode(input),
     }
   }
 
@@ -6557,250 +6424,10 @@ export class DemoRuntimeFacade {
     }
     const label = (suggestion.targetSegmentLabel ?? suggestion.semanticLabel ?? '').replace(/\s+/g, '').toLowerCase()
     if (label) {
-      const matchedIndex = draft.layoutReference.slots.findIndex((slot, index) => {
-        const column = draft.columns.find((item) => item.columnId === slot.columnId)
-        const segment = draft.durationSegments?.[index]
-        const haystack = [
-          column?.semanticLabel,
-          column?.columnName,
-          segment?.label,
-          segment?.contentHint,
-          ...(column?.queryHints ?? []),
-        ].filter(Boolean).join('').replace(/\s+/g, '').toLowerCase()
-        return Boolean(haystack && (haystack.includes(label) || label.includes(haystack)))
-      })
+      const matchedIndex = this.resolveDraftSlotIndexByLabel(draft, label)
       if (matchedIndex >= 0) return matchedIndex
     }
     return draft.layoutReference.slots.length === 1 ? 0 : -1
-  }
-
-  private async continuePendingAtomicClarifyingContext(input: RuntimeSubmitInput, pendingContext: RuntimePendingAtomicContext): Promise<RuntimeDecision> {
-    const parsedPatch = this.atomicFollowUpParser.parse({
-      pendingContext,
-      userInput: input.userInput,
-    })
-
-    if (parsedPatch) {
-      const patchedContext = this.refreshClarifyingPendingAtomicContext(
-        this.patchPendingAtomicContext(pendingContext, parsedPatch.slots, input.userInput),
-      )
-
-      if (patchedContext.missingFields.length === 0 && patchedContext.action) {
-        const canonicalUserInput = this.buildCanonicalAtomicInstruction(patchedContext)
-        const result = await this.buildMicroEditCommand(
-          {
-            ...this.clearPendingAtomicState(input),
-            userInput: canonicalUserInput,
-          },
-          patchedContext.reasoning,
-          {
-            type: patchedContext.action,
-            confidence: 0.85,
-            reasoning: patchedContext.reasoning,
-          },
-        )
-        return this.buildMicroEditDecision(result, patchedContext.reasoning, patchedContext)
-      }
-
-      return this.buildPendingAtomicContextDecision(patchedContext)
-    }
-
-    const pendingAtomicClarification = input.pendingAtomicClarification ?? this.rehydratePendingAtomicClarification(pendingContext)
-    const decision = await this.tryContinuePendingAtomicClarification({
-      ...input,
-      pendingAtomicClarification,
-      pendingAtomicContext: null,
-    })
-    if (decision?.kind === 'pending_atomic_context') {
-      return this.buildPendingAtomicContextDecision(
-        this.pendingAtomicContextService.recordAttempt(decision.pendingAtomicContext),
-        decision.feedback,
-      )
-    }
-    return decision ?? this.buildPendingAtomicContextDecision(
-      this.pendingAtomicContextService.recordAttempt(pendingContext),
-    )
-  }
-
-  private async continuePendingTargetSelection(
-    input: RuntimeSubmitInput,
-    pendingContext: RuntimePendingAtomicContext,
-    continuationDecision?: AtomicContinuationDecision,
-  ): Promise<RuntimeDecision> {
-    const pendingTargetSelection = input.pendingTargetSelection ?? this.rehydratePendingTargetSelection(pendingContext)
-    if (!pendingTargetSelection) {
-      return {
-        kind: 'message',
-        feedback: createFeedback('当前没有可继续选择的节目，请重新描述你的修改需求。', 'selection', '目标选择'),
-      }
-    }
-
-    const selectedItemId = this.resolvePendingTargetSelectionReply(
-      pendingTargetSelection,
-      continuationDecision?.kind === 'selection_reply' && continuationDecision.selection.mode === 'raw_text'
-        ? continuationDecision.selection.value
-        : input.userInput,
-    )
-    if (!selectedItemId) {
-      return this.buildPendingTargetSelectionDecision(
-        pendingTargetSelection,
-        '我还不能确定你选的是哪一个目标。你可以回复“第一个”、具体节目名，或直接点选列表项。',
-        this.pendingAtomicContextService.recordAttempt(pendingContext),
-      )
-    }
-
-    return this.resolvePendingTargetSelection({
-      channelId: input.scheduleState.channelId,
-      date: input.scheduleState.date,
-      scheduleState: input.scheduleState,
-      pendingTargetSelection: {
-        ...pendingTargetSelection,
-        selectedItemId,
-      },
-    })
-  }
-
-  private async continuePendingInsertRecommendation(
-    input: RuntimeSubmitInput,
-    pendingContext: RuntimePendingAtomicContext,
-    continuationDecision?: AtomicContinuationDecision,
-  ): Promise<RuntimeDecision> {
-    const pendingInsertRecommendation = input.pendingInsertRecommendation ?? this.rehydratePendingInsertRecommendation(pendingContext)
-    if (!pendingInsertRecommendation) {
-      return {
-        kind: 'message',
-        feedback: createFeedback('当前没有可继续使用的插入推荐，请重新描述插入需求。', 'selection', '插入推荐'),
-      }
-    }
-
-    const selectedCandidateId = this.resolvePendingInsertRecommendationReply(
-      pendingInsertRecommendation,
-      continuationDecision?.kind === 'selection_reply' && continuationDecision.selection.mode === 'raw_text'
-        ? continuationDecision.selection.value
-        : input.userInput,
-    )
-    if (selectedCandidateId) {
-      return this.resolvePendingInsertRecommendation({
-        scheduleState: input.scheduleState,
-        pendingInsertRecommendation: {
-          ...pendingInsertRecommendation,
-          selectedCandidateId,
-        },
-        currentSchedule: input.currentSchedule,
-        userInput: input.userInput,
-      })
-    }
-
-    const correctionPatch = this.atomicFollowUpParser.parse({
-      pendingContext,
-      userInput: continuationDecision?.kind === 'correction_reply'
-        ? continuationDecision.value
-        : input.userInput,
-    })
-    const patchedContext = correctionPatch
-      ? this.patchPendingAtomicContext(
-          pendingContext,
-          correctionPatch.slots,
-          continuationDecision?.kind === 'correction_reply' ? continuationDecision.value : input.userInput,
-        )
-      : pendingContext
-
-    const mergedUserInput = correctionPatch
-      ? this.buildCanonicalAtomicInstruction(patchedContext)
-      : this.mergePendingCollectedInput(pendingInsertRecommendation.collectedUserInput, input.userInput)
-    const retriedInput: RuntimeSubmitInput = {
-      ...this.clearPendingAtomicState(input),
-      userInput: mergedUserInput,
-    }
-    const result = await this.buildMicroEditCommand(
-      retriedInput,
-      pendingInsertRecommendation.reasoning,
-      {
-        type: 'insert',
-        confidence: 0.6,
-        reasoning: pendingInsertRecommendation.reasoning,
-      },
-    )
-
-    if (result.command || result.pendingInsertRecommendation) {
-      return this.buildMicroEditDecision(result, pendingInsertRecommendation.reasoning)
-    }
-
-    return this.buildPendingInsertRecommendationDecision(
-      {
-        ...pendingInsertRecommendation,
-        collectedUserInput: correctionPatch ? patchedContext.collectedUserInput : mergedUserInput,
-      },
-      result.message || '还没确认具体要插入的节目。你可以回复“第一个”、直接说候选节目名，或补充更明确的节目描述。',
-      this.pendingAtomicContextService.recordAttempt(correctionPatch ? patchedContext : pendingContext),
-    )
-  }
-
-  private resolvePendingTargetSelectionReply(pending: RuntimePendingTargetSelection, userInput: string): string | null {
-    const ordinalIndex = this.resolveSelectionOrdinalIndex(userInput)
-    if (ordinalIndex !== null) {
-      return pending.candidates[ordinalIndex]?.id ?? null
-    }
-
-    const normalizedInput = this.normalizeSelectionText(userInput)
-    if (!normalizedInput) return null
-
-    const matchedByName = pending.candidates.find((candidate) => {
-      const name = this.normalizeSelectionText(candidate.programName ?? '')
-      return name && (normalizedInput.includes(name) || name.includes(normalizedInput))
-    })
-    if (matchedByName) return matchedByName.id
-
-    const matchedByTime = pending.candidates.find((candidate) => normalizedInput.includes(this.normalizeSelectionText(candidate.startTime)))
-    return matchedByTime?.id ?? null
-  }
-
-  private resolvePendingInsertRecommendationReply(pending: RuntimePendingInsertRecommendation, userInput: string): string | null {
-    const ordinalIndex = this.resolveSelectionOrdinalIndex(userInput)
-    if (ordinalIndex !== null) {
-      return pending.recommendedCandidates[ordinalIndex]?.candidateId ?? null
-    }
-
-    const normalizedInput = this.normalizeSelectionText(userInput)
-    if (!normalizedInput) return null
-
-    const matched = pending.recommendedCandidates.find((candidate) => {
-      const name = this.normalizeSelectionText(candidate.programName)
-      return normalizedInput.includes(name) || name.includes(normalizedInput)
-    })
-    return matched?.candidateId ?? null
-  }
-
-  private resolveSelectionOrdinalIndex(userInput: string): number | null {
-    const normalized = userInput.replace(/\s+/g, '')
-    const cleaned = normalized.replace(/(我选|选|就|那就|吧|啊|呀|呢|节目|条|项|个)/g, '')
-    const mapping: Record<string, number> = {
-      '第一': 0,
-      '第1': 0,
-      '一': 0,
-      '1': 0,
-      '第二': 1,
-      '第2': 1,
-      '二': 1,
-      '2': 1,
-      '第三': 2,
-      '第3': 2,
-      '三': 2,
-      '3': 2,
-      '第四': 3,
-      '第4': 3,
-      '四': 3,
-      '4': 3,
-      '第五': 4,
-      '第5': 4,
-      '五': 4,
-      '5': 4,
-    }
-    return Object.prototype.hasOwnProperty.call(mapping, cleaned) ? mapping[cleaned]! : null
-  }
-
-  private normalizeSelectionText(value: string): string {
-    return value.replace(/[\s:：-]/g, '').toLowerCase()
   }
 
   private mergePendingCollectedInput(collectedUserInput: string, userInput: string): string {
@@ -6810,137 +6437,20 @@ export class DemoRuntimeFacade {
     return `${collectedUserInput}，补充说明：${normalizedFollowUp}`
   }
 
-  private async tryContinuePendingAtomicClarification(input: RuntimeSubmitInput): Promise<RuntimeDecision | null> {
-    const pending = input.pendingAtomicClarification
-    if (!pending) return null
-    if (this.shouldBypassPendingAtomicClarification(input.userInput)) return null
-    const sourcePendingContext = input.pendingAtomicContext ?? buildPendingAtomicContextFromClarification(pending)
-
-    const mergedUserInput = this.mergeAtomicClarificationInput(pending, input.userInput)
-    const mergedInput: RuntimeSubmitInput = {
-      ...input,
-      userInput: mergedUserInput,
-      pendingAtomicClarification: null,
-    }
-    const context = buildDialogueContext({ scheduleState: mergedInput.scheduleState, userInput: mergedInput.userInput, currentSchedule: mergedInput.currentSchedule })
-    const recognized = await this.intentRecognizer.recognize(context)
-    const recognizedAction = this.asRuntimeAtomicAction(recognized.type)
-    const fallbackIntent = pending.action
-      ? {
-          type: pending.action,
-          confidence: 0.6,
-          reasoning: recognized.reasoning || pending.reasoning,
-        } satisfies MicroEditIntent
-      : null
-    const intent = recognizedAction ? recognized : fallbackIntent
-
-    if (!intent || !this.asRuntimeAtomicAction(intent.type)) {
-      return this.buildPendingAtomicClarificationDecision(
-        this.buildPendingAtomicClarification({
-          ...mergedInput,
-          userInput: mergedUserInput,
-          pendingAtomicClarification: pending,
-        }, recognized.reasoning || pending.reasoning, pending.action),
-        recognized.reasoning || pending.reasoning,
-        undefined,
-        sourcePendingContext,
-      )
-    }
-
-    const result = await this.buildMicroEditCommand(mergedInput, intent.reasoning || pending.reasoning, intent)
-    if (result.command || result.pendingTargetSelection || result.pendingInsertRecommendation) {
-      return this.buildMicroEditDecision(result, intent.reasoning || pending.reasoning, sourcePendingContext)
-    }
-
-    if (this.shouldStayInAtomicClarification(result.message)) {
-      return this.buildPendingAtomicClarificationDecision(
-        this.buildPendingAtomicClarification({
-          ...mergedInput,
-          userInput: mergedUserInput,
-          pendingAtomicClarification: pending,
-        }, result.explanation || intent.reasoning || pending.reasoning, pending.action),
-        result.explanation || intent.reasoning || pending.reasoning,
-        result.message,
-        sourcePendingContext,
-      )
-    }
-
-    return this.buildMicroEditDecision(result, intent.reasoning || pending.reasoning, sourcePendingContext)
-  }
-
   private async tryHandleAtomicInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision | null> {
-    if (input.preferLayoutDraftRefine) return null
-    if (input.currentLayoutDraft && this.shouldRouteToLayoutDraftRefine(input.userInput)) return null
-    if (this.shouldPreferLayoutDraftForOpenScheduling(input.userInput)) return null
     const context = buildDialogueContext({ scheduleState: input.scheduleState, userInput: input.userInput, currentSchedule: input.currentSchedule })
     const recognizedIntent = await this.intentRecognizer.recognize(context)
     const recognizedAction = this.asRuntimeAtomicAction(recognizedIntent?.type)
-    const normalizedAtomicInput = input.userInput.replace(/\s+/g, '')
-    const unsupportedActionHint = recognizedIntent && !recognizedAction
-      ? this.detectAtomicAction(normalizedAtomicInput)
-      : null
-    if (
-      unsupportedActionHint
-      && (recognizedIntent.type === 'unsupported' || recognizedIntent.type === 'clarify')
-      && this.shouldClarifyUnsupportedAtomicIntent(input, unsupportedActionHint)
-    ) {
-      const pendingAtomicClarification = this.buildPendingAtomicClarification(
-        input,
-        recognizedIntent.reasoning,
-        unsupportedActionHint,
-      )
-      return this.buildPendingAtomicClarificationDecision(pendingAtomicClarification)
-    }
 
-    const detectedAction = !recognizedIntent
-      ? this.detectAtomicAction(normalizedAtomicInput)
-      : null
-    const fallbackIntent = detectedAction
-      ? {
-          type: detectedAction,
-          confidence: 0.55,
-          reasoning: `fallback:${detectedAction}`,
-        } satisfies MicroEditIntent
-      : null
-    const intent = recognizedAction ? recognizedIntent : fallbackIntent
+    const intent = recognizedAction ? recognizedIntent : null
     if (!intent || !this.asRuntimeAtomicAction(intent.type)) return null
 
     const result = await this.buildMicroEditCommand(input, intent.reasoning, intent)
-    return this.buildMicroEditDecisionWithContinuationFallback(
-      input,
-      result,
-      intent.reasoning,
-      this.asRuntimeAtomicAction(intent.type),
-    )
+    return this.buildMicroEditDecision(result, intent.reasoning)
   }
 
-  private shouldAttemptAtomicInstruction(userInput: string): boolean {
-    const normalized = userInput.replace(/\s+/g, '')
-    if (!/(插入|插个|插一|插播|加播|加一条|加一档|加个|加一段|加一些|添加节目|安排节目|排入|排个|排一条|排一档|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)|删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉|移动到|移到|调到|调整到|改到|挪到|放到|排到|移动|后移|前移|顺延|延后|提前|推迟|推后|延迟|往后挪|往前挪|替换|换成|换播|换掉|替换成|替换为|改成|改为|改播)/.test(normalized)) return false
-    const hasExactTime = Boolean(parseAtomicClockExpression(normalized))
-    const hasExplicitAtomicVerb = /(插入|插个|插一|插播|加播|加一条|加一档|加个|加一段|加一些|添加节目|添加|排入|排个|排一条|排一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)|删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉|移动到|移到|调到|调整到|改到|挪到|放到|排到|移动|后移|前移|顺延|延后|提前|推迟|推后|延迟|往后挪|往前挪|替换|换成|换播|换掉|替换成|替换为|改成|改为|改播)/.test(normalized)
-    const hasStrongAtomicVerb = /(插入|插个|插一|插播|加播|添加节目|添加|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)|删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉|移动到|移到|调到|调整到|改到|挪到|放到|排到|移动|后移|前移|顺延|延后|提前|推迟|推后|延迟|往后挪|往前挪|替换|换成|换播|换掉|替换成|替换为|改成|改为|改播)/.test(normalized)
-    const hasSchedulingDeliverableCue = /(轮播单|直播单|播单|节目单|编排单|串联单|排单|版面|一版|一份)/.test(normalized)
-    const hasRelativeInsertAnchor = Boolean(this.extractRelativeInsertAnchor(userInput))
-    if (hasRelativeInsertAnchor) return true
-    if (looksLikeProgramSchedulingRequest(userInput) && !hasExactTime && !hasStrongAtomicVerb) {
-      return false
-    }
-    if (
-      looksLikeProgramSchedulingRequest(userInput)
-      && !hasExplicitAtomicVerb
-      && (!hasExactTime || hasSchedulingDeliverableCue)
-    ) {
-      return false
-    }
-    const hasQuotedTitle = /《[^》]+》/.test(normalized)
-    const hasBroadScope = /(全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|全部|都|统一|整体)/.test(normalized)
-    const hasLayoutCue = /(版面|栏目|剧场|时段)/.test(normalized)
-    const detectedAction = this.detectAtomicAction(normalized)
-    const hasNonInsertProgramAnchor = Boolean(
-      detectedAction && detectedAction !== 'insert' && this.extractAtomicProgramHint(userInput, detectedAction),
-    )
-    return !((hasBroadScope || hasLayoutCue) && !hasExactTime && !hasQuotedTitle && !hasNonInsertProgramAnchor)
+  private shouldAttemptAtomicInstruction(_userInput: string): boolean {
+    return true
   }
 
   private shouldPreferLayoutDraftForOpenScheduling(userInput: string): boolean {
@@ -6969,21 +6479,6 @@ export class DemoRuntimeFacade {
     const hasTimeOrDaypartCue = Boolean(parseAtomicClockExpression(normalized))
       || /(全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨)/.test(normalized)
     return hasDraftRefineVerb && (hasDraftCue || hasTimeOrDaypartCue || normalized.length <= 32)
-  }
-
-  private shouldRouteToLayoutDraftContinuation(userInput: string): boolean {
-    const normalized = userInput.replace(/\s+/g, '')
-    if (this.isFormalOrchestrationInstruction(normalized) && /(全天|整天|全日|补齐|补排|填充).*(空窗|空缺|缺口|节目)?/.test(normalized)) return false
-    if (/(改成|改为|调整为|统一成|换成|替换成|替换为)/.test(normalized)) return false
-    if (/(查询|查一下|校验|检查|验证|删除|删掉|移动|移到|后移|前移|插入|插播|替换).*(节目|播单|当前|这条|那条|候选)?/.test(normalized)) return false
-
-    const hasScopeCue = Boolean(parseAtomicTimeRange(userInput) ?? this.parseCompactHourRange(normalized))
-      || /(全天|整天|全日|上午|中午|午间|下午|晚间|晚上|夜间|深夜|凌晨|黄金时段|黄金档)/.test(normalized)
-    const hasSupplementVerb = /(补充|补上|补一段|补一个|补一下|增加|新增|加上|加一段|再加|再补|继续补|继续加)/.test(normalized)
-    const hasContentCue = /(栏目|节目|剧场|新闻|电视剧|综艺|专题|少儿|动画|纪录|体育|资讯|评论|健康|娱乐|短片|轮播|直播|看东方|东方|ShanghaiEye)/i.test(normalized)
-    const hasStructureCue = /(拆分|拆成|分成|分为|切成|规划成|每条|每段|每块|各条|各段|第[一二两三四五六七八九十\d]+个?小时|第一小时|第二小时|第三小时)/.test(normalized)
-    if (hasStructureCue) return true
-    return hasScopeCue && (hasSupplementVerb || hasContentCue)
   }
 
   private shouldClarifyUnsupportedAtomicIntent(input: RuntimeSubmitInput, action: RuntimeAtomicAction): boolean {
@@ -8184,12 +7679,8 @@ export class DemoRuntimeFacade {
   }
 
   private buildPendingAtomicClarification(input: RuntimeSubmitInput, reasoning: string, preferredAction?: RuntimeAtomicAction | null): RuntimePendingAtomicClarification {
-    const normalized = input.userInput.replace(/\s+/g, '')
-    const action = preferredAction ?? this.detectAtomicAction(normalized)
-    const slots = mergeRuntimeAtomicSlots(
-      input.pendingAtomicClarification?.slots ?? {},
-      this.extractAtomicSlotHints(input.userInput, action),
-    )
+    const action = preferredAction ?? input.pendingAtomicClarification?.action ?? null
+    const slots = input.pendingAtomicClarification?.slots ?? {}
     const targetTimeHint = slots.targetTimeHint ?? slots.targetTime
     const programNameHint = slots.programName ?? slots.rawProgramText
     const runtimeMissingFields = action
@@ -8260,21 +7751,30 @@ export class DemoRuntimeFacade {
         expiresAt: sourcePendingContext.expiresAt,
       } : undefined,
     )
-    return this.buildPendingAtomicContextDecision(
-      pendingAtomicContext,
-      createFeedback(
-        contentOverride ?? pending.summary,
-        'selection',
-        '待选择目标',
+    const candidateLines = pending.candidates
+      .slice(0, 5)
+      .map((candidate, index) => `${index + 1}. ${toClockText(candidate.startTime)}-${toClockText(candidate.endTime)}《${candidate.programName || candidate.id}》`)
+    return {
+      kind: 'message',
+      statusHint: 'needs_clarification',
+      feedback: createFeedback(
+        [
+          contentOverride ?? pending.summary,
+          candidateLines.join('\n'),
+          '你可以补充节目名、时间段或序号，我再继续缩小范围。',
+        ].filter(Boolean).join('\n'),
+        'planning',
+        '目标建议',
         {
           explanation: pending.reasoning,
           details: {
             targetTime: pending.targetTime,
             candidateCount: pending.candidates.length,
+            conversationAtomicContext: pendingAtomicContext,
           },
         },
       ),
-    )
+    }
   }
 
   private buildPendingInsertRecommendationDecision(
@@ -8311,6 +7811,56 @@ export class DemoRuntimeFacade {
     )
   }
 
+  private buildInsertRecommendationAdvisoryDecision(
+    pending: RuntimePendingInsertRecommendation,
+    contentOverride?: string,
+    _sourcePendingContext?: RuntimePendingAtomicContext,
+  ): RuntimeDecision {
+    const actionText = pending.action === 'replace' ? '替换' : '插入'
+    const basis = contentOverride?.trim()
+      || `我按你给的线索查了候选库，找到了几个可能适合${actionText}的节目。`
+    const candidateLines = pending.recommendedCandidates
+      .slice(0, 5)
+      .map((candidate, index) => this.formatRuntimeInsertRecommendationLine(candidate, index))
+    const targetText = pending.targetTime ? `目标位置是 ${pending.targetTime}。` : ''
+    const guide = pending.action === 'replace'
+      ? '你可以补充期数、版本、时长、栏目或内容方向，我再继续缩小范围；等信息足够明确后，我再帮你形成可写入的替换修改。'
+      : '你可以补充期数、版本、时长、栏目或内容方向，我再继续缩小范围；等信息足够明确后，我再帮你排入。'
+    return {
+      kind: 'message',
+      statusHint: 'needs_clarification',
+      feedback: createFeedback(
+        [
+          `${basis} 现在还不能替你直接选其中一个。${targetText}`,
+          candidateLines.join('\n'),
+          guide,
+        ].filter(Boolean).join('\n'),
+        'planning',
+        '候选建议',
+        {
+          explanation: pending.reasoning,
+          details: {
+            targetTime: pending.targetTime,
+            action: pending.action,
+            semanticLabel: pending.semanticLabel,
+            rawProgramText: pending.rawProgramText,
+            recommendedCandidateCount: pending.recommendedCandidates.length,
+            recommendedCandidates: pending.recommendedCandidates,
+          },
+        },
+      ),
+    }
+  }
+
+  private formatRuntimeInsertRecommendationLine(candidate: RuntimeInsertRecommendationCandidate, index: number): string {
+    const durationText = candidate.duration > 0 ? `，${this.formatDurationText(candidate.duration)}` : ''
+    const reasonText = candidate.reasonTags
+      .filter((tag) => tag && !/confidence|score|候选\s*\d+/iu.test(tag))
+      .slice(0, 2)
+      .join('、')
+    return `${index + 1}. 《${candidate.programName}》${durationText}${reasonText ? `，${reasonText}` : ''}`
+  }
+
   private buildPendingAtomicContextDecision(
     pendingAtomicContext: RuntimePendingAtomicContext,
     feedback?: RuntimeFeedback,
@@ -8333,71 +7883,6 @@ export class DemoRuntimeFacade {
         },
       ),
       pendingAtomicContext: lifecycleContext,
-    }
-  }
-
-  private patchPendingAtomicContext(
-    pendingContext: RuntimePendingAtomicContext,
-    slotPatch: Partial<RuntimePendingAtomicContext['slots']>,
-    followUpUserInput: string,
-  ): RuntimePendingAtomicContext {
-    return this.pendingAtomicContextService.touch(pendingContext, {
-      collectedUserInput: this.mergePendingCollectedInput(pendingContext.collectedUserInput, followUpUserInput),
-      slots: mergeRuntimeAtomicSlots(pendingContext.slots, slotPatch),
-    })
-  }
-
-  private refreshClarifyingPendingAtomicContext(pendingContext: RuntimePendingAtomicContext): RuntimePendingAtomicContext {
-    const targetTimeHint = pendingContext.slots.targetTimeHint ?? pendingContext.slots.targetTime
-    const programNameHint = pendingContext.slots.programName ?? pendingContext.slots.rawProgramText
-    const missingFields = deriveAtomicMissingFieldsFromSlots(pendingContext.action, pendingContext.slots)
-    const followUpQuestion = this.buildAtomicClarificationPrompt(
-      pendingContext.action,
-      {
-        targetTimeHint,
-        programNameHint,
-        replacementProgramName: pendingContext.slots.replacementProgramName,
-        direction: pendingContext.slots.direction,
-        offsetSeconds: pendingContext.slots.offsetSeconds,
-        missingFields: this.mapAtomicMissingFieldsToLegacy(missingFields),
-      },
-    )
-    const summaryTarget = targetTimeHint || programNameHint || '当前目标节目'
-
-    return this.pendingAtomicContextService.recordAttempt(pendingContext, {
-      summary: pendingContext.action ? `请补充${summaryTarget}的${this.describeAtomicAction(pendingContext.action)}参数` : '请补充节目调整参数',
-      slots: {
-        ...pendingContext.slots,
-        targetTimeHint,
-      },
-      missingFields,
-      followUpQuestion,
-    })
-  }
-
-  private buildCanonicalAtomicInstruction(pendingContext: RuntimePendingAtomicContext): string {
-    const targetTimeText = pendingContext.slots.targetTime ?? pendingContext.slots.targetTimeHint ?? ''
-    const targetProgram = pendingContext.slots.programName ?? pendingContext.slots.rawProgramText ?? ''
-    const replacementProgramName = pendingContext.slots.replacementProgramName ?? ''
-    switch (pendingContext.action) {
-      case 'delete':
-        return `删除${targetTimeText}${targetProgram ? `的《${targetProgram}》` : '的节目'}`
-      case 'move': {
-        const directionText = pendingContext.slots.direction === 'backward' ? '前移' : '后移'
-        const offsetText = this.formatAtomicOffset(pendingContext.slots.offsetSeconds)
-        return `把${targetTimeText}${targetProgram ? `的《${targetProgram}》` : '的节目'}${directionText}${offsetText}`
-      }
-      case 'replace':
-        return `把${targetTimeText}${targetProgram ? `的《${targetProgram}》` : '的节目'}替换成《${replacementProgramName}》`
-      case 'insert': {
-        const programText = pendingContext.slots.programName
-          ?? pendingContext.slots.rawProgramText
-          ?? pendingContext.slots.semanticLabel
-          ?? '节目'
-        return `在${targetTimeText}插入节目${programText}`
-      }
-      default:
-        return pendingContext.collectedUserInput
     }
   }
 
@@ -8441,107 +7926,11 @@ export class DemoRuntimeFacade {
     }
   }
 
-  private detectAtomicAction(normalized: string): RuntimeAtomicAction | null {
-    if (/(向后移动|向前移动|向后移|向前移|移动到|移到|调到|调整到|改到|挪到|放到|排到|后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前|推迟|推后|延迟)/.test(normalized)) return 'move'
-    if (/(删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉)/.test(normalized)) return 'delete'
-    if (/(替换|换成|换播|替换成|替换为|换掉|改掉|改成|改为|改播)/.test(normalized)) return 'replace'
-    if (/(插入|插个|插一|加一条|加一档|加个|加一段|加一些|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选))/.test(normalized)) return 'insert'
-    return null
-  }
-
-  private extractAtomicSlotHints(userInput: string, action: RuntimeAtomicAction | null): Partial<RuntimeAtomicSlotBag> {
-    const slots: Partial<RuntimeAtomicSlotBag> = {}
-    const timeSlot = this.extractAtomicTimeSlot(userInput)
-    if (timeSlot) {
-      slots.targetTime = timeSlot.targetTime
-      slots.targetTimeHint = timeSlot.targetTimeHint
-    }
-
-    const programNameHint = this.extractAtomicProgramHint(userInput, action)
-    if (programNameHint) {
-      slots.programName = programNameHint
-      if (action === 'insert') {
-        slots.rawProgramText = programNameHint
-      }
-    }
-
-    if (action === 'move') {
-      const offsetSlot = this.extractAtomicOffsetSlot(userInput)
-      if (offsetSlot) {
-        slots.direction = offsetSlot.direction
-        slots.offsetSeconds = offsetSlot.offsetSeconds
-      } else {
-        const directionHint = this.extractAtomicDirectionHint(userInput)
-        if (directionHint) {
-          slots.direction = directionHint
-        }
-      }
-    }
-
-    if (action === 'replace') {
-      const replacementProgramName = this.extractAtomicReplacementProgramName(userInput)
-      if (replacementProgramName) {
-        slots.replacementProgramName = replacementProgramName
-      }
-    }
-
-    return slots
-  }
-
   private extractAtomicTimeSlot(userInput: string): { targetTime: string; targetTimeHint: string } | null {
     const parsed = parseAtomicClockExpression(userInput)
     return parsed
       ? { targetTime: parsed.targetTime, targetTimeHint: parsed.matchedText }
       : null
-  }
-
-  private extractAtomicTimeHint(userInput: string): string | undefined {
-    const match = userInput.match(/(\d{1,2})(点半|点(\d{1,2})分?|点|[:：]\d{2})/)
-    return match?.[0]
-  }
-
-  private extractQuotedProgramName(userInput: string): string | undefined {
-    const match = userInput.match(/《([^》]+)》/)
-    return match?.[1]?.trim()
-  }
-
-  private extractAtomicProgramHint(userInput: string, action: RuntimeAtomicAction | null): string | undefined {
-    const quotedProgramName = this.extractQuotedProgramName(userInput)
-    if (quotedProgramName) return quotedProgramName
-
-    switch (action) {
-      case 'insert':
-        return this.extractAtomicProgramHintFromPatterns(userInput, [
-          /(?:插入节目|插入|插个|插一|加一条|加一档|加个|加一段|加一些|添加节目|添加|安排节目|安排|来个|来一条|来一档|放个|放一段|上个|上点|上一段|垫点|垫一点|垫一段|垫一条|补点|补一段|推荐(?:几个|几条|几档)?|找(?:几个|几条|几档)?|查(?:几个|几条|几档)?|有没有(?:适合|可用|候选)(?:的)?)(.+)$/u,
-        ])
-      case 'delete':
-        return this.extractAtomicProgramHintFromPatterns(userInput, [
-          /(?:删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉)(.+)$/u,
-          /把(.+?)(?:删除|删掉|移除|去掉|撤掉|撤下|拿掉|拿下|下掉)/u,
-        ])
-      case 'move':
-        return this.extractAtomicProgramHintFromPatterns(userInput, [
-          /把(.+?)(?:向后移动|向前移动|向后移|向前移|移动到|移到|调到|调整到|改到|挪到|放到|排到|后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前|推迟|推后|延迟)/u,
-          /(.+?)(?:向后移动|向前移动|向后移|向前移|移动到|移到|调到|调整到|改到|挪到|放到|排到|后移|前移|移动|顺一下|顺一个|挪一下|往后挪|往前挪|顺延|延后|提前|推迟|推后|延迟)/u,
-        ])
-      case 'replace':
-        return this.extractAtomicProgramHintFromPatterns(userInput, [
-          /把(.+?)(?:替换成|替换为|换成|换播|换掉|改掉|改成|改为|改播)/u,
-        ])
-      default:
-        return undefined
-    }
-  }
-
-  private extractAtomicProgramHintFromPatterns(userInput: string, patterns: RegExp[]): string | undefined {
-    for (const pattern of patterns) {
-      const matched = pattern.exec(userInput)?.[1]?.trim()
-      const normalized = this.normalizeAtomicProgramHint(matched)
-      if (normalized) {
-        return normalized
-      }
-    }
-    return undefined
   }
 
   private extractAtomicReplacementProgramName(userInput: string): string | undefined {
@@ -8553,13 +7942,6 @@ export class DemoRuntimeFacade {
 
   private extractAtomicOffsetSlot(userInput: string): { direction: 'forward' | 'backward'; offsetSeconds: number } | null {
     return parseAtomicOffset(userInput)
-  }
-
-  private extractAtomicDirectionHint(userInput: string): 'forward' | 'backward' | undefined {
-    const normalized = userInput.replace(/\s+/g, '')
-    if (/(向前移动|向前移|前移|提前|往前挪)/.test(normalized)) return 'backward'
-    if (/(向后移动|向后移|后移|延后|顺延|推迟|推后|延迟|往后挪|顺一下|顺一个|挪一下)/.test(normalized)) return 'forward'
-    return undefined
   }
 
   private normalizeAtomicTime(timeText: string): string | null {
@@ -8645,11 +8027,6 @@ export class DemoRuntimeFacade {
     }
   }
 
-  private shouldStayInAtomicClarification(message?: string): boolean {
-    if (!message) return true
-    return ['未能识别', '请重新描述', '请确认', '没有找到', '缺少', '未检索到'].some((keyword) => message.includes(keyword))
-  }
-
   private buildMicroEditDecision(
     result: RuntimeMicroEditBuildResult,
     fallbackReasoning: string,
@@ -8663,7 +8040,7 @@ export class DemoRuntimeFacade {
       )
     }
     if (result.pendingInsertRecommendation) {
-      return this.buildPendingInsertRecommendationDecision(
+      return this.buildInsertRecommendationAdvisoryDecision(
         result.pendingInsertRecommendation,
         result.message || result.pendingInsertRecommendation.summary,
         sourcePendingContext,
@@ -8678,32 +8055,10 @@ export class DemoRuntimeFacade {
     return { kind: 'execute_command', execution: { command: result.command, successMessage: result.successMessage, thinking: result.thinking, explanation: result.explanation || fallbackReasoning, details: result.details } }
   }
 
-  private buildMicroEditDecisionWithContinuationFallback(
-    input: RuntimeSubmitInput,
-    result: RuntimeMicroEditBuildResult,
-    fallbackReasoning: string,
-    preferredAction?: RuntimeAtomicAction | null,
-  ): RuntimeDecision {
-    if (!result.suppressClarificationFallback && !result.command && !result.pendingTargetSelection && !result.pendingInsertRecommendation && this.shouldStayInAtomicClarification(result.message)) {
-      const pendingAtomicClarification = this.buildPendingAtomicClarification(
-        input,
-        result.explanation || fallbackReasoning,
-        preferredAction,
-      )
-      return this.buildPendingAtomicClarificationDecision(
-        pendingAtomicClarification,
-        result.explanation || fallbackReasoning,
-        result.message,
-      )
-    }
-
-    return this.buildMicroEditDecision(result, fallbackReasoning)
-  }
-
   private async prepareLayoutDraft(input: RuntimeSubmitInput, classification: TaskClassification, orchestrationMode: Extract<TaskMode, 'full_generate' | 'partial_generate'>): Promise<RuntimeDecision> {
     try {
     const suggested = classification.suggestedParams ?? {}
-    const structuredSegments = this.resolveRotationStructuredSegments(input, suggested)
+    const structuredSegments = this.resolveRotationStructuredSegments(suggested)
     const rotationDurationSeconds = typeof suggested.rotationDurationSeconds === 'number' && suggested.rotationDurationSeconds > 0
       ? suggested.rotationDurationSeconds
       : input.scheduleState.playlistType === 'rotation'
@@ -8939,6 +8294,13 @@ export class DemoRuntimeFacade {
       : '你可以继续调整某个时段，也可以说“按这个开始编排”。'
 
     if (playlistType === 'rotation') {
+      if (/更新当前版面草案|按你的要求更新/u.test(baseLabel)) {
+        const structureText = segmentCount > 1
+          ? `当前轮播草案共有 ${segmentCount} 个内容块${durationText}。`
+          : `当前轮播草案还有 1 个内容块${durationText}。`
+        const warningText = hasWarnings ? '这版还有空档或边界需要你再看一眼。' : ''
+        return ['已按你的要求更新当前轮播草案。', structureText, noWriteText + '。', warningText, refineHint].filter(Boolean).join('')
+      }
       const structureText = segmentCount > 1
         ? `我先把这张轮播草案整理成 ${segmentCount} 个内容块${durationText}。`
         : `我先把需求整理成一块轮播草案${durationText}。`
@@ -9487,6 +8849,48 @@ export class DemoRuntimeFacade {
     }
   }
 
+  private buildBlockedInsertRecommendationResultIfEveryCandidateFails(
+    context: { scheduleState: ScheduleState; userInput: string; currentSchedule: RuntimeScheduleItem[] },
+    params: InsertParams,
+    candidates: ProgramCandidate[],
+    explanation: string,
+    details?: RuntimeDetailMap,
+  ): RuntimeMicroEditBuildResult | null {
+    if (!candidates.length) return null
+    const blockedResults = candidates
+      .map((candidate) => ({
+        candidate,
+        result: this.buildInsertCommandResult(
+          context,
+          params,
+          { id: candidate.id, programName: candidate.programName },
+          explanation,
+          {
+            ...(details ?? {}),
+            selectedCandidate: candidate,
+          },
+        ),
+      }))
+      .filter((entry) => !entry.result.command)
+    if (blockedResults.length !== candidates.length) return null
+    const primary = blockedResults.find((entry) => /顺播|跳集|重复/u.test(entry.result.message ?? ''))
+      ?? blockedResults[0]
+    if (!primary) return null
+    return {
+      command: null,
+      message: primary.result.message,
+      thinking: primary.result.thinking,
+      explanation,
+      details: {
+        ...(primary.result.details ?? details ?? {}),
+        candidateCount: candidates.length,
+        blockedCandidateCount: blockedResults.length,
+        rejectedReason: 'insert_recommendation_preview_blocked',
+      },
+      suppressClarificationFallback: true,
+    }
+  }
+
   private buildPendingInsertRecommendation(
     params: InsertParams,
     userInput: string,
@@ -9711,11 +9115,6 @@ export class DemoRuntimeFacade {
 
     if (intent.type === 'insert') {
       let params = await this.paramExtractor.extractInsertParams(context)
-      if (!params) {
-        const programAnchored = this.resolveProgramAnchoredInsertParams(input, reasoning)
-        if (programAnchored.result) return programAnchored.result
-        params = programAnchored.params
-      }
       if (!params) return { command: null, message: '未能识别插入目标时间，请重新描述。', explanation: reasoning }
       const columnId = findSlotColumnIdByTime(input.scheduleState.channelId, input.scheduleState.date, normalizeDateTime(input.scheduleState.date, params.targetTime))
       const { candidates, searchMode, blockedByTime, blockedByDuration, blockedByKeywords, keywordDiagnostics } = await this.searchInsertCandidates({
@@ -9792,6 +9191,20 @@ export class DemoRuntimeFacade {
 
       if (resolution.status === 'needs_recommendation') {
         const recommendedCandidates = this.mapRuntimeInsertRecommendationCandidates(resolution.candidates)
+        const blockedRecommendation = this.buildBlockedInsertRecommendationResultIfEveryCandidateFails(
+          context,
+          params,
+          resolution.candidates.map((entry) => entry.candidate),
+          reasoning,
+          {
+            targetTime: params.targetTime,
+            selectedCandidateName: params.programName ?? params.rawProgramText ?? params.semanticLabel,
+            candidateCount: recommendedCandidates.length,
+            recommendationTrigger: resolution.trigger,
+            recommendedCandidates,
+          },
+        )
+        if (blockedRecommendation) return blockedRecommendation
         const pendingInsertRecommendation = this.buildPendingInsertRecommendation(
           params,
           input.userInput,
@@ -9866,33 +9279,6 @@ export class DemoRuntimeFacade {
         : intent.type === 'move'
           ? await this.paramExtractor.extractMoveParams(context)
           : await this.paramExtractor.extractReplaceParams(context)
-      const rangeAnchored = this.resolveTimeRangeAnchoredAtomicParams(input, intent.type, reasoning)
-      if (rangeAnchored.result) return rangeAnchored.result
-      if (rangeAnchored.params) {
-        params = rangeAnchored.params
-      }
-      if (!params) {
-        const adjacentAnchored = this.resolveAdjacentProgramAnchoredAtomicParams(input, intent.type, reasoning)
-        if (adjacentAnchored.result) return adjacentAnchored.result
-        params = adjacentAnchored.params
-      }
-      if (!params) {
-        const ordinalAnchored = this.resolveOrdinalAnchoredAtomicParams(input, intent.type, reasoning)
-        if (ordinalAnchored.result) return ordinalAnchored.result
-        params = ordinalAnchored.params
-      }
-      if (!params && intent.type === 'move') {
-        const absoluteMove = await this.resolveAbsoluteMoveCommand(input, reasoning)
-        if (absoluteMove) return absoluteMove
-      }
-      if (!params) {
-        const programAnchored = this.resolveProgramAnchoredAtomicParams(input, intent.type, reasoning)
-        if (programAnchored.result) return programAnchored.result
-        params = programAnchored.params
-      }
-      if (!params && intent.type === 'move') {
-        params = this.resolveSingleTimeAnchoredMoveParams(input)
-      }
       if (!params) return { command: null, message: '未能识别目标时间，请重新描述。', explanation: reasoning }
       const targetTime = params.targetTime
       const deleteParams = intent.type === 'delete' ? params as DeleteParams : null
@@ -9972,16 +9358,8 @@ export class DemoRuntimeFacade {
   }
 
   private resolveSingleTimeAnchoredMoveParams(input: RuntimeSubmitInput): MoveParams | null {
-    const slots = this.extractAtomicSlotHints(input.userInput, 'move')
-    if (!slots.targetTime || !slots.direction || typeof slots.offsetSeconds !== 'number') {
-      return null
-    }
-
-    return {
-      targetTime: slots.targetTime,
-      direction: slots.direction,
-      offsetSeconds: slots.offsetSeconds,
-    }
+    void input
+    return null
   }
 
   private async resolveAbsoluteMoveCommand(input: RuntimeSubmitInput, reasoning: string): Promise<RuntimeMicroEditBuildResult | null> {
@@ -10143,11 +9521,10 @@ export class DemoRuntimeFacade {
     const destination = times.find((time) => time.index > moveVerb.index)
     if (!destination) return null
     const source = [...times].reverse().find((time) => time.index < moveVerb.index)
-    const programName = this.extractAtomicProgramHint(userInput, 'move')
     return {
       sourceTime: source?.targetTime,
       destinationTime: destination.targetTime,
-      programName: programName && !this.isGenericAtomicProgramAnchor(programName) ? programName : undefined,
+      programName: undefined,
     }
   }
 
@@ -10657,173 +10034,10 @@ export class DemoRuntimeFacade {
     action: 'delete' | 'move' | 'replace',
     reasoning: string,
   ): { params: DeleteParams | MoveParams | ReplaceParams | null; result?: RuntimeMicroEditBuildResult } {
-    const programName = this.extractAtomicProgramHint(input.userInput, action)
-    if (!programName) {
-      return { params: null }
-    }
-    const hasExplicitTargetTime = Boolean(this.extractAtomicTimeSlot(input.userInput))
-    const hasExplicitProgramAnchorCue = this.shouldResolveTargetByProgramAnchor(input.userInput)
-    if (
-      !hasExplicitTargetTime
-      && !hasExplicitProgramAnchorCue
-      && !this.canResolveUniqueTvProgramAnchor(input, programName)
-    ) {
-      return {
-        params: null,
-        result: {
-          command: null,
-          message: `已经识别到要${this.describeAtomicAction(action)}《${programName}》，还缺少目标时间点。`,
-          explanation: reasoning,
-          details: {
-            programName,
-            missingFields: ['target_time'],
-            targetResolution: { matchedBy: ['program_name_hint'] },
-          },
-        },
-      }
-    }
-    if (hasExplicitTargetTime && !hasExplicitProgramAnchorCue) {
-      return { params: null }
-    }
-    if (this.isGenericAtomicProgramAnchor(programName)) {
-      return { params: null }
-    }
-
-    if (!hasExplicitProgramAnchorCue && input.currentSchedule.length === 0) {
-      return { params: null }
-    }
-
-    const candidates = this.findScheduleItemsByProgramName(input.currentSchedule, programName)
-    if (candidates.length === 0) {
-      return {
-        params: null,
-        result: {
-          command: null,
-          message: `没有在当前节目单中找到《${programName}》，请补充准确时间点或节目名称。`,
-          explanation: reasoning,
-          details: {
-            programName,
-            targetResolution: { matchedBy: ['program_name'] },
-          },
-        },
-      }
-    }
-
-    if (candidates.length > 1) {
-      const targetTime = candidates[0]?.startTime ?? ''
-      const moveConfig = action === 'move'
-        ? this.extractAtomicOffsetSlot(input.userInput) ?? undefined
-        : undefined
-      const replaceProgramName = action === 'replace'
-        ? this.extractAtomicReplacementProgramName(input.userInput)
-        : undefined
-      if (action === 'move' && !moveConfig) {
-        return {
-          params: null,
-          result: {
-            command: null,
-            message: `已经找到多个《${programName}》候选，还需要补充移动幅度。`,
-            explanation: reasoning,
-            details: { programName, candidateCount: candidates.length },
-          },
-        }
-      }
-      if (action === 'replace' && !replaceProgramName) {
-        return {
-          params: null,
-          result: {
-            command: null,
-            message: `已经找到多个《${programName}》候选，还需要补充要替换成的新节目。`,
-            explanation: reasoning,
-            details: { programName, candidateCount: candidates.length },
-          },
-        }
-      }
-      return {
-        params: null,
-        result: {
-          command: null,
-          message: `当前节目单中存在多个《${programName}》，请确认要${action === 'delete' ? '删除' : action === 'move' ? '移动' : '替换'}哪一条。`,
-          explanation: reasoning,
-          pendingTargetSelection: {
-            action,
-            summary: `请选择要${action === 'delete' ? '删除' : action === 'move' ? '移动' : '替换'}的《${programName}》`,
-            reasoning,
-            targetTime,
-            programName,
-            candidates: candidates.map(asRuntimeItem),
-            selectedItemId: null,
-            moveConfig,
-            replaceProgramName,
-            resolutionDetails: {
-              programName,
-              targetResolution: { matchedBy: ['program_name'] },
-            },
-          },
-        },
-      }
-    }
-
-    const selected = candidates[0]!
-    const targetTime = toClockText(selected.startTime)
-    if (action === 'delete') {
-      return {
-        params: {
-          targetTime,
-          programName,
-        },
-      }
-    }
-
-    if (action === 'move') {
-      const offset = this.extractAtomicOffsetSlot(input.userInput)
-      if (!offset) {
-        return {
-          params: null,
-          result: {
-            command: null,
-            message: `已经定位到 ${targetTime} 的《${selected.programName || programName}》，还需要补充移动幅度，例如“后移30分钟”。`,
-            explanation: reasoning,
-            details: {
-              matchedItem: asRuntimeItem(selected),
-              programName,
-              targetTime,
-            },
-          },
-        }
-      }
-      return {
-        params: {
-          targetTime,
-          direction: offset.direction,
-          offsetSeconds: offset.offsetSeconds,
-        },
-      }
-    }
-
-    const replacementProgramName = this.extractAtomicReplacementProgramName(input.userInput)
-    if (!replacementProgramName) {
-      return {
-        params: null,
-        result: {
-          command: null,
-          message: `已经定位到 ${targetTime} 的《${selected.programName || programName}》，还需要补充要替换成的新节目。`,
-          explanation: reasoning,
-          details: {
-            matchedItem: asRuntimeItem(selected),
-            programName,
-            targetTime,
-          },
-        },
-      }
-    }
-
-    return {
-      params: {
-        targetTime,
-        programName: replacementProgramName,
-      },
-    }
+    void input
+    void action
+    void reasoning
+    return { params: null }
   }
 
   private canResolveUniqueTvProgramAnchor(input: RuntimeSubmitInput, programName: string): boolean {

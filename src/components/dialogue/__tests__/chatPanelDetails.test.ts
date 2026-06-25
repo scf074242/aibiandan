@@ -67,6 +67,28 @@ describe('chatPanelDetails', () => {
     expect(items[1]?.note).toContain('Strong content match')
   })
 
+  it('does not mark research top candidates as adopted without an explicit selection', () => {
+    const items = buildCandidateComparisonItems({
+      topCandidates: [
+        {
+          id: 'a',
+          programName: '静安夜色城市宣传片',
+          duration: 45,
+          programType: 'short_clip',
+        },
+        {
+          id: 'b',
+          programName: '城市形象：徐汇艺术街区',
+          duration: 30,
+          programType: 'short_clip',
+        },
+      ],
+    })
+
+    expect(items).toHaveLength(2)
+    expect(items.some((item) => item.selected)).toBe(false)
+  })
+
   it('shows editorial decision and dimensions in generic details summary', () => {
     const summary = buildDetailsSummary({
       selectedCandidate: {
@@ -686,5 +708,38 @@ describe('chatPanelDetails', () => {
     const searchAction = summary.find((item) => item.label === '检索动作')?.value ?? ''
     expect(searchAction).toContain('拆分词：城市形象、春日花路、短片')
     expect(searchAction).toContain('候选源返回 12 条')
+  })
+
+  it('summarizes the agent run trace without exposing raw runtime fields', () => {
+    const summary = buildDetailsSummary({
+      agentRunTraceSummary: {
+        status: 'needs_selection',
+        intent: 'insert',
+        totalElapsedMs: 15320,
+        llmCallCount: 1,
+        llmTotalDurationMs: 1280,
+        llmPromptCharCount: 18620,
+        evidenceBudget: {
+          scheduleItems: { included: 6, total: 20, truncated: true },
+          candidates: { included: 6, total: 272, truncated: true },
+          latestHistoryItems: { included: 3, total: 12, truncated: true },
+        },
+        pendingPhase: 'needs_selection',
+        recommendationCount: 3,
+        wroteFormalPlaylist: false,
+        issueCodes: ['multiple_candidates'],
+      },
+    }, summaryDeps)
+
+    const trace = summary.find((item) => item.label === '本轮轨迹')?.value ?? ''
+    expect(trace).toContain('插入')
+    expect(trace).toContain('模型 1 次')
+    expect(trace).toContain('上下文 18,620 字')
+    expect(trace).toContain('候选6/272')
+    expect(trace).toContain('待选择目标')
+    expect(trace).toContain('未写入')
+    expect(trace).not.toContain('runtime')
+    expect(trace).not.toContain('context')
+    expect(trace).not.toContain('trace')
   })
 })

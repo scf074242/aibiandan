@@ -71,6 +71,7 @@ export interface AgentIntentInterpretation {
   reasoning?: string
   assistantFeedback?: string
   streamingHint?: 'none' | 'thinking' | 'final'
+  contextMode?: 'scenario_context'
   rawText?: string
 }
 
@@ -109,7 +110,6 @@ export interface AgentIntentInterpreter {
 }
 
 export type AgentPendingAction =
-  | 'continue_pending'
   | 'start_new_task'
   | 'cancel_pending'
   | 'select_candidate'
@@ -232,6 +232,12 @@ export interface AgentLlmContextPackage {
     }
   }
   sourceSummary: AgentPendingContextSourceSnapshot[]
+  layoutDraftAnchors?: Array<{
+    label: string
+    startTime: string
+    endTime: string
+    queryHints?: string[]
+  }>
   currentSchedule: Array<{
     itemId: string
     programId?: string
@@ -288,6 +294,8 @@ export interface AgentTraceStep {
   label: string
   detail?: Record<string, unknown>
   timestamp: string
+  elapsedMs?: number
+  sequence?: number
 }
 
 export interface AgentConstraintIssue {
@@ -300,6 +308,7 @@ export interface AgentConstraintIssue {
     | 'time_overlap'
     | 'sequence_violation'
     | 'unsupported_intent'
+    | 'llm_intent_unavailable'
     | 'missing_required_slot'
     | 'schedule_source_missing'
     | 'candidate_source_missing'
@@ -444,7 +453,7 @@ export interface AgentCandidateRecommendation {
   professionalSignals?: AgentCandidateAssessmentSignal[]
 }
 
-export type AgentCandidateSelectionMethod = 'explicit' | 'tv_sequence' | 'candidate_judge'
+export type AgentCandidateSelectionMethod = 'explicit' | 'tv_sequence' | 'candidate_judge' | 'candidate_judge_llm'
 export type AgentCandidateSelectionSource = 'explicit' | 'today' | 'history' | 'fallback' | 'none'
 export type AgentCandidateAssessmentVerdict = 'prefer' | 'pass' | 'neutral' | 'warn' | 'block'
 export type SchedulingContextSourceKey = 'today' | 'candidates' | 'readiness' | 'history' | 'constraints' | 'policy'
@@ -476,6 +485,10 @@ export interface AgentCandidateSelectionDiagnostics {
   candidateOptionIds?: string[]
   professionalAssessment?: AgentCandidateProfessionalAssessment
   reason: string
+  decisionType?: AgentCandidateDecisionType
+  failureReason?: string
+  reasoning?: string
+  considerations?: string[]
 }
 
 export type AgentAuditOutcome = 'executed' | 'pending' | 'blocked' | 'failed' | 'read_only'
@@ -616,11 +629,11 @@ export interface AgentQueryResult {
   keyword?: string
   searchAttempts?: Array<{
     keyword: string
-    source: 'primary' | 'llm_alternative' | 'fallback'
+    source: 'primary' | 'llm_alternative'
     candidateCount: number
     candidateIds: string[]
   }>
-  candidateSearchMatchedBy?: 'primary' | 'rewritten_keywords' | 'none'
+  candidateSearchMatchedBy?: 'primary' | 'llm_alternatives' | 'none'
 }
 
 export interface AgentDecision {
@@ -658,6 +671,53 @@ export interface AgentCapabilityRuntime {
   trace: AgentTraceRecorder
 }
 
+/**
+ * TV 顺播证据（由 AgentTvSequenceCandidateSelector.buildEvidence 提取，不含决策）
+ * 用于透传给 LLM 候选决策器，让 LLM 看到顺播上下文
+ */
+export interface AgentTvSequenceEvidence {
+  playlistType: PlaylistType
+  /** 期望下一集期数（todayMaxSequence 或 historyMaxSequence + 1） */
+  expectedSequence?: number
+  /** 系列标识 */
+  seriesKey?: string
+  /** 证据来源：今天编排 / 历史编排 / 无基线 */
+  source: 'today' | 'history' | 'none'
+  /** 今天编排中同系列最大期数 */
+  todayMaxSequence?: number
+  /** 历史编排中同系列最大期数 */
+  historyMaxSequence?: number
+  /** 是否有顺播基线（today 或 history 命中） */
+  hasBaseline: boolean
+}
+
+/**
+ * LLM 候选决策类型
+ * - auto_select: 候选不多 + 唯一靠谱，可自动执行
+ * - needs_clarification: 候选很多/无顺播基线/同一期多版本，需用户澄清
+ * - unable_to_decide: LLM 失败/超时/结构无效
+ */
+export type AgentCandidateDecisionType =
+  | 'auto_select'
+  | 'needs_clarification'
+  | 'unable_to_decide'
+
+/**
+ * LLM 候选决策结果（含理由 + 决策类型）
+ */
+export interface AgentCandidateDecision {
+  /** 选中的候选（auto_select 时非 null） */
+  candidate: AgentProgramCandidate | null
+  /** 决策思路（用于第三条进度消息） */
+  reasoning: string
+  /** 评估要点（可选，用于进度消息 details） */
+  considerations?: string[]
+  /** 决策类型 */
+  decisionType: AgentCandidateDecisionType
+  /** needs_clarification 时的推荐列表 */
+  candidateOptions?: AgentProgramCandidate[]
+}
+
 export interface AgentCandidateJudgeInput {
   userInput: string
   playlistType: PlaylistType
@@ -665,10 +725,12 @@ export interface AgentCandidateJudgeInput {
   candidates: AgentProgramCandidate[]
   context: SchedulingContext
   professionalAssessments?: Record<string, AgentCandidateProfessionalAssessment>
+  /** TV 顺播证据（透传给 LLM 辅助决策） */
+  tvSequenceEvidence?: AgentTvSequenceEvidence
 }
 
 export interface AgentCandidateJudge {
-  selectBestCandidate(input: AgentCandidateJudgeInput): Promise<AgentProgramCandidate | null>
+  selectBestCandidate(input: AgentCandidateJudgeInput): Promise<AgentCandidateDecision>
 }
 
 export interface AgentTraceRecorder {

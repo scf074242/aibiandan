@@ -146,7 +146,7 @@ export const isForegroundWorkspaceMessageVisible = (
   message: ForegroundWorkspaceMessageVisibilityInput,
   currentWorkspaceKey: string | null,
 ): boolean => {
-  if (!message.workspaceKey) return true
+  if (!message.workspaceKey) return !currentWorkspaceKey || currentWorkspaceKey === 'none'
   if (!currentWorkspaceKey || currentWorkspaceKey === 'none') {
     return message.workspaceKey === currentWorkspaceKey
   }

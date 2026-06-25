@@ -41,6 +41,10 @@ export interface LLMRequestTrace {
   attemptCount: number
   durationMs: number
   timeoutMs: number
+  messageCount?: number
+  promptCharCount?: number
+  systemCharCount?: number
+  userCharCount?: number
   success: boolean
   error?: string
   startedAt: string

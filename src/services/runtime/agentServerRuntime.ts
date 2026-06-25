@@ -181,8 +181,10 @@ export class AgentServerRuntime {
       ? session.formalPlaylistSnapshot
       : foregroundSnapshot
     const activeReactTaskRun = session.activeReactTaskRun ?? input.activeReactTaskRun ?? null
+    const sameWorkspaceForPending = !session.formalPlaylistWorkspaceKey
+      || session.formalPlaylistWorkspaceKey === workspaceKey
     const pendingAtomicContext = input.pendingAtomicContext
-      ?? (this.shouldUseServerPendingAtomicContext(input.userInput) ? session.pendingAtomicContext ?? null : null)
+      ?? (sameWorkspaceForPending ? session.pendingAtomicContext ?? null : null)
     const contextPackage = buildForegroundAgentContextPackage({
       latestUserInput: input.userInput,
       scheduleState: input.scheduleState,
@@ -604,10 +606,6 @@ export class AgentServerRuntime {
       : null
   }
 
-  private shouldUseServerPendingAtomicContext(userInput: string): boolean {
-    return /^(?:确认|确定|执行|继续|下一批|继续执行|确认执行|重试|再试一次|可以|好的|好|ok|yes|取消|不用了|算了|先不用|不要执行|停止|cancel|no)$/iu
-      .test(userInput.replace(/\s+/g, ''))
-  }
 }
 
 let globalAgentServerRuntime: AgentServerRuntime | null = null

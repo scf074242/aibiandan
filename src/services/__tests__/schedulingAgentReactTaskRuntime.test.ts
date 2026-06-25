@@ -166,14 +166,14 @@ describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
           mode: 'react',
           actions: [],
           reactTask: {
-            objective: '先核验金山区热门景点素材，再决定是否更新草案',
+            objective: '先核验金山区热门景点素材，再更新草案',
             maxTurns: 3,
             batchSize: 4,
-            stopCondition: '素材方向明确后进入草案确认，不直接写正式播单',
+            stopCondition: '素材方向明确后更新草案，不直接写正式播单',
             nextActions: [
               {
                 type: 'research_check',
-                purpose: 'candidate_precheck',
+                purpose: 'draft_precheck',
                 targetSegmentIndex: 1,
                 semanticLabel: '金山区最近三年热门景点',
                 programTypeHint: 'documentary',
@@ -181,12 +181,12 @@ describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
               },
             ],
           },
-          assistantReplyDraft: '我先查素材，确认前不会写入正式播单。',
-          reasoning: '用户要求先查证素材，再决定是否调整草案。',
+          assistantReplyDraft: '我先查素材，能定位到草案段就直接更新草案；正式播单不会被写入。',
+          reasoning: '用户要求先查证素材，再调整草案。',
         }),
       })
       .mockResolvedValueOnce({
-        content: '我先查了当前第一段草案和素材库，金山乐高乐园方向可以继续核验。确认前我不会更新草案，也不会写入节目。需要我把这个方向更新到草案吗？',
+        content: '我先查了当前第一段草案和素材库，金山乐高乐园方向可以继续核验。',
       })
 
     const facade = new SchedulingAgentRuntimeFacade()
@@ -217,19 +217,19 @@ describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
       inputSource: 'user',
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending research context')
-    expect(result.pendingAtomicContext.phase).toBe('draft_research_confirmation')
-    expect(result.pendingAtomicContext.layoutDraftSuggestion?.semanticLabel).toBe('金山区最近三年热门景点')
-    expect(result.feedback.processTypeLabel).toBe('素材核验')
-    expect(result.feedback.content).toContain('确认前我不会更新草案')
-    expect(result.feedback.content).toContain('需要我把这个方向更新到草案吗')
-    expect(result.feedback.details?.noMutation).toBe(true)
+    expect(result.kind).toBe('layout_draft')
+    if (result.kind !== 'layout_draft') throw new Error('expected direct layout draft update')
+    expect(result.feedback.processTypeLabel).toBe('版面草案')
+    expect(result.feedback.content).toContain('已把“金山区最近三年热门景点”更新到左侧草案')
+    expect(result.feedback.content).not.toContain('确认前我不会更新草案')
+    expect(result.feedback.content).not.toContain('需要我把这个方向更新到草案吗')
+    expect(result.feedback.details?.noFormalPlaylistWrite).toBe(true)
+    expect(result.feedback.details?.draftUpdatePolicy).toBe('draft_updates_do_not_require_confirmation')
     expect(result.feedback.details?.candidateCount).toBe(1)
     expect(result.feedback.details?.reactTaskRun).toMatchObject({
       status: 'observing',
       loopCount: 1,
-      objective: '先核验金山区热门景点素材，再决定是否更新草案',
+      objective: '先核验金山区热门景点素材，再更新草案',
       limits: {
         maxTurns: 3,
         batchSize: 4,

@@ -77,7 +77,7 @@ describe('editor demand coverage matrix', () => {
     expect(playlistModels).toEqual(new Set(['tv', 'rotation', 'mixed']))
   })
 
-  it('keeps broad intent LLM-first and prevents programme-code driven coverage', () => {
+  it('keeps broad intent LLM-only and prevents programme-code driven coverage', () => {
     editorDemandCoverageCases.forEach((item) => {
       expect(item.userRequest, `${item.id} should not use programme code as the main request`).not.toMatch(/\d{12,}/)
       expect(item.reverseInference, `${item.id} should not route through OpenClaw`).not.toMatch(/OpenClaw.*阻塞|OpenClaw.*前置/)

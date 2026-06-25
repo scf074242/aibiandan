@@ -92,7 +92,7 @@ export interface RecommendedEngineeringSkillFit {
 export const editorDemandRootCauseLabels: Record<EditorDemandRootCause, string> = {
   none: '通用链路已经可以承接',
   business_guardrail: '业务上必须阻拦或确认，不能交给模型直接写入',
-  candidate_ambiguity: '候选不唯一，需要用户选择，不能自动替用户决定',
+  candidate_ambiguity: '候选不唯一，需要给出推荐依据并引导用户补充要求，不能自动替用户决定',
   missing_user_input: '用户缺少必要目标，比如轮播总时长、主题、位置或替换对象',
   data_realism_gap: '假数据或检索侧不够真实，影响模型判断用户心中想要的节目',
   atomic_capability_gap: '原子能力还不完整，任务计划已经能描述但执行器不能稳定落地',
@@ -190,7 +190,7 @@ export const recommendedEngineeringSkillFits: RecommendedEngineeringSkillFit[] =
     shouldConstrain: [
       '评审先列风险和证据，不先写总结',
       '检查新增本地判断是否能归因到业务边界',
-      '检查是否破坏 LLM-first 理解路径',
+      '检查是否破坏 LLM-only 理解路径',
     ],
     mustRemainProjectSpecific: [
       'OpenClaw 不能成为前台阻塞条件',

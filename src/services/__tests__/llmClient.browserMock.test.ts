@@ -46,6 +46,9 @@ describe('LLMClient browser mock hook', () => {
     expect(client.getRecentRequestTraces()[0]).toMatchObject({
       label: 'agent_planner',
       attemptCount: 1,
+      messageCount: 1,
+      promptCharCount: 2,
+      userCharCount: 2,
       success: true,
     })
   })

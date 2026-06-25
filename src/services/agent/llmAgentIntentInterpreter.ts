@@ -26,7 +26,6 @@ const INTENTS: AtomicCommandIntent[] = [
 ]
 
 const PENDING_ACTIONS: AgentPendingAction[] = [
-  'continue_pending',
   'start_new_task',
   'cancel_pending',
   'select_candidate',
@@ -53,17 +52,25 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
     const response = await this.llmClient.chat(this.buildMessages(input), {
       temperature: 0,
       maxTokens: 700,
-      timeout: 6000,
+      timeout: 30000,
       maxRetries: 1,
       traceLabel: 'agent.intent_interpreter',
     })
-    const parsed = this.parseJson(response.content)
+    return this.normalizeInterpretation(response.content, input, 'scenario_context')
+  }
+
+  private normalizeInterpretation(
+    content: string,
+    input: AgentSubmitInput,
+    contextMode: AgentIntentInterpretation['contextMode'],
+  ): AgentIntentInterpretation | null {
+    const parsed = this.parseJson(content)
     if (!parsed || typeof parsed !== 'object') return null
 
     const record = parsed as Record<string, unknown>
     const requestedIntent = this.normalizeIntent(record.intent)
     if (!requestedIntent) return null
-    const confidence = this.normalizeConfidence(record.confidence)
+    const confidence = this.normalizeConfidence(record.confidence, requestedIntent)
     if (confidence < MIN_STRUCTURED_CONFIDENCE) return null
     const pendingAction = this.normalizePendingAction(
       record.pendingAction,
@@ -86,9 +93,11 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
       reasoning: typeof record.reasoning === 'string' ? record.reasoning : undefined,
       assistantFeedback: this.normalizeAssistantFeedback(record.assistantFeedback ?? record.assistantReplyDraft),
       streamingHint: this.normalizeStreamingHint(record.streamingHint),
-      rawText: response.content,
+      contextMode,
+      rawText: content,
     }
   }
+
 
   private buildMessages(input: AgentSubmitInput): ChatMessage[] {
     return [
@@ -101,6 +110,12 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
           'Use evidencePackage as compact evidence for current schedule, candidate library, readiness, history, constraints, and policy when extracting references such as programme names, time slots, candidate hints, and pending-turn actions.',
           'Read evidencePackage.playlistSemantics before interpreting positions: TV playlists are strict broadcast time grids, while rotation playlists are content queues with relative positions from zero.',
           'For rotation playlists, do not invent channel/date broadcast windows. A phrase like "3小时轮播" is duration scope, and positions usually mean queue position or relative time. For TV playlists, clock times mean broadcast slots.',
+          'For rotation playlists, if currentSchedule is empty and the user asks to insert or add one item without a position, treat the queue start as the natural target: set slots.targetTime="00:00:00" and explain in assistantFeedback that the current queue is empty so the item will be placed at the beginning. Do not simultaneously ask for an insertion position.',
+          'For rotation playlists, currentSchedule items are queue blocks. If the user says "在X后/在已插入的X后/X后继续插入Y", locate X in evidencePackage.currentSchedule and set intent=insert, slots.targetTime to that item endTime, and slots.programHint to Y. If Y is omitted but a pending insert already has a programme clue, keep the pending programme clue. assistantFeedback must explain the basis in plain Chinese, such as "我会接在当前轮播单里已排的《看东方》后面继续插入。"',
+          'For rotation playlists, if the user says "1点的X向后移动1小时" or "X向后移动1小时", prefer the named existing programme as the target: set targetProgramName=X, offsetSeconds=3600, direction="forward". Do not rely only on targetTime when the programme name is present. In rotation playlists, "1点" without 下午/13点 usually means the relative +1 hour position, not a TV broadcast clock.',
+          'evidencePackage.layoutDraftAnchors may list the active TV layout draft slots. If the user says "在X里/在X栏目里/在X格子里" with words like 填入、排入、插入、编排, treat it as a formal playlist insert anchored by the matching draft slot: set intent=insert, slots.targetTime to the anchor startTime, and slots.programHint to X or the requested programme clue. Do not treat that as editing the draft unless the user explicitly says 更新草案、改草案、调整版面草案.',
+          'TV anchor example: if layoutDraftAnchors contains 东方快报 06:00:00-07:00:00 and the user says "在东方快报里，帮我找到期数最大的一期填入", return intent=insert, slots.targetTime="06:00:00", slots.targetProgramName="东方快报", slots.programHint="东方快报 期数最大"; add searchAlternatives such as ["东方快报 期数最大","东方快报 最新一期","东方快报"].',
+          'When you use a layoutDraftAnchor, assistantFeedback must briefly explain the basis in plain Chinese, for example: "我会按草案里的东方快报时段定位到06:00，再按你说的期数最大去筛选节目。"',
           'For full or overall scheduling requests, do not downgrade the user to atomic commands. If the request needs a layout draft, return low confidence and explain in assistantFeedback what is missing.',
           'Use pendingEvidenceSummary as compact evidence for the previous pending task when deciding whether the current turn continues, confirms, selects, cancels, or starts a new task.',
           'Scheduling Agent Core v1.1 only covers atomic playlist commands: move, insert, replace, delete, batch_move, batch_delete, query, and validate.',
@@ -109,7 +124,10 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
           'If a destination is occupied, do not infer auto-shift, auto-replace, or auto-reorder behavior; only extract the requested move or insert slots and leave blocking to the runtime.',
           'Return JSON only, without Markdown.',
           'intent must be one of: move, insert, replace, delete, batch_move, batch_delete, query, validate.',
-          'When pendingTask is present, also set pendingAction to one of: continue_pending, start_new_task, cancel_pending, select_candidate, confirm, reject.',
+          'Return confidence as a number from 0 to 1 whenever you return an intent. Use lower confidence only when you are deliberately asking for clarification.',
+          'When pendingTask is present, set pendingAction only for explicit start_new_task, cancel_pending, select_candidate, confirm, or reject. Ordinary follow-up language should be interpreted from the full context as a fresh structured intent with slots, not as a hidden continuation switch.',
+          'If pendingTask is an insert and the user replies "就在已插入的X节目后" or "接在X后面", use currentSchedule and the previous context to return a normal insert intent with targetTime set to the matched X item endTime and programHint kept only when the context still clearly points to the same requested content.',
+          'For pending slot corrections, words like 换成、改成、改到、插入、排入 are action words, not programme names. Do not turn "换成1点插入" into programHint="换成插入".',
           'slots may include: targetTime, newStartTime, rangeStart, rangeEnd, programHint, replacementHint, offsetSeconds, direction, candidateId, targetItemId, targetProgramName.',
           'taskPlanDraft.stages may include type atomic, batch_atomic, draft_refill, verify, ask_user. Use draft_refill only when the user explicitly asks to use/reference a layout draft or fill gaps. For batch replace stages, target.programName or target range is the existing content, and target.replacementHint is the desired replacement content. For insert stages, target may include candidateId, candidateCode, programType, and durationSeconds only when already known from context or user-selected candidate evidence. Do not claim any stage has executed.',
           'For insert, replace, and candidate_lookup turns, also return searchAlternatives as 2-5 short Chinese keyword rewrites when helpful. Use similar programme names, column names, content facets, and intent-preserving synonyms; do not invent a final candidate.',
@@ -234,8 +252,8 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
       : undefined
   }
 
-  private normalizeConfidence(value: unknown): number {
-    if (typeof value !== 'number' || Number.isNaN(value)) return 0
+  private normalizeConfidence(value: unknown, requestedIntent?: AtomicCommandIntent): number {
+    if (typeof value !== 'number' || Number.isNaN(value)) return requestedIntent ? 0.75 : 0
     return Math.max(0, Math.min(1, value))
   }
 
@@ -243,9 +261,15 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
     if (typeof value !== 'string') return undefined
     const normalized = value.replace(/\s+/g, ' ').trim()
     if (!normalized) return undefined
+    if (this.hasPrematureCompletionClaim(normalized)) return undefined
     const sanitized = this.sanitizeAssistantFeedback(normalized)
     if (!sanitized) return undefined
     return sanitized.slice(0, 180)
+  }
+
+  private hasPrematureCompletionClaim(value: string): boolean {
+    const claimsWriteCompleted = /^(?:好的?[，,]?\s*)?已(?:经)?[^。！？!?]*(?:插入|删除|移动|替换|更新|写入|改好|完成)/u
+    return claimsWriteCompleted.test(value)
   }
 
   private sanitizeAssistantFeedback(value: string): string | undefined {
@@ -258,20 +282,7 @@ export class LlmAgentIntentInterpreter implements AgentIntentInterpreter {
     const readableText = readableChunks.join('')
     if (readableText.length >= 8) return readableText
 
-    const cleaned = value
-      .replace(/taskPlan\s*stage\s*已生成[，,；;]?\s*/giu, '我已经整理好这次修改，')
-      .replace(/(?:taskPlan|stage|runtime|policy|evidencePackage|pendingTask|Agent Core|JSON)/giu, '')
-      .replace(/(?:置信度和匹配度|confidence and matching score)/giu, '节目线索')
-      .replace(/(?:置信度|匹配度|confidence|matching score)/giu, '节目线索')
-      .replace(/(?:候选源|结构化|上下文包|策略ID|技术词)/gu, '')
-      .replace(/会按节目线索和节目线索/gu, '会按节目线索')
-      .replace(/\s+/g, ' ')
-      .replace(/[，,；;]\s*[，,；;]/g, '，')
-      .trim()
-
-    if (!cleaned || cleaned.length < 8) return undefined
-    if (ASSISTANT_FEEDBACK_TECHNICAL_PATTERN.test(cleaned)) return undefined
-    return cleaned
+    return undefined
   }
 
   private normalizeSearchAlternatives(value: unknown): string[] | undefined {

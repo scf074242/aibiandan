@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ScheduleState } from '@/types/orchestration'
-import { AtomicContinuationClassifier } from '@/services/atomicContinuationClassifier'
 import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomicCapabilities'
 import { resetCandidateService } from '@/services/candidateService'
 
@@ -560,83 +559,4 @@ describe('Atomic conversation scenarios', () => {
     expect(second.feedback.details?.rejectedReason).toBe('insert_time_not_available')
   })
 
-  it('case 19: 同动作的完整新插入命令会打断旧插入上下文', () => {
-    const classifier = new AtomicContinuationClassifier()
-
-    const result = classifier.classify({
-      pendingContext: createPendingContext(),
-      userInput: '10点插入东方新闻',
-    })
-
-    expect(result).toEqual({
-      kind: 'interrupt_as_new_task',
-    })
-  })
-
-  it('case 20: 不同动作的完整新删除命令也会打断旧插入上下文', () => {
-    const classifier = new AtomicContinuationClassifier()
-
-    const result = classifier.classify({
-      pendingContext: createPendingContext(),
-      userInput: '删除9点的节目',
-    })
-
-    expect(result).toEqual({
-      kind: 'interrupt_as_new_task',
-    })
-  })
-
-  it('case 21: 插入推荐阶段输入删除看东方会打断旧上下文并进入删除补参', async () => {
-    mockIntentRecognize
-      .mockResolvedValueOnce({ type: 'insert', confidence: 0.9, reasoning: 'insert clarify' })
-      .mockResolvedValueOnce({ type: 'delete', confidence: 0.9, reasoning: 'delete clarify' })
-    mockExtractInsertParams
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        targetTime: '10:00:00',
-        rawProgramText: '看东方',
-        semanticLabel: 'news_magazine',
-        confidence: 0.82,
-        candidateIds: ['cand-1', 'cand-2', 'cand-3'],
-      })
-    mockExtractDeleteParams.mockResolvedValueOnce(null)
-
-    const facade = new DemoRuntimeFacade()
-    const scheduleState = createScheduleState()
-    const currentSchedule = [mockedItem]
-
-    const first = await facade.submitInstruction({
-      scheduleState,
-      userInput: '插入看东方',
-      currentSchedule,
-      history: [],
-    })
-    expect(first.kind).toBe('pending_atomic_context')
-    if (first.kind !== 'pending_atomic_context') throw new Error('expected first pending_atomic_context')
-
-    const second = await facade.submitInstruction({
-      scheduleState,
-      userInput: '10点',
-      currentSchedule,
-      history: ['插入看东方'],
-      pendingAtomicContext: first.pendingAtomicContext,
-    })
-    expect(second.kind).toBe('pending_atomic_context')
-    if (second.kind !== 'pending_atomic_context') throw new Error('expected second pending_atomic_context')
-    expect(second.pendingAtomicContext.phase).toBe('recommending_insert')
-
-    const third = await facade.submitInstruction({
-      scheduleState,
-      userInput: '删除看东方',
-      currentSchedule,
-      history: ['插入看东方', '10点'],
-      pendingAtomicContext: second.pendingAtomicContext,
-    })
-    expect(third.kind).toBe('pending_atomic_context')
-    if (third.kind !== 'pending_atomic_context') throw new Error('expected third pending_atomic_context')
-    expect(third.pendingAtomicContext.action).toBe('delete')
-    expect(third.pendingAtomicContext.phase).toBe('clarifying')
-    expect(third.pendingAtomicContext.missingFields).toEqual(['target_time'])
-    expect(third.pendingAtomicContext.slots.programName).toBe('看东方')
-  })
 })

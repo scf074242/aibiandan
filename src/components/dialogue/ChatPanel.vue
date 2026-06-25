@@ -495,6 +495,7 @@ import {
   type RuntimeFeedback,
   type RuntimeOrchestrationRequest,
   type RuntimePendingCommand,
+  type RuntimeProgressEvent,
   type RuntimeScheduleItem,
 } from '@/services/runtime/agentRuntimeClient'
 import {
@@ -676,6 +677,7 @@ const messagesContainer = ref<HTMLElement>()
 const layoutFileInput = ref<HTMLInputElement>()
 const pendingCommand = ref<RuntimePendingCommand | null>(null)
 const pendingAtomicContext = ref<RuntimePendingAtomicContext | null>(null)
+const conversationAtomicContext = ref<RuntimePendingAtomicContext | null>(null)
 const analysisContext = ref<RuntimeAnalysisContext | null>(null)
 const pendingReviewWorkspaceKey = ref<string | null>(null)
 const pendingReviewInterruptedNotice = ref<string | null>(null)
@@ -685,7 +687,6 @@ const activeReactTaskWorkspaceKey = ref<string | null>(null)
 const pendingLayoutDraft = ref<LayoutDraft | null>(null)
 const layoutDraftFeasibility = ref<DraftFeasibilityReport | null>(null)
 const pendingLayoutDraftMode = ref<Extract<TaskMode, 'full_generate' | 'partial_generate'> | null>(null)
-const preferLayoutDraftContinuation = ref(false)
 const preserveIncomingLayoutDraftOnWorkspaceChange = ref(false)
 const activePlaylistType = ref<PlaylistType>(props.playlistType ?? 'none')
 const activeRotationStrategy = ref<RotationPlaylistStrategy>(props.rotationStrategy ?? 'content_match')
@@ -1034,7 +1035,6 @@ const clearPendingLayoutDraftState = () => {
   pendingLayoutDraft.value = null
   layoutDraftFeasibility.value = null
   pendingLayoutDraftMode.value = null
-  preferLayoutDraftContinuation.value = false
   emit('layoutDraftUpdated', {
     draft: null,
     feasibilityReport: null,
@@ -1044,10 +1044,10 @@ const clearPendingLayoutDraftState = () => {
 const clearPendingRuntimeTaskState = (options: { clearLayoutDraft?: boolean } = {}) => {
   pendingCommand.value = null
   pendingAtomicContext.value = null
+  conversationAtomicContext.value = null
   analysisContext.value = null
   pendingReviewWorkspaceKey.value = null
   pendingReviewInterruptedNotice.value = null
-  preferLayoutDraftContinuation.value = false
   if (options.clearLayoutDraft) {
     clearPendingLayoutDraftState()
   }
@@ -1311,17 +1311,17 @@ const resolvePendingReviewExpiredNotice = (reason?: 'workspace_changed' | 'next_
 )
 
 const isRecoverableRuntimeRetryText = (content: string): boolean =>
-  /^(重试|再试一次|继续|重新试|再来一次|retry|continue)$/iu.test(content.replace(/\s+/g, ''))
+  /^(重试|再试一次|重新试|再来一次|retry)$/iu.test(content.replace(/\s+/g, ''))
 
-const isPendingCompositeTaskContinueText = (content: string): boolean =>
+const isPendingCompositeBatchStepText = (content: string): boolean =>
   Boolean(
     pendingAtomicContext.value?.compositeTaskRun
-    && /^(继续|继续执行|继续处理|下一批|重试|再试一次|retry|continue)$/iu.test(content.replace(/\s+/g, '')),
+    && /^(下一批|重试|再试一次|retry)$/iu.test(content.replace(/\s+/g, '')),
   )
 
 const resolveRecoverableRuntimeRetryInput = (content: string): string | null | undefined => {
   if (!isRecoverableRuntimeRetryText(content)) return undefined
-  if (isPendingCompositeTaskContinueText(content)) return undefined
+  if (isPendingCompositeBatchStepText(content)) return undefined
   if (resolveActiveReactTaskForCurrentWorkspace()) return undefined
   const failure = recoverableRuntimeFailure.value
   if (!failure) return null
@@ -1396,11 +1396,14 @@ const pushPendingReviewExpiredMessage = (reason?: 'workspace_changed' | 'next_no
 }
 
 const interruptPendingReviewForNewInput = (content: string): boolean => {
-  if (!pendingCommand.value && !pendingAtomicContext.value) return false
+  const hasWriteReview = Boolean(pendingCommand.value) || isAtomicContextWriteReview(pendingAtomicContext.value)
+  if (!hasWriteReview) return false
   if (isPendingReviewAnswerText(content)) return false
-  if (isPendingCompositeTaskContinueText(content)) return false
+  if (isPendingCompositeBatchStepText(content)) return false
   pendingCommand.value = null
-  pendingAtomicContext.value = null
+  if (isAtomicContextWriteReview(pendingAtomicContext.value)) {
+    pendingAtomicContext.value = null
+  }
   pendingReviewWorkspaceKey.value = null
   pendingReviewInterruptedNotice.value = resolvePendingReviewExpiredNotice('next_non_answer')
   return true
@@ -1521,25 +1524,6 @@ const appendRuntimeFeedback = (feedback: RuntimeFeedback) => {
   }))
 }
 
-const rememberLayoutDraftContinuationIfNeeded = (feedback: RuntimeFeedback) => {
-  const details = (feedback.details ?? undefined) as DetailMap | undefined
-  const draftCompleteness = details?.draftCompleteness as { status?: string } | undefined
-  const blockedMode = details?.blockedMode
-  if (feedback.processTypeLabel !== '还要补草案' || draftCompleteness?.status !== 'partial') return
-
-  preferLayoutDraftContinuation.value = true
-  if (blockedMode === 'full_generate' || blockedMode === 'partial_generate') {
-    pendingLayoutDraftMode.value = blockedMode
-  }
-  if (!pendingLayoutDraft.value && props.currentLayoutDraft) {
-    pendingLayoutDraft.value = props.currentLayoutDraft
-  }
-}
-
-const clearLayoutDraftContinuationPreference = () => {
-  preferLayoutDraftContinuation.value = false
-}
-
 const withRuntimeFeedbackNotice = (
   feedback: RuntimeFeedback,
   notice?: string | null,
@@ -1628,6 +1612,7 @@ const applyRuntimeDecision = async (
     case 'agent_execution': {
       appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingAtomicContext.value = decision.pendingAtomicContext ?? null
+      conversationAtomicContext.value = null
       pendingCommand.value = null
       if (pendingAtomicContext.value) {
         bindPendingReviewToCurrentWorkspace()
@@ -1651,6 +1636,7 @@ const applyRuntimeDecision = async (
     case 'pending_atomic_context':
       appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingAtomicContext.value = decision.pendingAtomicContext
+      conversationAtomicContext.value = null
       bindPendingReviewToCurrentWorkspace()
       recordBrowserRuntimeTrace('pending_atomic_context:set', {
         hasCompositeTaskRun: Boolean(decision.pendingAtomicContext.compositeTaskRun),
@@ -1660,7 +1646,6 @@ const applyRuntimeDecision = async (
       })
       return
     case 'message':
-      rememberLayoutDraftContinuationIfNeeded(decision.feedback)
       if (decision.layoutDraft) {
         preserveIncomingLayoutDraftOnWorkspaceChange.value = true
       }
@@ -1683,6 +1668,9 @@ const applyRuntimeDecision = async (
       pendingAtomicContext.value = decision.pendingAtomicClarification
         ? buildPendingAtomicContextFromClarification(decision.pendingAtomicClarification)
         : null
+      conversationAtomicContext.value = !pendingAtomicContext.value
+        ? (decision.feedback.details?.conversationAtomicContext as RuntimePendingAtomicContext | undefined) ?? null
+        : null
       if (pendingAtomicContext.value) {
         bindPendingReviewToCurrentWorkspace()
       } else {
@@ -1693,20 +1681,24 @@ const applyRuntimeDecision = async (
       appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingCommand.value = decision.pendingCommand
       pendingAtomicContext.value = null
+      conversationAtomicContext.value = null
       bindPendingReviewToCurrentWorkspace()
       return
     case 'pending_target_selection':
       appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingAtomicContext.value = buildPendingAtomicContextFromTargetSelection(decision.pendingTargetSelection)
+      conversationAtomicContext.value = null
       bindPendingReviewToCurrentWorkspace()
       return
     case 'pending_insert_recommendation':
       appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       pendingAtomicContext.value = buildPendingAtomicContextFromInsertRecommendation(decision.pendingInsertRecommendation)
+      conversationAtomicContext.value = null
       bindPendingReviewToCurrentWorkspace()
       return
     case 'execute_command':
       pendingAtomicContext.value = null
+      conversationAtomicContext.value = null
       pendingCommand.value = null
       pendingReviewWorkspaceKey.value = null
       emitFocusTarget(
@@ -1728,12 +1720,10 @@ const applyRuntimeDecision = async (
       })
       return
     case 'orchestration':
-      clearLayoutDraftContinuationPreference()
       appendRuntimeFeedback(withRuntimeFeedbackNotice(decision.feedback, leadingNotice))
       emit('orchestrateRequested', decision.orchestrationRequest)
       return
     case 'layout_draft':
-      clearLayoutDraftContinuationPreference()
       pendingCommand.value = null
       pendingAtomicContext.value = null
       pendingReviewWorkspaceKey.value = null
@@ -1764,7 +1754,6 @@ const applyRuntimeDecision = async (
       }
       return
     case 'layout_commit':
-      clearLayoutDraftContinuationPreference()
       pendingLayoutDraft.value = null
       layoutDraftFeasibility.value = null
       pendingLayoutDraftMode.value = null
@@ -1858,6 +1847,31 @@ const recordBrowserRuntimeTrace = (event: string, details?: Record<string, unkno
 const processMessage = async (content: string, progressLabel = '思考中') => {
   loading.value = true
   const stepProgress = startStepProgress(progressLabel)
+  const runtimeProgressKeys = new Set<string>()
+  const handleRuntimeProgress = (event: RuntimeProgressEvent) => {
+    const progressContent = event.content.trim()
+    if (!progressContent) return
+    const progressKey = event.id || `${event.processTypeLabel}:${progressContent}`
+    if (runtimeProgressKeys.has(progressKey)) return
+    runtimeProgressKeys.add(progressKey)
+    messages.value.push(buildAssistantMessage({
+      content: progressContent,
+      thinking: event.thinking,
+      processType: event.processType,
+      processTypeLabel: event.processTypeLabel,
+      stepMetric: stepProgress.snapshot(),
+      explanation: event.details
+        ? {
+          type: 'command',
+          targetId: progressKey,
+          explanation: event.thinking || progressContent,
+          details: event.details,
+        }
+        : undefined,
+    }))
+    stepProgress.keepRunningAtBottom()
+    void scrollToBottom()
+  }
   let effectiveContent = content
   const runtimeInputSource = pendingRuntimeInputSource.value
   pendingRuntimeInputSource.value = 'user'
@@ -1892,7 +1906,10 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       pendingAtomicContext: pendingAtomicContext.value,
     })
     const usablePendingCommand = pendingReviewLifecycle.canUsePendingReview ? pendingCommand.value : null
-    const usablePendingAtomicContext = pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null
+    const usablePendingAtomicContext = pendingReviewLifecycle.hasPendingReview
+      ? (pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null)
+      : pendingAtomicContext.value
+    const usableConversationAtomicContext = usablePendingAtomicContext ? null : conversationAtomicContext.value
     const interruptedPendingReviewNotice = pendingReviewInterruptedNotice.value
     pendingReviewInterruptedNotice.value = null
     const pendingReviewExpiredNotice = interruptedPendingReviewNotice ?? (pendingReviewLifecycle.shouldExpire
@@ -1902,6 +1919,7 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       const summary = usablePendingCommand.summary.replace(/[，,。.!！?？]+$/u, '')
       pendingCommand.value = null
       pendingAtomicContext.value = null
+      conversationAtomicContext.value = null
       pendingReviewWorkspaceKey.value = null
       messages.value.push(buildAssistantMessage({
         content: `${summary}，已取消执行。`,
@@ -1915,6 +1933,7 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
     if (usablePendingCommand && isPendingReviewConfirmText(content)) {
       pendingCommand.value = null
       pendingAtomicContext.value = null
+      conversationAtomicContext.value = null
       pendingReviewWorkspaceKey.value = null
       const result = await runtimeClient.executePendingCommand(buildPendingExecuteInput(usablePendingCommand))
       applyRuntimeExecutedResult(result, stepProgress.finish())
@@ -1923,6 +1942,7 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
     if (pendingReviewLifecycle.shouldExpire) {
       pendingCommand.value = null
       pendingAtomicContext.value = null
+      conversationAtomicContext.value = null
       pendingReviewWorkspaceKey.value = null
     }
     const llmReadiness = resolveForegroundLlmReadiness()
@@ -1937,13 +1957,9 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       currentSchedule: props.currentSchedule,
       currentLayoutDraft,
       pendingCommand: usablePendingCommand,
-      pendingAtomicContext: usablePendingAtomicContext,
+      pendingAtomicContext: usablePendingAtomicContext ?? usableConversationAtomicContext,
       activeReactTaskRun: resolveActiveReactTaskForCurrentWorkspace(),
     })
-    const preferLayoutDraftRefine = foregroundLayoutDraftRuntimeEnabled
-      && Boolean(currentLayoutDraft)
-      && preferLayoutDraftContinuation.value
-    preferLayoutDraftContinuation.value = false
     recordBrowserRuntimeTrace('submit:start', {
       userInput: effectiveContent,
       playlistType: scheduleState.playlistType,
@@ -1957,14 +1973,15 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       currentLayoutDraft,
       currentLayoutDraftMode: foregroundLayoutDraftRuntimeEnabled ? pendingLayoutDraftMode.value : null,
       analysisContext: analysisContext.value,
-      pendingAtomicContext: usablePendingAtomicContext,
+      pendingAtomicContext: usablePendingAtomicContext ?? usableConversationAtomicContext,
       activeReactTaskRun: resolveActiveReactTaskForCurrentWorkspace(),
       foregroundContextPackage,
       history: buildVisibleRuntimeHistory(effectiveContent),
       agentCoreEnabled: true,
       layoutDraftEnabled: foregroundLayoutDraftRuntimeEnabled,
-      preferLayoutDraftRefine,
+      preferLayoutDraftRefine: false,
       inputSource: retryInput !== undefined ? 'user' : runtimeInputSource,
+      onProgress: handleRuntimeProgress,
     })
     recordBrowserRuntimeTrace('submit:decision', {
       userInput: effectiveContent,
@@ -2062,7 +2079,7 @@ const formatDisplayTime = (timeText: string): string => {
   if (activePlaylistType.value === 'rotation') {
     const seconds = timeToSeconds(normalized)
     if (typeof seconds === 'number') {
-      return seconds <= 0 ? '0点起算' : `+${formatPlaylistDurationText(seconds)}`
+      return seconds <= 0 ? '开始' : `+${formatPlaylistDurationText(seconds)}`
     }
   }
   return /^\d{2}:\d{2}(:\d{2})?$/.test(normalized) ? normalized : timeText
@@ -2076,7 +2093,7 @@ const formatDisplayTimeRange = (startTime: string, endTime?: string): string => 
       const durationSeconds = Math.max(0, endSeconds - startSeconds)
       const durationText = formatPlaylistDurationText(durationSeconds)
       if (startSeconds <= 0) {
-        return `总时长${durationText}，0点起算`
+        return `总时长${durationText}`
       }
       return `相对位置 +${formatPlaylistDurationText(startSeconds)}，持续${durationText}`
     }
@@ -2138,7 +2155,7 @@ const formatPendingAtomicSummary = (context: RuntimePendingAtomicContext): strin
   }
   if (isDraftResearchConfirmationContext(context)) {
     const label = context.layoutDraftSuggestion?.semanticLabel || context.slots.semanticLabel || '草案建议'
-    return `待确认更新草案：${label}`
+    return `草案更新建议：${label}`
   }
   if (isFormalRebuildConfirmationContext(context)) {
     const count = context.formalRebuildConfirmation?.existingItemCount ?? 0
@@ -2181,7 +2198,7 @@ const formatPendingAtomicReasoning = (
     const label = context.layoutDraftSuggestion?.semanticLabel || context.slots.semanticLabel || '这个方向'
     const candidateCount = context.layoutDraftSuggestion?.candidateCount ?? 0
     const candidateText = candidateCount > 0 ? `已查到 ${candidateCount} 条可参考素材。` : ''
-    return `${candidateText}确认后我只更新左侧草案里的“${label}”方向，不会写入正式播单。`
+    return `${candidateText}这一步只更新左侧草案里的“${label}”方向，不会写入正式播单。`
   }
   if (isFormalRebuildConfirmationContext(context)) {
     const confirmation = context.formalRebuildConfirmation
@@ -2331,7 +2348,7 @@ const formatPendingAtomicConfirmationNote = (context: RuntimePendingAtomicContex
   }
   if (isDraftResearchConfirmationContext(context)) {
     const label = context.layoutDraftSuggestion?.semanticLabel || context.slots.semanticLabel || '这个方向'
-    return `确认后只把“${label}”更新到左侧草案，不会写入正式播单；取消则保留原草案。`
+    return `只把“${label}”更新到左侧草案，不会写入正式播单。`
   }
   if (isFormalRebuildConfirmationContext(context)) {
     const confirmation = context.formalRebuildConfirmation
@@ -2546,11 +2563,14 @@ const isDraftResearchConfirmationContext = (context?: RuntimePendingAtomicContex
   context?.phase === 'draft_research_confirmation' || Boolean(context?.layoutDraftSuggestion)
 const isFormalRebuildConfirmationContext = (context?: RuntimePendingAtomicContext | null) =>
   context?.phase === 'formal_rebuild_confirmation' || Boolean(context?.formalRebuildConfirmation)
+const isAtomicContextWriteReview = (context?: RuntimePendingAtomicContext | null) =>
+  context?.agentPendingTask?.phase === 'needs_confirmation'
+  || context?.compositeTaskRun?.status === 'waiting_confirm'
+  || isFormalRebuildConfirmationContext(context)
 
 const showAgentPendingConfirmationPanel = computed(() =>
   pendingAtomicContext.value?.agentPendingTask?.phase === 'needs_confirmation'
   || pendingAtomicContext.value?.compositeTaskRun?.status === 'waiting_confirm'
-  || isDraftResearchConfirmationContext(pendingAtomicContext.value)
   || isFormalRebuildConfirmationContext(pendingAtomicContext.value)
 )
 
@@ -2899,6 +2919,16 @@ const buildReasonTagsForMessage = (message: Message): string[] => {
 
   const candidateOptions = Array.isArray(details?.candidateOptions) ? details.candidateOptions : []
   const topCandidates = Array.isArray(details?.topCandidates) ? details.topCandidates : []
+  const recommendedCandidateCount = typeof details?.recommendedCandidateCount === 'number'
+    ? details.recommendedCandidateCount
+    : Array.isArray(details?.recommendedCandidates)
+      ? details.recommendedCandidates.length
+      : 0
+  if (recommendedCandidateCount > 0) {
+    addTag('候选建议')
+    addTag('未写入')
+  }
+
   const strategySource = details?.selectedCandidate ?? candidateOptions[0] ?? topCandidates[0]
   if (strategySource && typeof strategySource === 'object') {
     const strategy = (strategySource as ProgramRecord).selectionMode
@@ -3213,6 +3243,15 @@ const startStepProgress = (content: string) => {
         messages.value.splice(index, 1)
       }
       return buildCompletedStepMetric(durationMs)
+    },
+    snapshot() {
+      return buildCompletedStepMetric(Date.now() - startedAt)
+    },
+    keepRunningAtBottom() {
+      const index = messages.value.indexOf(progressMessage)
+      if (index < 0 || index === messages.value.length - 1) return
+      messages.value.splice(index, 1)
+      messages.value.push(progressMessage)
     },
   }
 }
@@ -3743,7 +3782,7 @@ const getAgentAuditCards = (message: Message): AgentAuditCard[] => {
 }
 
 const hasExpandableExplanation = (message: Message) =>
-  isDecisionMessage(message)
+  message.role !== 'user'
   && !(isLayoutImportDetails(getMessageDetails(message)) && !foregroundLayoutDraftEnabled)
   && (getExpandedSections(message).length > 0 || Boolean(getVisibleMessageDetails(message)))
 
@@ -3952,9 +3991,15 @@ const pushAssistantMessage = (
     autoFocus?: boolean
   },
 ) => {
-  messages.value.push(message)
+  const scopedMessage = message.workspaceKey !== undefined
+    ? message
+    : {
+        ...message,
+        workspaceKey: resolveCurrentMessageWorkspaceKey(),
+      }
+  messages.value.push(scopedMessage)
   if (options?.autoFocus !== false) {
-    emitFocusTarget(message.focusTarget)
+    emitFocusTarget(scopedMessage.focusTarget)
   }
 }
 

@@ -60,7 +60,7 @@ const tvEpisode3: RuntimeScheduleItem = {
 const tvMorningNews: RuntimeScheduleItem = {
   id: 'tv-news-0900',
   programCode: '002601010111',
-  programName: '\u770b\u4e1c\u65b9111\u671f\u65b0\u6625\u7279\u522b\u884c\u52a8',
+  programName: '看东方第111期：新春特别行动',
   startTime: '09:00:00',
   endTime: '10:00:00',
   duration: 3600,
@@ -70,7 +70,7 @@ const tvMorningNews: RuntimeScheduleItem = {
 const tvNoonNews: RuntimeScheduleItem = {
   id: 'tv-news-1000',
   programCode: '002601030001',
-  programName: '\u4e1c\u65b9\u65b0\u95fb001\u671f\u665a\u95f4\u8981\u95fb',
+  programName: '东方新闻第001期：晚间要闻',
   startTime: '10:00:00',
   endTime: '10:30:00',
   duration: 1800,
@@ -222,7 +222,7 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
     expect(first.feedback.content).not.toContain('检索结果')
     expect(first.feedback.content).not.toContain('候选源')
     expect(first.feedback.content).not.toContain('拆成')
-    expect(first.feedback.details?.assistantProcessSummary).toContain('已找到 1 个可参考候选。')
+    expect(first.feedback.details?.assistantProcessSummary).toContain('已筛出 1 个可用候选。')
     expect(getAtomicCapabilities().getAllItems()).toEqual([])
 
     const confirmed = await facade.submitInstruction({
@@ -984,7 +984,7 @@ describe('foreground ChatPanel to broadcast-plan Agent flow', () => {
 
     const result = await facade.submitInstruction({
       scheduleState,
-      userInput: '\u628a9\u70b9\u7684\u8282\u76ee\u66ff\u6362\u6210\u770b\u4e1c\u65b9111\u671f\u65b0\u6625\u7279\u522b\u884c\u52a8',
+      userInput: '把9点的节目替换成看东方第111期：新春特别行动',
       currentSchedule,
       history: [],
       agentCoreEnabled: true,

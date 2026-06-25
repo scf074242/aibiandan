@@ -322,7 +322,7 @@ describe('foreground editor scenario harness', () => {
       playlistType: 'rotation',
       rotationStrategy: 'content_match',
     })
-    expect(rotation.feedback.details?.layoutDraftStatus).toBe('missing')
+    expect(rotation.feedback.details?.layoutDraftStatus).toBe('empty')
     expect(rotation.feedback.content).toContain('当前还不知道轮播要排多长')
     expectNoFormalMutation()
   })
@@ -343,7 +343,7 @@ describe('foreground editor scenario harness', () => {
     taskClassifierClassifyMock.mockResolvedValueOnce({
       mode: 'full_generate',
       confidence: 0.9,
-      reasoning: 'LLM-first scenario: user is asking to complete the whole rotation playlist.',
+      reasoning: 'LLM-only scenario: user is asking to complete the whole rotation playlist.',
       suggestedParams: {
         userIntent: '完整编排当前轮播单',
       },

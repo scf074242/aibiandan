@@ -95,6 +95,7 @@ export class LLMClient {
     )
     const traceLabel = options?.traceLabel ?? 'chat'
     const startedAt = Date.now()
+    const promptStats = this.buildPromptTraceStats(messages)
     const browserMockResponse = await this.tryBrowserMockChat(messages, options, requestTimeout, traceLabel, startedAt)
     if (browserMockResponse) {
       return browserMockResponse
@@ -146,6 +147,7 @@ export class LLMClient {
           attemptCount: attempts,
           durationMs: Date.now() - startedAt,
           timeoutMs: requestTimeout,
+          ...promptStats,
           success: true,
           startedAt: new Date(startedAt).toISOString(),
         })
@@ -184,6 +186,7 @@ export class LLMClient {
       attemptCount: attempts,
       durationMs: Date.now() - startedAt,
       timeoutMs: requestTimeout,
+      ...promptStats,
       success: false,
       error: lastError?.message,
       startedAt: new Date(startedAt).toISOString(),
@@ -204,6 +207,7 @@ export class LLMClient {
     if (!isViteDevRuntime() || typeof window === 'undefined') return null
     const mock = window.__AIBIANDAN_LLM_MOCK__
     if (typeof mock !== 'function') return null
+    const promptStats = this.buildPromptTraceStats(messages)
 
     try {
       const rawResponse = await this.withTimeout(
@@ -232,6 +236,7 @@ export class LLMClient {
         attemptCount: 1,
         durationMs: Date.now() - startedAt,
         timeoutMs: requestTimeout,
+        ...promptStats,
         success: true,
         startedAt: new Date(startedAt).toISOString(),
       })
@@ -244,6 +249,7 @@ export class LLMClient {
         attemptCount: 1,
         durationMs: Date.now() - startedAt,
         timeoutMs: requestTimeout,
+        ...promptStats,
         success: false,
         error: normalized.message,
         startedAt: new Date(startedAt).toISOString(),
@@ -347,6 +353,25 @@ export class LLMClient {
 
   private recordRequestTrace(trace: LLMRequestTrace): void {
     this.recentRequestTraces = [trace, ...this.recentRequestTraces].slice(0, 20)
+  }
+
+  private buildPromptTraceStats(messages: ChatMessage[]): Pick<
+    LLMRequestTrace,
+    'messageCount' | 'promptCharCount' | 'systemCharCount' | 'userCharCount'
+  > {
+    return messages.reduce((stats, message) => {
+      const length = message.content.length
+      stats.messageCount += 1
+      stats.promptCharCount += length
+      if (message.role === 'system') stats.systemCharCount += length
+      if (message.role === 'user') stats.userCharCount += length
+      return stats
+    }, {
+      messageCount: 0,
+      promptCharCount: 0,
+      systemCharCount: 0,
+      userCharCount: 0,
+    })
   }
 
   /**

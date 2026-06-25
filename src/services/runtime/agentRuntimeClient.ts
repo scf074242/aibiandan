@@ -10,6 +10,7 @@ import {
   type RuntimePendingCommand,
   type RuntimeResolveInsertRecommendationInput,
   type RuntimeResolveTargetSelectionInput,
+  type RuntimeProgressEvent,
   type RuntimeScheduleItem,
   type RuntimeSubmitInput,
 } from './schedulingAgentRuntimeFacade'
@@ -25,6 +26,7 @@ export {
   type RuntimeFeedback,
   type RuntimeOrchestrationRequest,
   type RuntimePendingCommand,
+  type RuntimeProgressEvent,
   type RuntimeResolveInsertRecommendationInput,
   type RuntimeResolveTargetSelectionInput,
   type RuntimeScheduleItem,
@@ -103,7 +105,11 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
 
   async submitInstruction(input: RuntimeSubmitInput): Promise<RuntimeDecision> {
     await this.ensureServerLlmConfig()
-    const { foregroundContextPackage: _foregroundContextPackage, ...serverInput } = input
+    const {
+      foregroundContextPackage: _foregroundContextPackage,
+      onProgress: _onProgress,
+      ...serverInput
+    } = input
     const envelope = await this.post<RuntimeEnvelope<RuntimeDecision>>('/api/agent/submit', {
       sessionId: this.sessionId,
       input: serverInput,

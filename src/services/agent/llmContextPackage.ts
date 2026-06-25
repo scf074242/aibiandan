@@ -1,22 +1,44 @@
 import { buildAgentPendingContextSourceSnapshots } from './contextFingerprint'
 import type { AgentLlmContextPackage, AgentSubmitInput, SchedulingContext } from './types'
 
-const MAX_SCHEDULE_ITEMS = 12
-const MAX_CANDIDATES = 12
-const MAX_HISTORY_ITEMS = 8
-const MAX_CONTENT_TAGS = 6
+const DEFAULT_EVIDENCE_BUDGET = {
+  scheduleItems: 6,
+  candidates: 6,
+  latestHistoryItems: 3,
+  contentTagsPerCandidate: 4,
+} as const
+
+const FOCUSED_EVIDENCE_BUDGET = {
+  scheduleItems: 8,
+  candidates: 8,
+  latestHistoryItems: 4,
+  contentTagsPerCandidate: 4,
+} as const
+
+const PENDING_EVIDENCE_BUDGET = {
+  scheduleItems: 10,
+  candidates: 10,
+  latestHistoryItems: 4,
+  contentTagsPerCandidate: 4,
+} as const
 
 const getIssueNo = (value: { issueNo?: string }): string | undefined => value.issueNo
 type FocusInput = Pick<AgentSubmitInput, 'userInput' | 'pendingTask'> | undefined
+type EvidenceBudget = {
+  scheduleItems: number
+  candidates: number
+  latestHistoryItems: number
+  contentTagsPerCandidate: number
+}
 
 const formatRotationDurationScope = (seconds?: number): string => {
   if (!seconds || seconds <= 0) return 'duration not specified yet'
   const minutes = Math.max(1, Math.round(seconds / 60))
   const hours = Math.floor(minutes / 60)
   const remainMinutes = minutes % 60
-  if (hours > 0 && remainMinutes > 0) return `0点起算，总时长${hours}小时${remainMinutes}分钟`
-  if (hours > 0) return `0点起算，总时长${hours}小时`
-  return `0点起算，总时长${minutes}分钟`
+  if (hours > 0 && remainMinutes > 0) return `内容队列总时长${hours}小时${remainMinutes}分钟`
+  if (hours > 0) return `内容队列总时长${hours}小时`
+  return `内容队列总时长${minutes}分钟`
 }
 
 const buildLlmVisibleIdentity = (context: SchedulingContext): AgentLlmContextPackage['identity'] => {
@@ -41,7 +63,7 @@ const buildPlaylistSemantics = (context: SchedulingContext): AgentLlmContextPack
   context.bundle.identity.playlistType === 'rotation'
     ? {
         model: 'content_queue',
-        positionMeaning: '轮播单按内容队列处理，时间表示从0点起算的相对位置，不绑定频道日期播出时段。',
+        positionMeaning: '轮播单按内容队列处理，时间字段表示相对位置和持续时长，不绑定频道日期播出时段。',
         draftBoundary: '轮播整体编排和整体补排需要草案；单条插入、删除、移动、替换、查询、校验可以不依赖草案。',
         writeBoundary: '轮播候选自由度较高，插入和替换通常先给候选或待确认，不让模型直接替用户选最终节目。',
       }
@@ -56,11 +78,12 @@ export const buildAgentLlmContextPackage = (
   context: SchedulingContext,
   focusInput?: FocusInput,
 ): AgentLlmContextPackage => {
-  const currentSchedule = selectFocusedScheduleItems(context.scheduleItems, focusInput)
-  const candidateSummary = selectFocusedCandidates(context.programCandidates, focusInput)
+  const evidenceBudget = resolveEvidenceBudget(focusInput)
+  const currentSchedule = selectFocusedScheduleItems(context.scheduleItems, focusInput, evidenceBudget.scheduleItems)
+  const candidateSummary = selectFocusedCandidates(context.programCandidates, focusInput, evidenceBudget.candidates)
   const includeLatestHistory = context.bundle.identity.playlistType !== 'rotation' && Boolean(context.bundle.history.latestSchedule)
   const latestHistoryItems = includeLatestHistory ? context.bundle.history.latestSchedule?.items ?? [] : []
-  const latestHistorySamples = latestHistoryItems.slice(0, MAX_HISTORY_ITEMS)
+  const latestHistorySamples = latestHistoryItems.slice(0, evidenceBudget.latestHistoryItems)
 
   return {
     identity: buildLlmVisibleIdentity(context),
@@ -69,28 +92,28 @@ export const buildAgentLlmContextPackage = (
       scheduleItems: {
         included: currentSchedule.length,
         total: context.scheduleItems.length,
-        limit: MAX_SCHEDULE_ITEMS,
-        truncated: context.scheduleItems.length > MAX_SCHEDULE_ITEMS,
+        limit: evidenceBudget.scheduleItems,
+        truncated: context.scheduleItems.length > evidenceBudget.scheduleItems,
       },
       candidates: {
         included: candidateSummary.length,
         total: context.programCandidates.length,
-        limit: MAX_CANDIDATES,
-        truncated: context.programCandidates.length > MAX_CANDIDATES,
+        limit: evidenceBudget.candidates,
+        truncated: context.programCandidates.length > evidenceBudget.candidates,
       },
       latestHistoryItems: includeLatestHistory
         ? {
             included: latestHistorySamples.length,
             total: latestHistoryItems.length,
-            limit: MAX_HISTORY_ITEMS,
-            truncated: latestHistoryItems.length > MAX_HISTORY_ITEMS,
+            limit: evidenceBudget.latestHistoryItems,
+            truncated: latestHistoryItems.length > evidenceBudget.latestHistoryItems,
           }
         : undefined,
       contentTagsPerCandidate: {
-        limit: MAX_CONTENT_TAGS,
+        limit: evidenceBudget.contentTagsPerCandidate,
       },
     },
-    sourceSummary: buildAgentPendingContextSourceSnapshots(context),
+    sourceSummary: buildAgentLlmSourceSummary(context),
     currentSchedule: currentSchedule.map((item) => ({
     itemId: item.id,
     programId: item.programId,
@@ -117,7 +140,7 @@ export const buildAgentLlmContextPackage = (
     columnName: candidate.columnName,
     materialStatus: candidate.materialStatus,
     rightsStatus: candidate.rightsStatus,
-    contentTags: candidate.contentTags?.slice(0, MAX_CONTENT_TAGS),
+    contentTags: candidate.contentTags?.slice(0, evidenceBudget.contentTagsPerCandidate),
   })),
     latestHistory: includeLatestHistory && context.bundle.history.latestSchedule
       ? {
@@ -155,15 +178,39 @@ export const buildAgentLlmContextPackage = (
   }
 }
 
+const buildAgentLlmSourceSummary = (
+  context: SchedulingContext,
+): AgentLlmContextPackage['sourceSummary'] =>
+  buildAgentPendingContextSourceSnapshots(context).map((source) => {
+    const compact = { ...source }
+    delete compact.samples
+    return compact
+  })
+
+const resolveEvidenceBudget = (focusInput: FocusInput): EvidenceBudget => {
+  if (focusInput?.pendingTask) return PENDING_EVIDENCE_BUDGET
+  if (!focusInput) return DEFAULT_EVIDENCE_BUDGET
+
+  const hasFocusedEvidence =
+    buildScheduleFocusTerms(focusInput).length > 0
+    || buildScheduleFocusClocks(focusInput).length > 0
+    || buildCandidateFocusTerms(focusInput).length > 0
+
+  if (!hasFocusedEvidence) return DEFAULT_EVIDENCE_BUDGET
+  return FOCUSED_EVIDENCE_BUDGET
+}
+
 const selectFocusedScheduleItems = (
   items: SchedulingContext['scheduleItems'],
   focusInput: FocusInput,
-) => selectFocusedRecords(items, MAX_SCHEDULE_ITEMS, (item) => scoreScheduleItemFocus(item, focusInput))
+  limit: number,
+) => selectFocusedRecords(items, limit, (item) => scoreScheduleItemFocus(item, focusInput))
 
 const selectFocusedCandidates = (
   candidates: SchedulingContext['programCandidates'],
   focusInput: FocusInput,
-) => selectFocusedRecords(candidates, MAX_CANDIDATES, (candidate) => scoreCandidateFocus(candidate, focusInput))
+  limit: number,
+) => selectFocusedRecords(candidates, limit, (candidate) => scoreCandidateFocus(candidate, focusInput))
 
 const selectFocusedRecords = <T>(
   records: T[],

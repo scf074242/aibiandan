@@ -8,7 +8,7 @@
 
 1. 用户在 `broadcast-plan` 页面右侧 `AI 助手` 输入自然语言。
 2. `ChatPanel` 把请求送入 `Scheduling Agent runtime`。
-3. Runtime 使用 LLM-first 结构化意图和当前播单证据包进行判断。
+3. Runtime 使用 LLM-only 结构化意图和当前播单证据包进行判断。
 4. 本地确定性逻辑执行预演、约束校验、确认门禁、阻断或写入。
 5. 写入结果回到左侧真实播单表格。
 

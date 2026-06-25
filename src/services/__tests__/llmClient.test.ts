@@ -48,6 +48,9 @@ describe('LLMClient', () => {
     expect(client.getRecentRequestTraces()[0]).toMatchObject({
       label: 'unit_test',
       timeoutMs: 4321,
+      messageCount: 1,
+      promptCharCount: 5,
+      userCharCount: 5,
       success: true,
     })
   })

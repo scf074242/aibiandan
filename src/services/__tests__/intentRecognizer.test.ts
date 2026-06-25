@@ -26,34 +26,28 @@ const currentSchedule = [
 ]
 
 describe('IntentRecognizer', () => {
-  it.each([
-    ['10点加一档东方新闻', 'insert'],
-    ['10点放个纪录片', 'insert'],
-    ['10点前垫一条预告', 'insert'],
-    ['10点后放一段现场导视', 'insert'],
-    ['9点排入东方新闻', 'insert'],
-    ['9点排个纪录片', 'insert'],
-    ['9点插播东方新闻', 'insert'],
-    ['9点加播一档纪录片', 'insert'],
-    ['10点有没有适合的新闻节目', 'insert'],
-    ['10点帮我推荐几个纪录片候选', 'insert'],
-    ['给我找几条健康节目', 'insert'],
-    ['撤掉10点那条节目', 'delete'],
-    ['撤下10点那条节目', 'delete'],
-    ['把10点节目拿下', 'delete'],
-    ['10点那档下掉', 'delete'],
-    ['拿掉《东方新闻》', 'delete'],
-    ['10点那档往后挪15分钟', 'move'],
-    ['把10点节目推迟30分钟', 'move'],
-    ['10点那档推后1小时', 'move'],
-    ['10点节目延迟15分钟', 'move'],
-    ['把10点节目顺一下', 'move'],
-    ['10点那条换掉成东方新闻', 'replace'],
-    ['10点那条换成一档纪录片', 'replace'],
-    ['把10点节目改成更适合午间的健康节目', 'replace'],
-    ['9点改播东方新闻', 'replace'],
-    ['9点换播一档纪录片', 'replace'],
-  ] as const)('识别落表后的口语化原子命令: %s', async (input, expectedType) => {
+  it('uses the LLM result for oral atomic commands instead of local keyword rules', async () => {
+    const chat = vi.fn(async () => {
+      return {
+        content: '{"type":"insert","confidence":0.93,"reasoning":"用户要在10点加一档东方新闻。"}',
+      }
+    })
+    const recognizer = new IntentRecognizer({ chat } as never)
+
+    const result = await recognizer.recognize(
+      buildDialogueContext({
+        scheduleState: createScheduleState(),
+        userInput: '10点加一档东方新闻',
+        currentSchedule,
+      }),
+    )
+
+    expect(result.type).toBe('insert')
+    expect(result.confidence).toBeGreaterThan(0.9)
+    expect(chat).toHaveBeenCalled()
+  })
+
+  it('does not fall back to local keyword intent when the model is unavailable', async () => {
     const chat = vi.fn(async () => {
       throw new Error('mock llm unavailable')
     })
@@ -62,13 +56,14 @@ describe('IntentRecognizer', () => {
     const result = await recognizer.recognize(
       buildDialogueContext({
         scheduleState: createScheduleState(),
-        userInput: input,
+        userInput: '10点加一档东方新闻',
         currentSchedule,
       }),
     )
 
-    expect(result.type).toBe(expectedType)
-    expect(result.confidence).toBeGreaterThan(0.9)
+    expect(result.type).toBe('clarify')
+    expect(result.confidence).toBe(0)
+    expect(result.reasoning).toContain('停止本地关键词兜底')
   })
 
   it('不会把开放播单生成话术误判成原子插入', async () => {

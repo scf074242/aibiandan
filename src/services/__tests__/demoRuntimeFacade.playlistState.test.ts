@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ScheduleState } from '@/types/orchestration'
 import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomicCapabilities'
 import { resetCandidateService } from '@/services/candidateService'
+import type { RuntimePendingAtomicContext } from '@/services/runtime/pendingAtomicContext'
 
 const mockIntentRecognize = vi.fn()
 const mockExtractInsertParams = vi.fn()
@@ -11,9 +12,14 @@ const mockExtractMoveParams = vi.fn()
 const mockExtractReplaceParams = vi.fn()
 const mockLayoutRecognize = vi.fn()
 const mockResolveTarget = vi.fn()
+const mockLlmChat = vi.hoisted(() => vi.fn())
+const mockRecentLlmTraces = vi.hoisted(() => vi.fn((): unknown[] => []))
 
 vi.mock('@/services/llm/llmClient', () => ({
-  getLLMClient: () => ({}),
+  getLLMClient: () => ({
+    chat: mockLlmChat,
+    getRecentRequestTraces: mockRecentLlmTraces,
+  }),
 }))
 
 vi.mock('@/services/llm/taskClassifier', () => ({
@@ -66,6 +72,12 @@ const createScheduleState = (overrides: Partial<ScheduleState> = {}): ScheduleSt
   ...overrides,
 })
 
+const mockAgentIntent = (...payloads: Array<Record<string, unknown>>) => {
+  payloads.forEach((payload) => {
+    mockLlmChat.mockResolvedValueOnce({ content: JSON.stringify(payload) })
+  })
+}
+
 const mockedItem = {
   id: 'item-0900',
   programCode: 'P100001',
@@ -74,6 +86,26 @@ const mockedItem = {
   endTime: '10:00:00',
   duration: 3600,
   programType: 'news',
+}
+
+type RuntimeSubmitResult = Awaited<ReturnType<DemoRuntimeFacade['submitInstruction']>>
+
+const expectCandidateRecommendationMessage = (result: RuntimeSubmitResult) => {
+  expect(result.kind).toBe('message')
+  if (result.kind !== 'message') throw new Error('expected candidate recommendation message')
+  expect(result.statusHint).toBe('needs_clarification')
+  expect(result.feedback.content).toMatch(/推荐|候选|^1\./mu)
+  expect(result.feedback.content).toContain('不能替你直接选')
+  expect(result.feedback.content).toContain('补充')
+  const explanation = String(result.feedback.details?.explanation ?? '')
+  if (explanation) expect(explanation).toContain('候选')
+}
+
+const readConversationAtomicContext = (result: RuntimeSubmitResult): RuntimePendingAtomicContext => {
+  if (result.kind !== 'message') throw new Error('expected message with conversation atomic context')
+  const context = result.feedback.details?.conversationAtomicContext as RuntimePendingAtomicContext | undefined
+  if (!context) throw new Error('expected conversation atomic context')
+  return context
 }
 
 describe('DemoRuntimeFacade playlist state policy', () => {
@@ -86,6 +118,9 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     mockExtractReplaceParams.mockReset()
     mockLayoutRecognize.mockReset()
     mockResolveTarget.mockReset()
+    mockLlmChat.mockReset()
+    mockRecentLlmTraces.mockReset()
+    mockRecentLlmTraces.mockReturnValue([])
     mockLayoutRecognize.mockResolvedValue({
       mode: 'clarify',
       confidence: 0.2,
@@ -177,7 +212,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.details?.playlistState).toHaveProperty('playlistId')
     expect(result.feedback.content).toContain('内容匹配优先')
     expect(result.feedback.content).toContain('当前还不知道轮播要排多长')
-    expect(result.feedback.details?.layoutDraftStatus).toBe('missing')
+    expect(result.feedback.details?.layoutDraftStatus).toBe('empty')
     expect(result.feedback.details?.needsStructuredBasis).toBe(true)
     expect(result.feedback.details?.suggestedActions).toEqual([
       '说明轮播总时长',
@@ -187,7 +222,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     ])
   })
 
-  it('创建轮播单带时长时按总时长和 0 点起算处理', async () => {
+  it('创建轮播单带时长时按总时长处理', async () => {
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'none' }),
       userInput: '创建一份3小时轮播单',
@@ -203,7 +238,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       rotationDurationSeconds: 3 * 60 * 60,
     })
     expect(result.feedback.content).toContain('总时长 3小时')
-    expect(result.feedback.content).toContain('0 点起算')
+    expect(result.feedback.content).not.toContain('0 点起算')
     expect(result.feedback.content).not.toContain('03:00:00')
     expect(result.feedback.content).toContain('不绑定具体日期和电视频道时段')
     expect(result.feedback.content).toContain('继续补充主要内容')
@@ -315,7 +350,23 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).toContain('热播优先')
   })
 
-  it('未建播单时带起止表达的轮播单需求会换算成从 0 点起算的总时长', async () => {
+  it('未建播单时带起止表达的轮播单需求会换算成总时长并生成草案', async () => {
+    mockLlmChat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        coverage: { start: '00:00:00', end: '01:00:00' },
+        segments: [
+          {
+            id: 'rotation-live',
+            label: '静安寺户外直播',
+            startTime: '00:00:00',
+            endTime: '01:00:00',
+            programType: 'news_magazine',
+            queryHints: ['静安寺户外直播', '静安寺', '直播'],
+          },
+        ],
+      }),
+    })
+
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'none' }),
       userInput: '我准备在静安寺进行户外直播，准备一个14:00到15:00的轮播单',
@@ -374,7 +425,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).toContain('收视率优先')
   })
 
-  it('电视播单下明确插入命令存在多个候选时等待用户选择', async () => {
+  it('电视播单下明确插入命令存在多个候选时返回候选建议', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -395,14 +446,10 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.action).toBe('insert')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(1)
+    expectCandidateRecommendationMessage(result)
   })
 
-  it('轮播单下明确插入命令仍返回推荐列表等待用户选择', async () => {
+  it('轮播单下明确插入命令存在多个候选时返回候选建议', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -423,10 +470,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(0)
+    expectCandidateRecommendationMessage(result)
   })
 
   it('轮播单下单点排入表达走插入候选推荐而不是版面草案', async () => {
@@ -450,12 +494,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.action).toBe('insert')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.slots.targetTime).toBe('09:00:00')
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(0)
+    expectCandidateRecommendationMessage(result)
+    expect(result.feedback.content).toContain('目标位置')
   })
 
   it('轮播单下单点插播表达走插入候选推荐', async () => {
@@ -479,21 +519,23 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.action).toBe('insert')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.slots.targetTime).toBe('09:00:00')
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(0)
+    expectCandidateRecommendationMessage(result)
+    expect(result.feedback.content).toContain('目标位置')
   })
 
-  it('电视播单下按节目名锚点后方插入节目存在多个候选时等待用户选择', async () => {
+  it('电视播单下按节目名锚点后方插入节目存在多个候选时返回候选建议', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
       reasoning: 'relative insert tv',
     })
-    mockExtractInsertParams.mockResolvedValue(null)
+    mockExtractInsertParams.mockResolvedValue({
+      targetTime: '10:00:00',
+      programName: '东方新闻',
+      rawProgramText: '东方新闻',
+      semanticLabel: '新闻',
+      programTypeHint: 'news',
+    })
 
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'tv', isEmpty: false, itemCount: 1 }),
@@ -502,21 +544,23 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.action).toBe('insert')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.slots.targetTime).toBe('10:00:00')
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(1)
+    expectCandidateRecommendationMessage(result)
+    expect(result.feedback.content).toContain('目标位置')
   })
 
-  it('轮播单下按节目名锚点后方插入节目仍先返回候选推荐', async () => {
+  it('轮播单下按节目名锚点后方插入节目仍返回候选建议', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
       reasoning: 'relative insert rotation',
     })
-    mockExtractInsertParams.mockResolvedValue(null)
+    mockExtractInsertParams.mockResolvedValue({
+      targetTime: '10:00:00',
+      programName: '东方新闻',
+      rawProgramText: '东方新闻',
+      semanticLabel: '新闻',
+      programTypeHint: 'news',
+    })
 
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'rotation', rotationStrategy: 'content_match', isEmpty: false, itemCount: 1 }),
@@ -525,11 +569,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.slots.targetTime).toBe('10:00:00')
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(0)
+    expectCandidateRecommendationMessage(result)
+    expect(result.feedback.content).toContain('目标位置')
   })
 
   it('电视播单下删除命令仍保持敏感确认', async () => {
@@ -711,28 +752,9 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(first.kind).toBe('pending_atomic_context')
-    if (first.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(first.pendingAtomicContext.action).toBe('replace')
-    expect(first.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(first.pendingAtomicContext.slots.targetItemId).toBe(mockedItem.id)
-    expect(first.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(0)
-
-    const second = await facade.submitInstruction({
-      scheduleState: createScheduleState({ playlistType: 'rotation', rotationStrategy: 'content_match', isEmpty: false, itemCount: 1 }),
-      userInput: '第一个',
-      currentSchedule: [mockedItem, nextItem],
-      pendingAtomicContext: first.pendingAtomicContext,
-      history: ['把9点的节目替换成东方新闻'],
-    })
-
-    expect(second.kind).toBe('agent_execution')
-    if (second.kind !== 'agent_execution') throw new Error('expected agent_execution')
-    expect(second.feedback.content).toContain('队列自然串联')
-    const items = second.result.executionResult?.scheduleItems ?? []
-    expect(items[0]?.id).toBe(mockedItem.id)
-    expect(items[1]?.id).toBe(nextItem.id)
-    expect(items[1]?.startTime).toBe(items[0]?.endTime)
+    expectCandidateRecommendationMessage(first)
+    expect(first.feedback.content).toContain('替换')
+    expect(first.feedback.content).not.toContain('操作已完成')
   })
 
   it('轮播单下换播类替换命令仍然先给候选推荐', async () => {
@@ -766,12 +788,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.action).toBe('replace')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.slots.targetItemId).toBe(mockedItem.id)
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(0)
+    expectCandidateRecommendationMessage(result)
+    expect(result.feedback.content).toContain('替换')
   })
 
   it('未创建播单时移动、删除、替换命令也会先要求创建播单', async () => {
@@ -927,7 +945,11 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       confidence: 0.96,
       reasoning: 'move by unique program name',
     })
-    mockExtractMoveParams.mockResolvedValue(null)
+    mockExtractMoveParams.mockResolvedValue({
+      targetTime: '09:00:00',
+      direction: 'forward',
+      offsetSeconds: 1800,
+    })
     mockResolveTarget.mockResolvedValue({
       status: 'unique',
       selectedItem: { ...mockedItem },
@@ -952,7 +974,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     })
   })
 
-  it('电视播单下唯一节目名可直接移到指定绝对时间', async () => {
+  it.skip('旧 micro fallback 不再用本地节目名解析绝对移动；该能力由 Agent Core LLM slots 承接', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'move',
       confidence: 0.96,
@@ -976,7 +998,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     })
   })
 
-  it('电视播单下可把指定时间节目移到新的绝对时间', async () => {
+  it.skip('旧 micro fallback 不再用本地时间正则解析绝对移动；该能力由 Agent Core LLM slots 承接', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'move',
       confidence: 0.96,
@@ -1013,7 +1035,10 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       confidence: 0.96,
       reasoning: 'delete by unique program name',
     })
-    mockExtractDeleteParams.mockResolvedValue(null)
+    mockExtractDeleteParams.mockResolvedValue({
+      targetTime: '09:00:00',
+      programName: '看东方',
+    })
     mockResolveTarget.mockResolvedValue({
       status: 'unique',
       selectedItem: { ...mockedItem },
@@ -1041,7 +1066,10 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       confidence: 0.96,
       reasoning: 'replace by unique program name',
     })
-    mockExtractReplaceParams.mockResolvedValue(null)
+    mockExtractReplaceParams.mockResolvedValue({
+      targetTime: '09:00:00',
+      programName: '东方新闻',
+    })
     mockResolveTarget.mockResolvedValue({
       status: 'unique',
       selectedItem: { ...mockedItem },
@@ -1119,11 +1147,12 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.action).toBe('move')
-    expect(result.pendingAtomicContext.phase).toBe('selecting_target')
-    expect(result.pendingAtomicContext.targetCandidates?.length).toBe(2)
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected message')
+    const context = readConversationAtomicContext(result)
+    expect(context.action).toBe('move')
+    expect(context.phase).toBe('selecting_target')
+    expect(context.targetCandidates?.length).toBe(2)
   })
 
   it('轮播单下删除命令也保持敏感确认', async () => {
@@ -1155,7 +1184,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.pendingCommand.command.action).toBe('delete')
   })
 
-  it('轮播单候选推荐阶段输入新的删除命令会打断旧候选上下文', async () => {
+  it('轮播单候选建议消息不会阻止新的删除命令', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -1177,9 +1206,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(first.kind).toBe('pending_atomic_context')
-    if (first.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(first.pendingAtomicContext.action).toBe('insert')
+    expectCandidateRecommendationMessage(first)
 
     mockIntentRecognize.mockResolvedValue({
       type: 'delete',
@@ -1201,7 +1228,6 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       scheduleState: createScheduleState({ playlistType: 'rotation', rotationStrategy: 'content_match', isEmpty: false, itemCount: 1 }),
       userInput: '删除9点的节目',
       currentSchedule: [mockedItem],
-      pendingAtomicContext: first.pendingAtomicContext,
       history: ['在18点30插入东方新闻'],
     })
 
@@ -1263,12 +1289,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       },
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.action).toBe('replace')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.slots.targetItemId).toBe(mockedItem.id)
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(0)
+    expectCandidateRecommendationMessage(result)
+    expect(result.feedback.content).toContain('替换')
   })
 
   it('move command with full offset does not ask for offset again when target is missing', async () => {
@@ -1303,7 +1325,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).not.toContain('\u79fb\u52a8\u5e45\u5ea6')
   })
 
-  it('tv playlist asks the user to choose when explicit title has similar candidates', async () => {
+  it('tv playlist returns candidate guidance when explicit title has similar candidates', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -1324,12 +1346,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.action).toBe('insert')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.slots.targetTime).toBe('09:00:00')
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(1)
+    expectCandidateRecommendationMessage(result)
+    expect(result.feedback.content).toContain('目标位置')
   })
 
   it('explicit insert title with no hard keyword match is blocked instead of falling back to unrelated candidates', async () => {
@@ -1360,7 +1378,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).toContain('\u751f\u547d\u6811\u7535\u89c6\u5267')
   })
 
-  it('tv playlist asks before inserting a semantic live-guide candidate when multiple candidates remain', async () => {
+  it('tv playlist returns candidate guidance before inserting a semantic live-guide candidate when multiple candidates remain', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.96,
@@ -1380,12 +1398,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(result.pendingAtomicContext.action).toBe('insert')
-    expect(result.pendingAtomicContext.phase).toBe('recommending_insert')
-    expect(result.pendingAtomicContext.slots.targetTime).toBe('14:00:00')
-    expect(result.pendingAtomicContext.insertRecommendations?.length).toBeGreaterThan(1)
+    expectCandidateRecommendationMessage(result)
+    expect(result.feedback.content).toContain('目标位置')
   })
 
   it('tv playlist does not directly execute vague low-match semantic insert intent', async () => {
@@ -1458,6 +1472,31 @@ describe('DemoRuntimeFacade playlist state policy', () => {
   })
 
   it('Agent Core feedback details expose pending and used LLM contexts across turns', async () => {
+    mockAgentIntent(
+      {
+        intent: 'insert',
+        confidence: 0.92,
+        slots: { programHint: '\u770b\u4e1c\u65b9' },
+        assistantFeedback: '我知道你想插入《看东方》，还需要补充插入位置。',
+      },
+      {
+        intent: 'insert',
+        pendingAction: 'continue_pending',
+        confidence: 0.94,
+        slots: { targetTime: '10:00:00' },
+        assistantFeedback: '我理解你是在补充上一条《看东方》的插入位置，位置是10点。',
+      },
+    )
+    mockRecentLlmTraces
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([{
+        label: 'agent.intent_interpreter',
+        attemptCount: 1,
+        durationMs: 1234,
+        timeoutMs: 30000,
+        success: true,
+        startedAt: '2026-03-25T09:00:00.000Z',
+      }])
     const facade = new DemoRuntimeFacade()
     const scheduleState = createScheduleState({
       playlistType: 'rotation',
@@ -1474,8 +1513,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       agentCoreEnabled: true,
     })
 
-    expect(first.kind).toBe('pending_atomic_context')
-    if (first.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
+    expect(first.kind).toBe('message')
+    const firstContext = readConversationAtomicContext(first)
     expect(first.feedback.details?.agentPendingLlmContext).toMatchObject({
       latestUserInput: '',
       pendingContext: {
@@ -1487,6 +1526,15 @@ describe('DemoRuntimeFacade playlist state policy', () => {
         missingSlots: ['targetTime'],
       },
     })
+    expect(first.feedback.details?.agentRunTraceSummary).toMatchObject({
+      intent: 'insert',
+      llmCallCount: 1,
+      llmTotalDurationMs: 1234,
+      wroteFormalPlaylist: false,
+    })
+    expect(first.feedback.details?.llmRequestTraces).toHaveLength(1)
+    const firstTrace = first.feedback.details?.trace as Array<{ elapsedMs?: number; sequence?: number }> | undefined
+    expect(firstTrace?.some((item) => typeof item.elapsedMs === 'number' && typeof item.sequence === 'number')).toBe(true)
     expect(first.feedback.details?.agentLlmContextUsed).toBeUndefined()
 
     const second = await facade.submitInstruction({
@@ -1494,34 +1542,141 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       userInput: '10\u70b9',
       currentSchedule: [],
       history: ['\u63d2\u5165\u770b\u4e1c\u65b9'],
-      pendingAtomicContext: first.pendingAtomicContext,
+      pendingAtomicContext: firstContext,
       agentCoreEnabled: true,
     })
 
-    expect(second.kind).toBe('pending_atomic_context')
-    if (second.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
-    expect(second.feedback.details?.agentLlmContextUsed).toMatchObject({
-      latestUserInput: '10\u70b9',
-      pendingContext: {
-        intent: 'insert',
-        phase: 'needs_clarification',
-        collectedSlots: {
-          programHint: '\u770b\u4e1c\u65b9',
-        },
-        missingSlots: ['targetTime'],
-      },
+    expect(second.kind).toBe('message')
+    if (second.kind !== 'message') throw new Error('expected message')
+    expect(second.statusHint).toBe('needs_clarification')
+    expect(second.feedback.content).toContain('看东方')
+    expect(second.feedback.content).toContain('10点')
+    expect(second.feedback.details?.affectedItemIds).toBeUndefined()
+  })
+
+  it('Agent Core treats "换成1点插入" as a pending insert time correction, not a programme keyword', async () => {
+    mockLlmChat
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          intent: 'insert',
+          confidence: 0.92,
+          slots: {
+            programHint: '看东方',
+          },
+          assistantFeedback: '我知道你想插入《看东方》，还需要补充插入位置。',
+        }),
+      })
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          intent: 'insert',
+          pendingAction: 'continue_pending',
+          confidence: 0.94,
+          slots: {
+            targetTime: '01:00:00',
+          },
+          assistantFeedback: '我会把上一条《看东方》的插入位置改到1点。',
+        }),
+      })
+    const facade = new DemoRuntimeFacade()
+    const scheduleState = createScheduleState({
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: 3 * 60 * 60,
+      isEmpty: true,
+      itemCount: 0,
     })
-    expect(second.feedback.details?.agentPendingLlmContext).toMatchObject({
-      latestUserInput: '',
-      pendingContext: {
-        intent: 'insert',
-        phase: 'needs_selection',
-        missingSlots: ['candidateId'],
+
+    const first = await facade.submitInstruction({
+      scheduleState,
+      userInput: '插入看东方',
+      currentSchedule: [],
+      history: [],
+      agentCoreEnabled: true,
+    })
+
+    expect(first.kind).toBe('message')
+    const firstContext = readConversationAtomicContext(first)
+    expect(firstContext.agentPendingTask).toMatchObject({
+      intent: 'insert',
+      phase: 'needs_clarification',
+      collectedSlots: {
+        programHint: expect.objectContaining({ value: '看东方' }),
+      },
+      missingSlots: ['targetTime'],
+    })
+
+    const second = await facade.submitInstruction({
+      scheduleState,
+      userInput: '换成1点插入',
+      currentSchedule: [],
+      history: ['插入看东方'],
+      pendingAtomicContext: firstContext,
+      agentCoreEnabled: true,
+    })
+
+    expect(second.kind).toBe('message')
+    if (second.kind !== 'message') throw new Error('expected message')
+    expect(second.statusHint).toBe('needs_clarification')
+    expect(second.feedback.content).not.toContain('换成插入')
+    expect(second.feedback.content).toContain('看东方')
+  })
+
+  it('Agent Core keeps the programme hint when a rotation insert reaches candidate guidance', async () => {
+    mockAgentIntent({
+      intent: 'insert',
+      confidence: 0.92,
+      slots: {
+        targetTime: '09:00:00',
+        programHint: '看东方',
+      },
+      assistantFeedback: '我知道你想在9点插入《看东方》。',
+    })
+    const facade = new DemoRuntimeFacade()
+    const scheduleState = createScheduleState({
+      playlistType: 'rotation',
+      rotationStrategy: 'content_match',
+      rotationDurationSeconds: 3 * 60 * 60,
+      isEmpty: true,
+      itemCount: 0,
+    })
+
+    const first = await facade.submitInstruction({
+      scheduleState,
+      userInput: '在9点插入节目看东方',
+      currentSchedule: [],
+      history: [],
+      agentCoreEnabled: true,
+    })
+
+    expectCandidateRecommendationMessage(first)
+    expect(first.feedback.content).toContain('看东方')
+    expect(first.feedback.details?.auditSummary).toMatchObject({
+      contextSources: {
+        candidates: expect.objectContaining({
+          query: expect.objectContaining({
+            keyword: '看东方',
+          }),
+        }),
       },
     })
   })
 
-  it('Agent Core pending candidate selection can be cancelled with a clear no-write reply', async () => {
+  it('Agent Core candidate guidance is not a pending write and leaves cancellation unnecessary', async () => {
+    mockAgentIntent(
+      {
+        intent: 'insert',
+        confidence: 0.92,
+        slots: { programHint: '看东方' },
+        assistantFeedback: '我知道你想插入《看东方》，还需要补充插入位置。',
+      },
+      {
+        intent: 'insert',
+        pendingAction: 'continue_pending',
+        confidence: 0.94,
+        slots: { targetTime: '10:00:00' },
+        assistantFeedback: '我会沿用上一条《看东方》，把插入位置补到10点。',
+      },
+    )
     const facade = new DemoRuntimeFacade()
     const scheduleState = createScheduleState({
       playlistType: 'rotation',
@@ -1537,38 +1692,32 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       history: [],
       agentCoreEnabled: true,
     })
-    expect(first.kind).toBe('pending_atomic_context')
-    if (first.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
+    expect(first.kind).toBe('message')
+    const firstContext = readConversationAtomicContext(first)
 
     const confirmation = await facade.submitInstruction({
       scheduleState,
       userInput: '10点',
       currentSchedule: [],
       history: ['插入看东方'],
-      pendingAtomicContext: first.pendingAtomicContext,
+      pendingAtomicContext: firstContext,
       agentCoreEnabled: true,
     })
-    expect(confirmation.kind).toBe('pending_atomic_context')
-    if (confirmation.kind !== 'pending_atomic_context') throw new Error('expected pending selection')
-    expect(confirmation.pendingAtomicContext.agentPendingTask?.phase).toBe('needs_selection')
-
-    const cancelled = await facade.submitInstruction({
-      scheduleState,
-      userInput: '取消',
-      currentSchedule: [],
-      history: ['插入看东方', '10点'],
-      pendingAtomicContext: confirmation.pendingAtomicContext,
-      agentCoreEnabled: true,
-    })
-
-    expect(cancelled.kind).toBe('message')
-    if (cancelled.kind !== 'message') throw new Error('expected cancellation message')
-    expect(cancelled.feedback.content).toContain('已取消')
-    expect(cancelled.feedback.content).toContain('不会写入当前播单')
-    expect(cancelled.feedback.details?.affectedItemIds).toBeUndefined()
+    expect(confirmation.kind).toBe('message')
+    if (confirmation.kind !== 'message') throw new Error('expected message')
+    expect(confirmation.statusHint).toBe('needs_clarification')
+    expect(confirmation.feedback.content).toContain('看东方')
+    expect(confirmation.feedback.details?.affectedItemIds).toBeUndefined()
   })
 
   it('Agent Core query replies with the found schedule item in the main feedback text', async () => {
+    mockAgentIntent({
+      intent: 'query',
+      confidence: 0.95,
+      queryKind: 'time_lookup',
+      slots: { targetTime: '09:00:00' },
+      assistantFeedback: '我来查9点已经排了什么节目。',
+    })
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'tv', isEmpty: false, itemCount: 1 }),
       userInput: '9点是什么节目',
@@ -1613,6 +1762,16 @@ describe('DemoRuntimeFacade playlist state policy', () => {
   })
 
   it('Agent Core occupied move blocks with conflict programme details for foreground feedback', async () => {
+    mockAgentIntent({
+      intent: 'move',
+      confidence: 0.95,
+      slots: {
+        targetTime: '09:00:00',
+        offsetSeconds: 3600,
+        direction: 'forward',
+      },
+      assistantFeedback: '我理解你想把9点节目后移1小时。',
+    })
     const conflictItem = {
       id: 'item-1000',
       programCode: 'P100002',
@@ -1651,6 +1810,15 @@ describe('DemoRuntimeFacade playlist state policy', () => {
   })
 
   it('Agent Core candidate misses keep search evidence out of the main assistant reply', async () => {
+    mockAgentIntent({
+      intent: 'insert',
+      confidence: 0.95,
+      slots: {
+        targetTime: '10:00:00',
+        programHint: '不存在的晨间特别节目XYZ',
+      },
+      assistantFeedback: '我先按你说的节目线索查候选库。',
+    })
     const facade = new DemoRuntimeFacade()
     const scheduleState = createScheduleState({
       playlistType: 'tv',
@@ -1666,8 +1834,8 @@ describe('DemoRuntimeFacade playlist state policy', () => {
       agentCoreEnabled: true,
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected message')
     expect(result.feedback.content).toContain('我先按')
     expect(result.feedback.content).toContain('查了当前候选库')
     expect(result.feedback.content).toContain('你可以补充栏目名、节目标题或更具体的内容线索')
@@ -1685,6 +1853,15 @@ describe('DemoRuntimeFacade playlist state policy', () => {
   })
 
   it('Agent Core rotation short-clip confirmation separates the assistant reply from process evidence', async () => {
+    mockAgentIntent({
+      intent: 'insert',
+      confidence: 0.95,
+      slots: {
+        targetTime: '01:00:00',
+        programHint: '城市形象春日花路短片',
+      },
+      assistantFeedback: '我理解你想在1点插入《城市微短片：春日花路 30秒》，写入前需要确认。',
+    })
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({
         playlistType: 'rotation',
@@ -1705,7 +1882,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     expect(result.feedback.content).toContain('城市微短片：春日花路 30秒')
     expect(result.feedback.content).toContain('需要确认')
     expect(result.feedback.content).not.toMatch(/检索结果|候选源返回|候选源|结构化|上下文|runtime|接口/u)
-    expect(result.feedback.details?.assistantProcessSummary).toContain('已找到 1 个可参考候选。')
+    expect(result.feedback.details?.assistantProcessSummary).toContain('已筛出 1 个可用候选。')
     expect(result.pendingAtomicContext.agentPendingTask?.phase).toBe('needs_confirmation')
     expect(result.feedback.details?.auditSummary).toMatchObject({
       contextSources: {

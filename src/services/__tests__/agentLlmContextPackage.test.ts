@@ -178,7 +178,7 @@ describe('Agent LLM context package', () => {
       playlistType: 'rotation',
       rotationStrategy: 'content_match',
       rotationDurationSeconds: 60 * 60,
-      durationScope: '0点起算，总时长1小时',
+      durationScope: '内容队列总时长1小时',
       positionBasis: 'relative_from_zero',
     })
     expect(llmContextPackage.identity).not.toHaveProperty('channelId')
@@ -187,7 +187,7 @@ describe('Agent LLM context package', () => {
       model: 'content_queue',
     })
     expect(llmContextPackage.playlistSemantics.positionMeaning).toContain('内容队列')
-    expect(llmContextPackage.playlistSemantics.positionMeaning).toContain('从0点起算')
+    expect(llmContextPackage.playlistSemantics.positionMeaning).toContain('相对位置')
     expect(llmContextPackage.playlistSemantics.draftBoundary).toContain('整体编排和整体补排需要草案')
     expect(llmContextPackage.playlistSemantics.writeBoundary).toContain('先给候选或待确认')
     expect(llmContextPackage.currentSchedule[0]).toMatchObject({
@@ -253,33 +253,74 @@ describe('Agent LLM context package', () => {
     })
     const llmContextPackage = buildAgentLlmContextPackage(context)
 
-    expect(llmContextPackage.currentSchedule).toHaveLength(12)
-    expect(llmContextPackage.candidateSummary).toHaveLength(12)
-    expect(llmContextPackage.latestHistory?.samples).toHaveLength(8)
-    expect(llmContextPackage.candidateSummary[0]?.contentTags).toHaveLength(6)
+    expect(llmContextPackage.currentSchedule).toHaveLength(6)
+    expect(llmContextPackage.candidateSummary).toHaveLength(6)
+    expect(llmContextPackage.latestHistory?.samples).toHaveLength(3)
+    expect(llmContextPackage.candidateSummary[0]?.contentTags).toHaveLength(4)
     expect(llmContextPackage.budget).toMatchObject({
       scheduleItems: {
-        included: 12,
+        included: 6,
         total: 15,
-        limit: 12,
+        limit: 6,
         truncated: true,
       },
       candidates: {
-        included: 12,
+        included: 6,
         total: 20,
-        limit: 12,
+        limit: 6,
         truncated: true,
       },
       latestHistoryItems: {
-        included: 8,
+        included: 3,
         total: 10,
-        limit: 8,
+        limit: 3,
         truncated: true,
       },
       contentTagsPerCandidate: {
-        limit: 6,
+        limit: 4,
       },
     })
+  })
+
+  it('keeps source summary compact because detailed evidence is already structured elsewhere', async () => {
+    const gateway = new InMemorySchedulingDataGateway([{
+      channelId: 'dragon',
+      date,
+      playlistType: 'tv',
+      scheduleItems: [buildItem({
+        id: 'item-news',
+        programName: 'Morning News',
+        startTime: '09:00:00',
+        endTime: '09:30:00',
+      })],
+      programCandidates: [buildCandidate({
+        id: 'candidate-news',
+        programName: 'Morning News',
+        instanceName: 'Morning News Issue 12',
+      })],
+      historySchedules: [{
+        date: '2026-03-24',
+        itemCount: 1,
+        programTypes: { news: 1 },
+        items: [buildItem({
+          id: 'history-news',
+          programName: 'Morning News Issue 11',
+        })],
+      }],
+    }])
+
+    const context = await gateway.loadContext({
+      userInput: '9点插入节目Morning News',
+      channelId: 'dragon',
+      date,
+    })
+    const llmContextPackage = buildAgentLlmContextPackage(context)
+
+    expect(llmContextPackage.sourceSummary.length).toBeGreaterThan(0)
+    expect(llmContextPackage.sourceSummary.every((source) => source.samples === undefined)).toBe(true)
+    expect(llmContextPackage.currentSchedule[0]?.programName).toBe('Morning News')
+    expect(llmContextPackage.candidateSummary[0]?.programName).toBe('Morning News')
+    expect(llmContextPackage.latestHistory?.samples[0]?.programName).toBe('Morning News Issue 11')
   })
 
   it('prioritizes user-relevant evidence inside the LLM context budget', async () => {
@@ -332,17 +373,17 @@ describe('Agent LLM context package', () => {
       pendingTask,
     })
 
-    expect(llmContextPackage.currentSchedule).toHaveLength(12)
+    expect(llmContextPackage.currentSchedule).toHaveLength(10)
     expect(llmContextPackage.currentSchedule.map((item) => item.itemId)).toContain('item-15')
-    expect(llmContextPackage.candidateSummary).toHaveLength(12)
+    expect(llmContextPackage.candidateSummary).toHaveLength(10)
     expect(llmContextPackage.candidateSummary.map((candidate) => candidate.candidateId)).toContain('candidate-17')
     expect(llmContextPackage.budget.scheduleItems).toMatchObject({
-      included: 12,
+      included: 10,
       total: 16,
       truncated: true,
     })
     expect(llmContextPackage.budget.candidates).toMatchObject({
-      included: 12,
+      included: 10,
       total: 18,
       truncated: true,
     })

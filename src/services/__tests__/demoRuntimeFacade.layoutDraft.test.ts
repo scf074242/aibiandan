@@ -59,7 +59,7 @@ afterEach(() => {
 
 beforeEach(() => {
   llmClientChatMock.mockReset()
-  llmClientChatMock.mockRejectedValue(new Error('LLM not configured for this test'))
+  llmClientChatMock.mockImplementation(mockLayoutDraftLlmResponse)
   previewFeasibilityMock.mockReturnValue({
     ok: true,
     summary: {
@@ -98,6 +98,128 @@ const createScheduleState = (overrides: Partial<ScheduleState> = {}): ScheduleSt
   hasSelectedTimeRange: false,
   ...overrides,
 })
+
+const buildMockLayoutDraftSpec = (coverage: { start: string; end: string }, segments: Array<{
+  label: string
+  startTime?: string
+  endTime?: string
+  programType?: string
+  queryHints?: string[]
+  sequential?: boolean
+}>) => ({
+  coverage,
+  segments: segments.map((segment, index) => ({
+    id: `mock-segment-${index + 1}`,
+    label: segment.label,
+    startTime: segment.startTime ?? coverage.start,
+    endTime: segment.endTime ?? coverage.end,
+    programType: segment.programType ?? 'news_magazine',
+    queryHints: segment.queryHints ?? [segment.label],
+    sequential: segment.sequential,
+  })),
+})
+
+const mockLayoutDraftLlmResponse = async (messages: Array<{ content?: unknown }>) => {
+  const prompt = messages.map((message) => String(message.content ?? '')).join('\n')
+
+  if (prompt.includes('去掉23点的两说')) {
+    return {
+      content: JSON.stringify(buildMockLayoutDraftSpec({ start: '06:00:00', end: '23:59:59' }, [
+        { label: '今晚', startTime: '22:00:00', endTime: '22:30:00', programType: 'commentary' },
+        { label: '焦点', startTime: '22:30:00', endTime: '23:00:00', programType: 'commentary' },
+        { label: '梦想剧场', startTime: '23:30:00', endTime: '23:59:59', programType: 'drama', queryHints: ['梦想剧场'], sequential: true },
+      ])),
+    }
+  }
+
+  if (prompt.includes('12:45到13:00')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '12:45:00', end: '13:00:00' }, [
+      { label: '生命树电视剧', programType: 'drama', queryHints: ['生命树电视剧', '电视剧'], sequential: true },
+    ])) }
+  }
+
+  if (prompt.includes('9点到12点') || prompt.includes('9:00到12:00')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '09:00:00', end: '12:00:00' }, [
+      { label: '东方剧场', programType: 'drama', queryHints: ['东方剧场', '电视剧'], sequential: true },
+    ])) }
+  }
+
+  if (prompt.includes('09:30到10:15')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '09:30:00', end: '10:15:00' }, [
+      { label: '品质剧场：纵有疾风起', programType: 'drama', queryHints: ['品质剧场：纵有疾风起', '纯电视频道', '顺播', '接昨天'], sequential: true },
+    ])) }
+  }
+
+  if (prompt.includes('09:45到10:30')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '09:45:00', end: '10:30:00' }, [
+      { label: '品质剧场：纵有疾风起', programType: 'drama', queryHints: ['品质剧场：纵有疾风起', '顺播'], sequential: true },
+    ])) }
+  }
+
+  if (prompt.includes('14:00到15:00')) {
+    const label = prompt.includes('高收视率')
+      ? '高收视率节目'
+      : prompt.includes('热播')
+        ? '当前热播节目'
+        : '静安寺户外直播'
+    const hints = prompt.includes('内容匹配优先')
+      ? [label, '轮播单', '内容匹配优先', '静安寺', '直播', '外场直播']
+      : prompt.includes('高收视率')
+        ? [label, '轮播单', '收视率优先']
+        : prompt.includes('热播')
+          ? [label, '轮播单', '热播优先']
+          : [label, '静安寺', '直播', '外场直播']
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '14:00:00', end: '15:00:00' }, [
+      { label, programType: 'news_magazine', queryHints: hints },
+    ])) }
+  }
+
+  if (prompt.includes('下午以城市服务')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '13:00:00', end: '18:00:00' }, [
+      { label: '城市服务', programType: 'news_magazine', queryHints: ['城市服务'] },
+    ])) }
+  }
+
+  if (prompt.includes('黄金档主打综艺')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '19:00:00', end: '20:00:00' }, [
+      { label: '综艺', programType: 'entertainment', queryHints: ['综艺'] },
+    ])) }
+  }
+
+  if (prompt.includes('晚间民生新闻')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '18:00:00', end: '23:00:00' }, [
+      { label: '民生新闻', programType: 'news', queryHints: ['民生新闻'] },
+    ])) }
+  }
+
+  if (prompt.includes('发布会开播前')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '18:00:00', end: '23:00:00' }, [
+      { label: '现场导视', programType: 'news_magazine', queryHints: ['现场导视', '发布会'] },
+    ])) }
+  }
+
+  if (prompt.includes('赛前给赛事直播')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '18:00:00', end: '23:00:00' }, [
+      { label: '赛事预热', programType: 'news_magazine', queryHints: ['赛事预热', '赛事直播'] },
+    ])) }
+  }
+
+  if (prompt.includes('黄金档前后')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '19:00:00', end: '20:00:00' }, [
+      { label: '轻松过渡', programType: 'news_magazine', queryHints: ['轻松过渡'] },
+    ])) }
+  }
+
+  if (prompt.includes('上海市16个区')) {
+    return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '00:00:00', end: '03:00:00' }, [
+      { label: '上海市16个区标志景点', startTime: '00:00:00', endTime: '03:00:00', programType: 'news_magazine', queryHints: ['上海市16个区', '标志景点'] },
+    ])) }
+  }
+
+  return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '13:00:00', end: '18:00:00' }, [
+    { label: '测试草案', programType: 'news_magazine', queryHints: ['测试草案'] },
+  ])) }
+}
 
 const createLayoutDraft = (): LayoutDraft => ({
   id: 'draft-test',
@@ -171,6 +293,67 @@ const createRotationDurationDraft = (): LayoutDraft => ({
     fallbackPolicy: 'ask_user',
   }],
 })
+
+const formatRelativeClock = (minutes: number): string => {
+  const hours = Math.floor(minutes / 60)
+  const restMinutes = minutes % 60
+  return `${hours.toString().padStart(2, '0')}:${restMinutes.toString().padStart(2, '0')}:00`
+}
+
+const createNumberedRotationDraft = (): LayoutDraft => {
+  const slots = Array.from({ length: 10 }, (_, index) => {
+    const segmentNumber = index + 1
+    return {
+      id: `asian-team-slot-${segmentNumber}`,
+      channelId: 'rotation',
+      columnId: `asian-team-column-${segmentNumber}`,
+      startTime: formatRelativeClock(index * 10),
+      endTime: formatRelativeClock((index + 1) * 10),
+    }
+  })
+  return {
+    id: 'numbered-rotation-draft',
+    channelId: 'rotation',
+    date: '2026-03-25',
+    source: 'generated',
+    userIntent: '亚洲队介绍轮播草案',
+    coverage: { start: '00:00:00', end: '01:40:00' },
+    draftKind: 'duration_segments',
+    targetDurationSeconds: 100 * 60,
+    layoutReference: {
+      id: 'numbered-rotation-layout',
+      name: '亚洲队介绍轮播版面',
+      slots,
+    },
+    columns: slots.map((slot, index) => {
+      const segmentNumber = index + 1
+      const label = `亚洲队${segmentNumber}介绍`
+      return {
+        columnId: slot.columnId,
+        columnName: label,
+        channelId: 'rotation',
+        defaultProgramType: 'news_magazine',
+        source: 'generated' as const,
+        draftConstraintKind: 'unspecified' as const,
+        semanticLabel: label,
+        queryHints: [label],
+      }
+    }),
+    durationSegments: slots.map((slot, index) => {
+      const segmentNumber = index + 1
+      const label = `亚洲队${segmentNumber}介绍`
+      return {
+        id: slot.id,
+        label,
+        contentHint: label,
+        targetDurationSeconds: 10 * 60,
+        selectionPriority: 'content_match' as const,
+        repeatPolicy: 'avoid_repeat' as const,
+        fallbackPolicy: 'ask_user' as const,
+      }
+    }),
+  }
+}
 
 const uploadedLayoutReference: LayoutReference = {
   id: 'uploaded-layout',
@@ -280,10 +463,10 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       layoutDraftEnabled: true,
     })
 
-    expect(result.kind).toBe('layout_draft')
     if (result.kind !== 'layout_draft') {
-      throw new Error('expected layout draft decision')
+      throw new Error(`expected layout draft decision: ${result.feedback.content}`)
     }
+    expect(result.kind).toBe('layout_draft')
 
     expect(result.draft.coverage).toEqual({ start: '12:45:00', end: '13:00:00' })
     expect(result.draft.columns[0]?.semanticLabel).toContain('生命树')
@@ -544,10 +727,10 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       layoutDraftEnabled: true,
     })
 
-    expect(result.kind).toBe('layout_draft')
     if (result.kind !== 'layout_draft') {
-      throw new Error('expected layout draft decision')
+      throw new Error(`expected layout draft decision: ${result.feedback.content}`)
     }
+    expect(result.kind).toBe('layout_draft')
 
     expect(result.draft.source).toBe('channel_default')
     expect(result.feedback.content).toContain('当前频道默认版面')
@@ -987,7 +1170,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       coverage: { start: '18:00:00', end: '23:00:00' },
       label: '民生新闻',
     },
-  ])('routes daypart segment intent to a layout draft without relying on LLM: $userInput', async ({ userInput, coverage, label }) => {
+  ])('routes daypart segment intent to a layout draft from LLM-structured output: $userInput', async ({ userInput, coverage, label }) => {
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -1026,7 +1209,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       label: '轻松过渡',
       programType: 'news_magazine',
     },
-  ])('routes relative event scheduling intent to a layout draft without relying on LLM: $userInput', async ({ userInput, coverage, label, programType }) => {
+  ])('routes relative event scheduling intent to a layout draft from LLM-structured output: $userInput', async ({ userInput, coverage, label, programType }) => {
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -1209,6 +1392,59 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       3600,
     ])
   })
+
+  it('uses LLM target segment fields without confusing segment 10 with segment 1', async () => {
+    const facade = new DemoRuntimeFacade()
+    const currentLayoutDraft = createNumberedRotationDraft()
+    llmClientChatMock.mockResolvedValueOnce({
+      content: JSON.stringify({
+        actions: [
+          {
+            type: 'refine_layout_draft',
+            rotationDurationSeconds: 100 * 60,
+            targetSegmentIndex: 10,
+            targetSegmentLabel: '亚洲队10介绍',
+            semanticLabel: '中国队介绍',
+            programTypeHint: 'news_magazine',
+          },
+        ],
+        assistantReplyDraft: '我会把第10段从亚洲队10介绍调整为中国队介绍，只更新草案，不写正式节目。',
+        reasoning: '用户按草案块名称提出局部微调。',
+      }),
+    })
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState({
+        playlistType: 'rotation',
+        channelName: '轮播单',
+        rotationStrategy: 'content_match',
+        rotationDurationSeconds: 100 * 60,
+      }),
+      userInput: '亚洲队10介绍换成中国队介绍',
+      currentSchedule: [],
+      currentLayoutDraft,
+      preferLayoutDraftRefine: true,
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    if (result.kind !== 'layout_draft') throw new Error(`expected numbered rotation draft refine: ${result.feedback.content}`)
+    expect(result.draft.durationSegments).toHaveLength(10)
+    expect(result.draft.durationSegments?.[0]?.label).toBe('亚洲队1介绍')
+    expect(result.draft.durationSegments?.[8]?.label).toBe('亚洲队9介绍')
+    expect(result.draft.durationSegments?.[9]?.label).toBe('中国队介绍')
+    expect(result.draft.durationSegments?.[9]?.targetDurationSeconds).toBe(10 * 60)
+    expect(new Set(result.draft.layoutReference.slots.map((slot) => slot.id)).size).toBe(10)
+    const visibleLabels = result.draft.layoutReference.slots.map((slot, index) => {
+      const durationSegment = result.draft.durationSegments?.find((segment) => segment.id === slot.id)
+        ?? result.draft.durationSegments?.[index]
+      return durationSegment?.label
+    })
+    expect(visibleLabels[0]).toBe('亚洲队1介绍')
+    expect(visibleLabels[9]).toBe('中国队介绍')
+  })
 })
 
 const createDraft = (): LayoutDraft => ({
@@ -1295,7 +1531,7 @@ const createDraft = (): LayoutDraft => ({
 describe('DemoRuntimeFacade layout draft refine', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    llmClientChatMock.mockRejectedValue(new Error('LLM not configured for this test'))
+    llmClientChatMock.mockImplementation(mockLayoutDraftLlmResponse)
     previewFeasibilityMock.mockReturnValue({
       ok: true,
       summary: {
@@ -1336,10 +1572,10 @@ describe('DemoRuntimeFacade layout draft refine', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('layout_draft')
     if (result.kind !== 'layout_draft') {
-      throw new Error('expected layout draft decision')
+      throw new Error(`expected layout draft decision: ${result.feedback.content}`)
     }
+    expect(result.kind).toBe('layout_draft')
 
     expect(result.draft.source).toBe('channel_default')
     expect(result.draft.layoutReference.slots.some((slot) => slot.id === 'slot-3')).toBe(false)

@@ -1,5 +1,5 @@
 import type { ScheduleItemSnapshot } from '@/types/orchestration'
-import type { AgentProgramCandidate, SchedulingContext } from './types'
+import type { AgentProgramCandidate, AgentTvSequenceEvidence, SchedulingContext } from './types'
 
 export interface AgentTvSequenceSelection {
   candidate: AgentProgramCandidate | null
@@ -39,6 +39,7 @@ interface ExactContinuationChoice {
 const chineseNumberChars = '0-9\\u96f6\\u3007\\u4e00\\u4e8c\\u4e24\\u4e09\\u56db\\u4e94\\u516d\\u4e03\\u516b\\u4e5d\\u5341\\u767e'
 const chineseEpisodePattern = new RegExp(`\\u7b2c\\s*([${chineseNumberChars}]+)\\s*[\\u96c6\\u671f]`, 'u')
 const chineseEpisodePatternGlobal = new RegExp(`\\u7b2c\\s*([${chineseNumberChars}]+)\\s*[\\u96c6\\u671f]`, 'gu')
+const chineseEpisodeOnlyPattern = new RegExp(`\\u7b2c\\s*([${chineseNumberChars}]+)\\s*\\u96c6`, 'u')
 const chineseDirectionalEpisodePattern = /[\u4e0a\u4e2d\u4e0b][\u96c6\u671f]/gu
 const chineseReadablePunctuationPattern = /[\u300a\u300b"'"\u201c\u201d\u2018\u2019\uff08\uff09()[\]\u3001\uff0c\u3002\uff1b;:\uff1a\u00b7\-_\u2014/\\|~\uff5e]/g
 
@@ -150,6 +151,68 @@ export class AgentTvSequenceCandidateSelector {
     }
   }
 
+  /**
+   * 提取 TV 顺播证据（不做候选决策）
+   * 遍历候选中的系列键，匹配今天/历史编排基线，返回期望下一集期数等信息
+   * 用于透传给 LLM 候选决策器，让 LLM 看到顺播上下文
+   */
+  buildEvidence(context: SchedulingContext, candidates: AgentProgramCandidate[]): AgentTvSequenceEvidence {
+    if (context.bundle.identity.playlistType !== 'tv') {
+      return { playlistType: context.bundle.identity.playlistType, source: 'none', hasBaseline: false }
+    }
+    const todayFacts = this.collectFacts(context.bundle.today.scheduleItems)
+    const historyFacts = this.collectFacts(context.bundle.history.latestSchedule?.items ?? [])
+
+    for (const candidate of candidates) {
+      if (!this.hasExplicitSequenceEvidence(candidate)) continue
+      const seriesKeys = this.buildSeriesKeys(candidate)
+      if (seriesKeys.length === 0) continue
+
+      const todayMax = this.resolveMaxSequence(todayFacts, seriesKeys)
+      if (todayMax) {
+        return {
+          playlistType: 'tv',
+          expectedSequence: todayMax.sequence + 1,
+          seriesKey: todayMax.seriesKey,
+          source: 'today',
+          todayMaxSequence: todayMax.sequence,
+          hasBaseline: true,
+        }
+      }
+
+      const historyMax = this.resolveMaxSequence(historyFacts, seriesKeys)
+      if (historyMax) {
+        return {
+          playlistType: 'tv',
+          expectedSequence: historyMax.sequence + 1,
+          seriesKey: historyMax.seriesKey,
+          source: 'history',
+          historyMaxSequence: historyMax.sequence,
+          hasBaseline: true,
+        }
+      }
+    }
+
+    return { playlistType: 'tv', source: 'none', hasBaseline: false }
+  }
+
+  /**
+   * 后置校验：LLM 选择的候选是否符合顺播硬约束（C17：不能跳集/倒序/重复）
+   * 返回违规原因字符串，或 null 表示校验通过
+   */
+  validateCandidateAgainstSequence(
+    candidate: AgentProgramCandidate,
+    evidence: AgentTvSequenceEvidence,
+  ): string | null {
+    if (evidence.playlistType !== 'tv' || !evidence.hasBaseline) return null
+    if (typeof evidence.expectedSequence !== 'number') return null
+    const candidateSequence = this.extractSequence(candidate)
+    if (typeof candidateSequence !== 'number') return null
+    if (candidateSequence < evidence.expectedSequence) return '候选期数小于期望下一集（倒序）'
+    if (candidateSequence > evidence.expectedSequence) return '候选期数大于期望下一集（跳集）'
+    return null
+  }
+
   private rankCandidate(
     candidate: AgentProgramCandidate,
     index: number,
@@ -237,9 +300,10 @@ export class AgentTvSequenceCandidateSelector {
   private hasExplicitSequenceEvidence(candidate: AgentProgramCandidate): boolean {
     if (typeof this.extractSequence(candidate) !== 'number') return false
     const label = `${candidate.programName ?? ''} ${candidate.instanceName ?? ''}`.toLowerCase()
-    if (/\b(ep|episode)\.?\s*\d{1,4}\b/u.test(label) || chineseEpisodePattern.test(label)) return true
+    if (/\b(ep|episode)\.?\s*\d{1,4}\b/u.test(label) || chineseEpisodeOnlyPattern.test(label)) return true
     if (!this.isSequentialProgramType(candidate.programType)) return false
     if (this.parsePositiveNumber(candidate.issueNo) !== undefined) return true
+    if (chineseEpisodePattern.test(label)) return true
     const explicitSequence = (candidate as AgentProgramCandidate & { sequence?: unknown }).sequence
     if (typeof explicitSequence === 'number' && Number.isFinite(explicitSequence) && explicitSequence > 0) return true
     return Boolean(candidate.programCode?.match(/(\d{1,4})$/))
@@ -259,8 +323,9 @@ export class AgentTvSequenceCandidateSelector {
 
   private hasScheduleSequenceEvidence(item: ScheduleItemSnapshot): boolean {
     const label = `${item.programName ?? ''} ${item.instanceName ?? ''}`.toLowerCase()
-    if (/\b(ep|episode)\.?\s*\d{1,4}\b/u.test(label) || chineseEpisodePattern.test(label)) return true
+    if (/\b(ep|episode)\.?\s*\d{1,4}\b/u.test(label) || chineseEpisodeOnlyPattern.test(label)) return true
     if (!this.isSequentialProgramType(item.programType)) return false
+    if (chineseEpisodePattern.test(label)) return true
     return typeof item.sequence === 'number'
       || this.parsePositiveNumber(item.issueNo) !== undefined
       || Boolean(item.programCode?.match(/(\d{1,4})$/))

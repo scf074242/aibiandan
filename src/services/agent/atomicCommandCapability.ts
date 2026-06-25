@@ -1,6 +1,5 @@
-﻿import type { ScheduleItemSnapshot } from '@/types/orchestration'
-import { parseAtomicOffset } from '@/services/atomicOffsetParser'
-import { parseAtomicClockExpression, parseAtomicClockExpressions, parseAtomicTimeRange } from '@/services/atomicTimeParser'
+import type { ScheduleItemSnapshot } from '@/types/orchestration'
+import { parseAtomicClockExpression } from '@/services/atomicTimeParser'
 import { continuePendingTask, createPendingTask } from './agentSession'
 import { AgentConstraintEngine } from './constraintEngine'
 import {
@@ -97,7 +96,7 @@ type CandidateJudgePool = {
 
 type CandidateSearchAttempt = {
   keyword: string
-  source: 'primary' | 'llm_alternative' | 'fallback'
+  source: 'primary' | 'llm_alternative'
   candidateCount: number
   candidateIds: string[]
 }
@@ -105,7 +104,7 @@ type CandidateSearchAttempt = {
 type CandidatePoolResolution = {
   candidates: AgentProgramCandidate[]
   attempts: CandidateSearchAttempt[]
-  matchedBy: 'primary' | 'rewritten_keywords' | 'none'
+  matchedBy: 'primary' | 'llm_alternatives' | 'none'
 }
 
 type RecommendationBuildOptions = {
@@ -127,7 +126,7 @@ export class AtomicCommandCapability implements AgentCapability {
     if (input.pendingTask?.intent === 'replace') return true
     if (input.pendingTask?.intent === 'batch_move') return true
     if (input.pendingTask?.intent === 'batch_delete') return true
-    return /(移动|移到|调到|调整到|改到|挪到|放到|排到|后移|前移|挪|推迟|推后|延后|提前|顺延|延迟|整体|批量|插入|添加|删除|删掉|替换|换成|改成|改为|换播|校验|检查|体检|问题|冲突|重叠|查询|查找|查看|看看|有哪些|是什么|在哪里|在哪儿|在哪|哪里|什么时候播|几点播|播出时间|排在几点|move|insert|delete|replace|validate|query)/iu.test(input.userInput)
+    return false
   }
 
   async handle(input: AgentSubmitInput, runtime: AgentCapabilityRuntime): Promise<AgentResult> {
@@ -177,7 +176,7 @@ export class AtomicCommandCapability implements AgentCapability {
       return this.confirmPendingBatchDelete(input, runtime, input.pendingTask)
     }
 
-    const intent = input.interpretation?.intent ?? this.inferIntent(input.userInput)
+    const intent = input.interpretation?.intent
     if (intent === 'batch_move') return this.handleBatchMove(input, runtime)
     if (intent === 'batch_delete') return this.handleBatchDelete(input, runtime)
     if (intent === 'insert') return this.handleInsert(input, runtime)
@@ -216,7 +215,7 @@ export class AtomicCommandCapability implements AgentCapability {
         status: 'needs_clarification',
         input,
         decision: {
-          intent: this.inferIntent(input.userInput),
+          intent: input.interpretation?.intent,
           constraintReport: {
             ok: false,
             issues: [{
@@ -299,18 +298,19 @@ export class AtomicCommandCapability implements AgentCapability {
     const missingScheduleSourceResult = this.buildScheduleSourceMissingResultIfNeeded(input, runtime, context, 'move', pendingTask)
     if (missingScheduleSourceResult) return missingScheduleSourceResult
 
-    const targets = this.resolveTargets(context, moveSlots)
+    const effectiveMoveSlots = this.normalizeMoveSlotsForContext(context, moveSlots, input.userInput)
+    const targets = this.resolveTargets(context, effectiveMoveSlots)
 
     if (targets.length !== 1) {
       const status = targets.length === 0 ? 'blocked' : 'needs_clarification'
       const code = targets.length === 0 ? 'target_not_found' : 'target_ambiguous'
-      const targetLabel = this.describeTargetSelector(moveSlots)
+      const targetLabel = this.describeTargetSelector(effectiveMoveSlots)
       const message = targets.length === 0
         ? 'No matching target was found.'
         : 'Multiple targets matched; select one target.'
       const pendingTargetTask = targets.length > 1
-        ? this.createTargetAmbiguityPendingTask(input, 'move', moveSlots, targets, context, {
-            ...this.buildMoveOperationSlotPatch(moveSlots, input.userInput),
+        ? this.createTargetAmbiguityPendingTask(input, 'move', effectiveMoveSlots, targets, context, {
+            ...this.buildMoveOperationSlotPatch(effectiveMoveSlots, input.userInput),
           })
         : pendingTask
       return {
@@ -333,11 +333,11 @@ export class AtomicCommandCapability implements AgentCapability {
     const target = targets[0]!
     runtime.trace.record('planning', 'Build move command plan.', {
       targetItemId: target.id,
-      targetTime: moveSlots.targetTime ?? toClockText(target.startTime),
-      offsetSeconds: moveSlots.offsetSeconds,
-      newStartTime: moveSlots.newStartTime,
+      targetTime: effectiveMoveSlots.targetTime ?? toClockText(target.startTime),
+      offsetSeconds: effectiveMoveSlots.offsetSeconds,
+      newStartTime: effectiveMoveSlots.newStartTime,
     })
-    const command = this.buildMoveCommand(input.date, target, moveSlots)
+    const command = this.buildMoveCommand(input.date, target, effectiveMoveSlots)
     const preview = this.previewMove(command, context)
 
     runtime.trace.record('previewing', 'Agent Core trace step.', {
@@ -2179,25 +2179,29 @@ export class AtomicCommandCapability implements AgentCapability {
     const missingScheduleSourceResult = this.buildScheduleSourceMissingResultIfNeeded(input, runtime, context, 'replace', replaceSlots.pendingTask)
     if (missingScheduleSourceResult) return missingScheduleSourceResult
 
-    const targets = this.resolveTargets(context, replaceSlots)
+    const effectiveReplaceSlots = {
+      ...replaceSlots,
+      targetTime: this.normalizeTargetTimeForContext(context, replaceSlots.targetTime, input.userInput),
+    }
+    const targets = this.resolveTargets(context, effectiveReplaceSlots)
 
     if (targets.length !== 1) {
       const status = targets.length === 0 ? 'blocked' : 'needs_clarification'
       const code = targets.length === 0 ? 'target_not_found' : 'target_ambiguous'
-      const targetLabel = this.describeTargetSelector(replaceSlots)
+      const targetLabel = this.describeTargetSelector(effectiveReplaceSlots)
       const message = targets.length === 0
         ? 'No matching target was found.'
         : 'Multiple targets matched; select one target.'
       const pendingTargetTask = targets.length > 1
-        ? this.createTargetAmbiguityPendingTask(input, 'replace', replaceSlots, targets, context, {
+        ? this.createTargetAmbiguityPendingTask(input, 'replace', effectiveReplaceSlots, targets, context, {
             replacementHint: {
-              value: replaceSlots.replacementHint,
-              source: replaceSlots.source === 'pending' ? 'user_followup' : 'user_initial',
+              value: effectiveReplaceSlots.replacementHint,
+              source: effectiveReplaceSlots.source === 'pending' ? 'user_followup' : 'user_initial',
               confidence: 0.85,
               rawText: input.userInput,
             },
           })
-        : replaceSlots.pendingTask ?? undefined
+        : effectiveReplaceSlots.pendingTask ?? undefined
       return {
         status,
         input,
@@ -2216,20 +2220,28 @@ export class AtomicCommandCapability implements AgentCapability {
     }
 
     const target = targets[0]!
-    const targetTime = replaceSlots.targetTime ?? toClockText(target.startTime)
+    const targetTime = effectiveReplaceSlots.targetTime ?? toClockText(target.startTime)
     const missingCandidateSourceResult = this.buildCandidateSourceMissingResultIfNeeded(input, runtime, context, 'replace', replaceSlots.pendingTask, [target])
     if (missingCandidateSourceResult) return missingCandidateSourceResult
 
+    runtime.trace.record('planning', '调用节目查询服务查找候选', {
+      intent: 'replace',
+      keyword: effectiveReplaceSlots.replacementHint,
+      searchAlternatives: input.interpretation?.searchAlternatives,
+      targetTime,
+      playlistType: context.playlistType,
+      noMutation: true,
+    })
     const candidatePool = this.resolveCandidatePool(
       context.programCandidates,
-      replaceSlots.replacementHint,
+      effectiveReplaceSlots.replacementHint,
       input,
       runtime,
     )
-    const explicitCandidate = replaceSlots.selectedCandidateId
-      ? context.programCandidates.find((candidate) => candidate.id === replaceSlots.selectedCandidateId)
+    const explicitCandidate = effectiveReplaceSlots.selectedCandidateId
+      ? context.programCandidates.find((candidate) => candidate.id === effectiveReplaceSlots.selectedCandidateId)
       : undefined
-    const effectiveCandidates = replaceSlots.selectedCandidateId
+    const effectiveCandidates = effectiveReplaceSlots.selectedCandidateId
       ? explicitCandidate ? [explicitCandidate] : []
       : candidatePool.candidates
 
@@ -2810,7 +2822,12 @@ export class AtomicCommandCapability implements AgentCapability {
     const missingScheduleSourceResult = this.buildScheduleSourceMissingResultIfNeeded(input, runtime, context, 'insert', insertSlots.pendingTask)
     if (missingScheduleSourceResult) return missingScheduleSourceResult
 
-    const occupiedItems = this.resolveMoveTargets(context, insertSlots.targetTime)
+    const effectiveInsertSlots = {
+      ...insertSlots,
+      targetTime: this.normalizeTargetTimeForContext(context, insertSlots.targetTime, input.userInput) ?? insertSlots.targetTime,
+    }
+
+    const occupiedItems = this.resolveMoveTargets(context, effectiveInsertSlots.targetTime)
     if (occupiedItems.length > 0) {
       const occupiedItem = occupiedItems[0]!
       return {
@@ -2830,8 +2847,8 @@ export class AtomicCommandCapability implements AgentCapability {
                 conflictProgramName: occupiedItem.programName,
                 conflictRange: { start: occupiedItem.startTime, end: occupiedItem.endTime },
                 proposedRange: {
-                  start: normalizeDateTime(input.date, insertSlots.targetTime),
-                  end: normalizeDateTime(input.date, insertSlots.targetTime),
+                  start: normalizeDateTime(input.date, effectiveInsertSlots.targetTime),
+                  end: normalizeDateTime(input.date, effectiveInsertSlots.targetTime),
                 },
                 blockedPolicy: 'no_auto_shift_replace_reorder',
               },
@@ -2846,6 +2863,14 @@ export class AtomicCommandCapability implements AgentCapability {
     const missingCandidateSourceResult = this.buildCandidateSourceMissingResultIfNeeded(input, runtime, context, 'insert', insertSlots.pendingTask)
     if (missingCandidateSourceResult) return missingCandidateSourceResult
 
+    runtime.trace.record('planning', '调用节目查询服务查找候选', {
+      intent: 'insert',
+      keyword: insertSlots.programHint,
+      searchAlternatives: input.interpretation?.searchAlternatives,
+      targetTime: effectiveInsertSlots.targetTime,
+      playlistType: context.playlistType,
+      noMutation: true,
+    })
     const candidatePool = this.resolveCandidatePool(
       context.programCandidates,
       insertSlots.programHint,
@@ -2870,7 +2895,7 @@ export class AtomicCommandCapability implements AgentCapability {
         collectedSlots: {
           ...(previousPendingTask?.collectedSlots ?? {}),
           targetTime: {
-            value: insertSlots.targetTime,
+            value: effectiveInsertSlots.targetTime,
             source: insertSlots.source === 'initial' ? 'user_initial' : 'user_followup',
             confidence: 0.9,
           },
@@ -2917,8 +2942,8 @@ export class AtomicCommandCapability implements AgentCapability {
       forceExecute: insertSlots.forceExecute,
     })
     const candidateSelection = insertSlots.selectedCandidateId
-      ? this.buildExplicitCandidateSelection(effectiveCandidates[0]!, effectiveCandidates.length, input, context, 'insert', insertSlots.targetTime)
-      : await this.selectCandidate(input, runtime, context, 'insert', effectiveCandidates, insertSlots.targetTime)
+      ? this.buildExplicitCandidateSelection(effectiveCandidates[0]!, effectiveCandidates.length, input, context, 'insert', effectiveInsertSlots.targetTime)
+      : await this.selectCandidate(input, runtime, context, 'insert', effectiveCandidates, effectiveInsertSlots.targetTime)
     const candidateSelectionPendingResult = this.buildCandidateSelectionPendingResultIfNeeded(input, runtime, {
       intent: 'insert',
       context,
@@ -2926,7 +2951,7 @@ export class AtomicCommandCapability implements AgentCapability {
       candidates: candidateSelection.candidateOptions,
       collectedSlots: {
         targetTime: {
-          value: insertSlots.targetTime,
+          value: effectiveInsertSlots.targetTime,
           source: insertSlots.source === 'initial' ? 'user_initial' : 'user_followup',
           confidence: 0.9,
         },
@@ -2977,7 +3002,7 @@ export class AtomicCommandCapability implements AgentCapability {
       }
     }
 
-    const command = this.buildInsertCommand(input.date, insertSlots.targetTime, selectedCandidate)
+    const command = this.buildInsertCommand(input.date, effectiveInsertSlots.targetTime, selectedCandidate)
     const preview = this.previewInsert(command, context)
     const constraintReport = this.constraintEngine.checkInsert(command, context, preview.after)
     const recommendations = this.buildRecommendations(effectiveCandidates, input.userInput, context, {
@@ -3051,7 +3076,7 @@ export class AtomicCommandCapability implements AgentCapability {
         collectedSlots: {
           ...(previousPendingTask?.collectedSlots ?? {}),
           targetTime: {
-            value: insertSlots.targetTime,
+            value: effectiveInsertSlots.targetTime,
             source: insertSlots.source === 'initial' ? 'user_initial' : 'user_followup',
             confidence: 0.9,
           },
@@ -3154,108 +3179,7 @@ export class AtomicCommandCapability implements AgentCapability {
         newStartTime: interpreted?.newStartTime,
       }
     }
-    const clock = parseAtomicClockExpression(input.userInput)
-    const hasMoveVerb = /(移动|移到|调到|调整到|改到|挪到|放到|排到|后移|前移|挪|推迟|推后|延后|提前|顺延|延迟|move)/iu.test(input.userInput)
-    if (!hasMoveVerb) {
-      if (input.pendingTask?.intent === 'move' && clock && this.isMoveDestinationOnlyFollowUp(input.userInput, clock.matchedText)) {
-        return {
-          newStartTime: clock.targetTime,
-        }
-      }
-      return null
-    }
-    const absoluteMove = this.parseAbsoluteMoveFallback(input.userInput)
-    if (absoluteMove) return absoluteMove
-    const offset = parseAtomicOffset(input.userInput)
-    if (clock && offset) {
-      const signedOffsetSeconds = offset.direction === 'backward' ? -offset.offsetSeconds : offset.offsetSeconds
-      return {
-        targetTime: clock.targetTime,
-        offsetSeconds: signedOffsetSeconds,
-      }
-    }
-    const targetProgramName = this.extractMoveTargetProgramName(input.userInput, clock?.matchedText)
-    if (offset && targetProgramName) {
-      const signedOffsetSeconds = offset.direction === 'backward' ? -offset.offsetSeconds : offset.offsetSeconds
-      return {
-        targetProgramName,
-        offsetSeconds: signedOffsetSeconds,
-      }
-    }
-    if (clock) {
-      return {
-        targetProgramName,
-        newStartTime: clock.targetTime,
-      }
-    }
-    if (!targetProgramName) return null
-    return {
-      targetProgramName,
-    }
-  }
-
-  private parseAbsoluteMoveFallback(userInput: string): MoveSlots | null {
-    if (!/(移动到|移到|调到|调整到|改到|挪到|放到|排到|move\s+.+\s+to)/iu.test(userInput)) return null
-    const clocks = parseAtomicClockExpressions(userInput, 4)
-    const destination = clocks.at(-1)
-    if (!destination) return null
-    const source = clocks.length >= 2 ? clocks[0] : undefined
-    const targetProgramName = this.extractAbsoluteMoveProgramHint(userInput, destination.matchedText)
-    if (!source && !targetProgramName) return null
-    return {
-      targetTime: source?.targetTime,
-      targetProgramName,
-      newStartTime: destination.targetTime,
-    }
-  }
-
-  private extractAbsoluteMoveProgramHint(userInput: string, destinationText?: string): string | undefined {
-    const quoted = /[《「『](.+?)[》」』]/u.exec(userInput)?.[1]?.trim()
-    if (quoted) return quoted
-
-    let normalized = userInput.replace(/\s+/g, '')
-    if (destinationText) normalized = normalized.replace(destinationText, '')
-    const match = /(?:把|将)?(.+?)(?:移动到|移到|调到|调整到|改到|挪到|放到|排到)/u.exec(normalized)
-    const raw = match?.[1]?.trim()
-    if (!raw) return undefined
-
-    const cleaned = raw
-      .replace(/\d{1,2}[:：]\d{1,2}(?::\d{1,2})?/g, '')
-      .replace(/\d{1,2}点(?:\d{1,2}分?)?/g, '')
-      .replace(/^(?:把|将)/u, '')
-      .replace(/(?:的)?(?:节目|栏目|内容|素材|这条|那条|当前)$/u, '')
-      .trim()
-    if (!cleaned || /^(?:节目|栏目|内容|素材|这条|那条|当前|目标)$/u.test(cleaned)) return undefined
-    return cleaned
-  }
-
-  private extractMoveTargetProgramName(userInput: string, clockText?: string): string | undefined {
-    const quoted = /[《「『](.+?)[》」』]/u.exec(userInput)?.[1]?.trim()
-    if (quoted) return quoted
-
-    let normalized = userInput.replace(/\s+/g, '')
-    if (clockText) normalized = normalized.replace(clockText, '')
-    const match = /(?:移动|调动|调整|挪动|后移|前移|推迟|推后|延后|提前|顺延|延迟|move)(?:节目|栏目|内容|素材)?(.+?)?$/iu.exec(normalized)
-    const raw = (match?.[1] ?? normalized)
-      .replace(/^(?:请|帮我|帮忙|把|将|这个|那个|当前|今天|今日|播单里|节目单里|的)+/u, '')
-      .replace(/(?:移动|调动|调整|挪动|后移|前移|推迟|推后|延后|提前|顺延|延迟|move)/giu, '')
-      .replace(/^(?:到|至|去到|放到|排到|移到|调到|改到|挪到)+/u, '')
-      .replace(/(?:这个|那个|当前|今天|今日|的)?(?:节目|栏目|内容|素材|条目|这条|那条)$/u, '')
-      .replace(/[，。！？；：、,.!?;:]/gu, '')
-      .trim()
-    if (!raw || /^(?:节目|栏目|内容|素材|条目|这条|那条|当前|目标)$/u.test(raw)) return undefined
-    return raw
-  }
-
-  private isMoveDestinationOnlyFollowUp(userInput: string, clockText: string): boolean {
-    const residue = userInput
-      .replace(/\s+/g, '')
-      .replace(clockText, '')
-      .replace(/[，。！？；：、,.!?;:]/gu, '')
-      .replace(/^(?:就|那|那就|好的|好|可以|行|定|放|排|安排|移动|移到|到|至|去到|吧|啊|呀|呢)+/u, '')
-      .replace(/(?:就|吧|啊|呀|呢|可以|行|好的|好)$/u, '')
-      .trim()
-    return residue.length === 0
+    return null
   }
 
   private parseBatchMove(input: AgentSubmitInput): BatchMoveSlots | null {
@@ -3273,18 +3197,7 @@ export class AtomicCommandCapability implements AgentCapability {
         offsetSeconds,
       }
     }
-    if (!/(整体|批量|全部|范围|这段|这一段|programmes?|items?)/iu.test(input.userInput)) return null
-    if (!/(移动|后移|前移|挪|推迟|推后|延后|提前|顺延|延迟|move)/iu.test(input.userInput)) return null
-    const range = parseAtomicTimeRange(input.userInput)
-    const offset = parseAtomicOffset(input.userInput)
-    if (!range || !offset) return null
-    const signedOffsetSeconds = offset.direction === 'backward' ? -offset.offsetSeconds : offset.offsetSeconds
-    return {
-      rangeStart: range.start,
-      rangeEnd: range.end,
-      targetRange: range,
-      offsetSeconds: signedOffsetSeconds,
-    }
+    return null
   }
 
   private parseBatchDeleteSlots(input: AgentSubmitInput): BatchDeleteSlots {
@@ -3292,23 +3205,15 @@ export class AtomicCommandCapability implements AgentCapability {
     if (input.interpretation?.intent === 'batch_delete') {
       const rangeStart = interpreted?.rangeStart
       const rangeEnd = interpreted?.rangeEnd
-      const textRange = parseAtomicTimeRange(input.userInput)
       return {
-        rangeStart: rangeStart ?? textRange?.start,
-        rangeEnd: rangeEnd ?? textRange?.end,
+        rangeStart,
+        rangeEnd,
         targetRange: rangeStart && rangeEnd
           ? { start: rangeStart, end: rangeEnd }
-          : textRange ?? undefined,
+          : undefined,
       }
     }
-    const range = parseAtomicTimeRange(input.userInput)
-    return range
-      ? {
-          rangeStart: range.start,
-          rangeEnd: range.end,
-          targetRange: range,
-        }
-      : {}
+    return {}
   }
 
   private parseBatchDeleteRange(input: AgentSubmitInput): { start: string; end: string } | null {
@@ -3321,31 +3226,25 @@ export class AtomicCommandCapability implements AgentCapability {
         end: interpreted.rangeEnd,
       }
     }
-    if (!/(删除|删掉|移除|去掉|撤掉|delete|remove)/iu.test(input.userInput)) return null
-    return parseAtomicTimeRange(input.userInput)
+    return null
   }
 
   private parseDeleteTargetTime(input: AgentSubmitInput): string | undefined {
     const interpreted = this.readInterpretedSlots(input)
     if (input.interpretation?.intent === 'delete' && interpreted?.targetTime) return interpreted.targetTime
-    if (!/(删除|删掉|移除|去掉|撤掉|delete|remove)/iu.test(input.userInput)) return undefined
-    return parseAtomicClockExpression(input.userInput)?.targetTime
+    return undefined
   }
 
   private parseDelete(input: AgentSubmitInput): DeleteSlots {
     const interpreted = this.readInterpretedSlots(input)
     if (input.interpretation?.intent === 'delete') {
       return {
-        targetTime: interpreted?.targetTime ?? this.parseDeleteTargetTime(input),
+        targetTime: interpreted?.targetTime,
         targetItemId: interpreted?.targetItemId,
         targetProgramName: interpreted?.targetProgramName,
       }
     }
-    const clock = parseAtomicClockExpression(input.userInput)
-    return {
-      targetTime: this.parseDeleteTargetTime(input),
-      targetProgramName: this.extractDeleteTargetProgramName(input.userInput, clock?.matchedText),
-    }
+    return {}
   }
 
   private parseReplace(input: AgentSubmitInput): ReplaceSlots {
@@ -3359,38 +3258,7 @@ export class AtomicCommandCapability implements AgentCapability {
         selectedCandidateId: interpreted?.candidateId,
       }
     }
-    const clock = parseAtomicClockExpression(input.userInput)
-    const reverseReplace = this.extractReverseReplaceSlots(input.userInput, clock?.matchedText)
-    return {
-      targetTime: clock?.targetTime,
-      targetProgramName: reverseReplace?.targetProgramName
-        ?? this.extractReplaceTargetProgramName(input.userInput, clock?.matchedText),
-      replacementHint: reverseReplace?.replacementHint
-        ?? this.extractReplaceProgramHint(input.userInput, clock?.matchedText),
-    }
-  }
-
-  private inferIntent(userInput: string): AtomicCommandIntent | undefined {
-    if (this.looksLikeBatchMove(userInput)) return 'batch_move'
-    if (this.looksLikeBatchDelete(userInput)) return 'batch_delete'
-    if (/(移动|移到|调到|调整到|改到|挪到|放到|排到|后移|前移|挪|推迟|推后|延后|提前|顺延|延迟|move)/iu.test(userInput)) return 'move'
-    if (/(插入|添加|安排|排入|放置|加一条|加个|insert|add)/iu.test(userInput)) return 'insert'
-    if (/(替换|换成|改成|改为|换播|replace)/iu.test(userInput)) return 'replace'
-    if (/(删除|删掉|移除|去掉|撤掉|delete|remove)/iu.test(userInput)) return 'delete'
-    if (/(校验|检查|体检|有没有问题|问题|冲突|重叠|validate|check)/iu.test(userInput)) return 'validate'
-    if (/(查询|查找|查看|看看|有哪些|是什么|在哪里|在哪儿|在哪|哪里|什么时候播|几点播|播出时间|排在几点|当前节目单|当前播单|候选|节目库|素材库|query|find|show|list)/iu.test(userInput)) return 'query'
-    return undefined
-  }
-
-  private looksLikeBatchMove(userInput: string): boolean {
-    return Boolean(parseAtomicTimeRange(userInput))
-      && /(移动|移到|调到|调整到|改到|挪到|放到|排到|后移|前移|挪|推迟|推后|延后|提前|顺延|延迟|move)/iu.test(userInput)
-      && /(整体|批量|全部|范围|这段|这一段|节目|programmes?|items?)/iu.test(userInput)
-  }
-
-  private looksLikeBatchDelete(userInput: string): boolean {
-    return Boolean(parseAtomicTimeRange(userInput))
-      && /(删除|删掉|移除|去掉|撤掉|delete|remove)/iu.test(userInput)
+    return {}
   }
 
   private buildQueryCommand(input: AgentSubmitInput): QueryCommandPlan {
@@ -3403,34 +3271,6 @@ export class AtomicCommandCapability implements AgentCapability {
         keyword: interpreted.keyword ?? interpreted.slots?.programHint,
       }
     }
-    const clock = parseAtomicClockExpression(input.userInput)
-    const keyword = this.extractQueryKeyword(input.userInput, clock?.matchedText)
-
-    if (/(候选|节目库|素材库|可用|可播|candidate|library|available)/iu.test(input.userInput)) {
-      return {
-        intent: 'query',
-        queryKind: 'candidate_lookup',
-        keyword,
-      }
-    }
-
-    if (clock?.targetTime) {
-      return {
-        intent: 'query',
-        queryKind: 'time_lookup',
-        targetTime: normalizeDateTime(input.date, clock.targetTime),
-        keyword,
-      }
-    }
-
-    if (keyword) {
-      return {
-        intent: 'query',
-        queryKind: 'program_lookup',
-        keyword,
-      }
-    }
-
     return {
       intent: 'query',
       queryKind: 'schedule_summary',
@@ -3444,6 +3284,14 @@ export class AtomicCommandCapability implements AgentCapability {
     runtime: AgentCapabilityRuntime,
   ): AgentQueryResult {
     if (command.queryKind === 'candidate_lookup') {
+      runtime.trace.record('planning', '调用节目查询服务查找候选', {
+        intent: 'query',
+        queryKind: command.queryKind,
+        keyword: command.keyword,
+        searchAlternatives: input.interpretation?.searchAlternatives,
+        playlistType: context.playlistType,
+        noMutation: true,
+      })
       const candidatePool = command.keyword
         ? this.resolveCandidatePool(context.programCandidates, command.keyword, input, runtime)
         : {
@@ -3465,7 +3313,8 @@ export class AtomicCommandCapability implements AgentCapability {
     }
 
     if (command.queryKind === 'time_lookup' && command.targetTime) {
-      const scheduleItems = this.resolveMoveTargets(context, command.targetTime)
+      const targetTime = this.normalizeTargetTimeForContext(context, command.targetTime, input.userInput) ?? command.targetTime
+      const scheduleItems = this.resolveMoveTargets(context, targetTime)
       return {
         kind: command.queryKind,
         queryText: input.userInput,
@@ -3473,7 +3322,7 @@ export class AtomicCommandCapability implements AgentCapability {
         totalCount: scheduleItems.length,
         scheduleItems,
         candidates: [],
-        targetTime: command.targetTime,
+        targetTime,
         keyword: command.keyword,
       }
     }
@@ -3578,6 +3427,78 @@ export class AtomicCommandCapability implements AgentCapability {
       const endTs = new Date(normalizeDateTime(context.date, item.endTime)).getTime()
       return startTs <= targetTs && targetTs < endTs
     })
+  }
+
+  private normalizeMoveSlotsForContext(context: SchedulingContext, moveSlots: MoveSlots, userInput: string): MoveSlots {
+    return {
+      ...moveSlots,
+      targetTime: this.normalizeTargetTimeForContext(context, moveSlots.targetTime, userInput),
+      newStartTime: this.normalizeTargetTimeForContext(context, moveSlots.newStartTime, userInput),
+    }
+  }
+
+  private normalizeTargetTimeForContext(
+    context: SchedulingContext,
+    targetTime: string | undefined,
+    userInput: string,
+  ): string | undefined {
+    if (!targetTime) return undefined
+    const clock = toClockText(targetTime)
+    if (context.playlistType !== 'rotation') return clock
+    const relativeClock = this.extractRotationRelativeClockFromInput(userInput)
+    if (!relativeClock || relativeClock === clock) return clock
+
+    const rawHit = this.findScheduleItemsAtClockBoundaryInclusive(context, relativeClock).length > 0
+    const currentHit = this.findScheduleItemsAtClockBoundaryInclusive(context, clock).length > 0
+    const durationSeconds = context.rotationDurationSeconds
+    const rawSeconds = this.clockTextToSeconds(relativeClock)
+    const clockSeconds = this.clockTextToSeconds(clock)
+
+    if (rawHit && !currentHit) return relativeClock
+    if (
+      typeof durationSeconds === 'number'
+      && durationSeconds > 0
+      && clockSeconds > durationSeconds
+      && rawSeconds <= durationSeconds
+    ) {
+      return relativeClock
+    }
+    return clock
+  }
+
+  private extractRotationRelativeClockFromInput(userInput: string): string | null {
+    const normalized = userInput.replace(/\s+/g, '')
+    if (/(下午|午后|傍晚|晚间|晚上|夜间|今晚|明晚|13点|13时|十四点|十五点|十六点|十七点|十八点|十九点|二十点|二十一点|二十二点|二十三点)/u.test(normalized)) {
+      return null
+    }
+    const match = normalized.match(/(\d{1,2})(?:点|时)(?:(\d{1,2})分?)?/)
+    if (!match?.[1]) return null
+    const hour = Number(match[1])
+    const minute = Number(match[2] ?? '0')
+    if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 11 || minute < 0 || minute > 59) {
+      return null
+    }
+    return `${`${hour}`.padStart(2, '0')}:${`${minute}`.padStart(2, '0')}:00`
+  }
+
+  private findScheduleItemsAtClockBoundaryInclusive(context: SchedulingContext, targetTime: string): ScheduleItemSnapshot[] {
+    const targetDateTime = normalizeDateTime(context.date, targetTime)
+    const targetTs = new Date(targetDateTime).getTime()
+    if (!Number.isFinite(targetTs)) return []
+    return context.scheduleItems.filter((item) => {
+      const startTs = new Date(normalizeDateTime(context.date, item.startTime)).getTime()
+      const endTs = new Date(normalizeDateTime(context.date, item.endTime)).getTime()
+      return startTs <= targetTs && targetTs <= endTs
+    })
+  }
+
+  private clockTextToSeconds(value: string): number {
+    const [rawHour = '0', rawMinute = '0', rawSecond = '0'] = toClockText(value).split(':')
+    const hour = Number(rawHour)
+    const minute = Number(rawMinute)
+    const second = Number(rawSecond)
+    if (!Number.isFinite(hour) || !Number.isFinite(minute) || !Number.isFinite(second)) return Number.POSITIVE_INFINITY
+    return hour * 3600 + minute * 60 + second
   }
 
   private resolveTargets(
@@ -3809,9 +3730,7 @@ export class AtomicCommandCapability implements AgentCapability {
       })
     }
 
-    const interpretedTargetTime = input.interpretation?.slots?.targetTime
-    const parsedTargetTime = parseAtomicClockExpression(input.userInput)?.targetTime
-    const targetTime = interpretedTargetTime ?? parsedTargetTime
+    const targetTime = input.interpretation?.slots?.targetTime
     if (targetTime && !targetOptions.some((option) => toClockText(option.startTime) === targetTime)) {
       return this.buildInvalidPendingTargetSelectionResult(input, runtime, pendingTask, {
         targetTime,
@@ -3866,9 +3785,7 @@ export class AtomicCommandCapability implements AgentCapability {
       return collectedTargetId
     }
 
-    const interpretedTargetTime = input.interpretation?.slots?.targetTime
-    const parsedTargetTime = parseAtomicClockExpression(input.userInput)?.targetTime
-    const targetTime = interpretedTargetTime ?? parsedTargetTime
+    const targetTime = input.interpretation?.slots?.targetTime
     if (targetTime) {
       const matchedByTime = targetOptions.find((option) => toClockText(option.startTime) === targetTime)
       if (matchedByTime) return matchedByTime.itemId
@@ -4167,53 +4084,14 @@ export class AtomicCommandCapability implements AgentCapability {
 
   private parseInsert(input: AgentSubmitInput): InsertSlots {
     const interpreted = this.readInterpretedSlots(input)
-    const clock = parseAtomicClockExpression(input.userInput)
-    const isTimeOnlyFollowUp = this.isInsertTimeOnlyFollowUp(input.userInput, clock?.matchedText)
-    const textProgramHint = isTimeOnlyFollowUp
-      ? undefined
-      : this.extractInsertProgramHint(input.userInput, clock?.matchedText)
     if (input.interpretation?.intent === 'insert') {
-      const shouldPreservePendingProgramHint = Boolean(
-        input.pendingTask
-        && interpreted?.targetTime
-        && !interpreted?.programHint
-      )
       return {
-        targetTime: interpreted?.targetTime ?? clock?.targetTime,
-        programHint: isTimeOnlyFollowUp || shouldPreservePendingProgramHint
-          ? undefined
-          : this.cleanInsertProgramHint(interpreted?.programHint) ?? textProgramHint,
+        targetTime: interpreted?.targetTime,
+        programHint: this.cleanInsertProgramHint(interpreted?.programHint),
         selectedCandidateId: interpreted?.candidateId,
       }
     }
-    return {
-      targetTime: clock?.targetTime,
-      programHint: textProgramHint,
-    }
-  }
-
-  private extractInsertProgramHint(userInput: string, clockText?: string): string | undefined {
-    let normalized = userInput.replace(/\s+/g, '')
-    if (clockText) normalized = normalized.replace(clockText, '')
-    const match = /(?:插入|添加|安排|排入|放置|加一条|加个)(?:节目|栏目|内容)?(.+)$/u.exec(normalized)
-    const raw = (match?.[1] ?? normalized)
-      .replace(/^(?:在|到|给|把|一个|一条|一段|节目|栏目|内容)+/u, '')
-      .replace(/(?:节目|栏目|内容)$/u, '')
-      .trim()
-    return this.cleanInsertProgramHint(raw)
-  }
-
-  private isInsertTimeOnlyFollowUp(userInput: string, clockText?: string): boolean {
-    const clock = clockText ? { matchedText: clockText } : parseAtomicClockExpression(userInput)
-    if (!clock) return false
-    const residue = userInput
-      .replace(/\s+/g, '')
-      .replace(clock.matchedText, '')
-      .replace(/[，。！？；：、,.!?;:]/gu, '')
-      .replace(/^(?:就|那|那就|好的|好|可以|行|定|放|排|安排|插|插入|在|到|吧|啊|呀|呢)+/u, '')
-      .replace(/(?:就|吧|啊|呀|呢|可以|行|好的|好)$/u, '')
-      .trim()
-    return residue.length === 0
+    return {}
   }
 
   private cleanInsertProgramHint(value?: string): string | undefined {
@@ -4221,88 +4099,18 @@ export class AtomicCommandCapability implements AgentCapability {
       ?.replace(/\s+/g, ' ')
       .replace(/[，。！？；：、,.!?;:]/gu, '')
       .replace(/^(?:请|帮我|帮忙|在|到|给|把|将|的|一个|一条|一段|节目|栏目|内容|素材|候选|可用|可播)+/u, '')
+      .replace(/^(?:一期|一集|最新一期|最新一集|最大一期|最大一集|期数最大的一期|期数最高的一期)+/u, '')
+      .replace(/(?:期数最大(?:的)?|期数最高(?:的)?|最大期(?:的)?|最高期(?:的)?|最新(?:一)?期(?:的)?|最新(?:一)?集(?:的)?|最大(?:的)?一期|最大(?:的)?一集)/gu, '')
       .replace(/(?:节目|栏目|内容|素材|候选|可用|可播|一下)$/u, '')
       .trim()
     if (!cleaned || cleaned.length < 2) return undefined
-    if (/^(?:就|那|那就|吧|啊|呀|呢|好|好的|可以|行|定|放|排|安排|插|插入)+$/u.test(cleaned)) return undefined
+    if (this.isAtomicActionOnlyHint(cleaned)) return undefined
     return cleaned
   }
 
-  private extractDeleteTargetProgramName(userInput: string, clockText?: string): string | undefined {
-    const quoted = /[《「『](.+?)[》」』]/u.exec(userInput)?.[1]?.trim()
-    if (quoted) return quoted
-
-    let normalized = userInput.replace(/\s+/g, '')
-    if (clockText) normalized = normalized.replace(clockText, '')
-    const match = /(?:删除|删掉|移除|去掉|撤掉|delete|remove)(?:节目|栏目|内容|素材)?(.+)$/iu.exec(normalized)
-    const raw = (match?.[1] ?? '')
-      .replace(/^(?:把|将|这个|那个|当前|今天|今日|播单里|节目单里|的)+/u, '')
-      .replace(/(?:这个|那个|当前|今天|今日|的)?(?:节目|栏目|内容|素材|条目|这一条|这条|那条)$/u, '')
-      .replace(/[，。！？；：、,.!?;:]/gu, '')
-      .trim()
-    if (!raw || /^(?:节目|栏目|内容|素材|条目|这条|那条|当前|目标)$/u.test(raw)) return undefined
-    return raw
-  }
-
-  private extractReplaceTargetProgramName(userInput: string, clockText?: string): string | undefined {
-    const quoted = /[《「『](.+?)[》」』]/u.exec(userInput)?.[1]?.trim()
-    if (quoted) return quoted
-
-    let normalized = userInput.replace(/\s+/g, '')
-    if (clockText) normalized = normalized.replace(clockText, '')
-    const beforeReplacement = normalized.split(/替换成|替换为|换成|改成|改为|换播|替换/iu)[0] ?? ''
-    const raw = beforeReplacement
-      .replace(/^(?:请|帮我|帮忙|把|将|在|到|给|这个|那个|当前|今天|今日|播单里|节目单里|的)+/u, '')
-      .replace(/(?:这个|那个|当前|今天|今日|的)?(?:节目|栏目|内容|素材|条目|这条|那条)$/u, '')
-      .replace(/[，。！？；：、,.!?;:]/gu, '')
-      .trim()
-    if (!raw || /^(?:节目|栏目|内容|素材|条目|这条|那条|当前|目标)$/u.test(raw)) return undefined
-    return raw
-  }
-
-  private extractReverseReplaceSlots(
-    userInput: string,
-    clockText?: string,
-  ): { targetProgramName?: string, replacementHint?: string } | null {
-    let normalized = userInput.replace(/\s+/g, '')
-    if (clockText) normalized = normalized.replace(clockText, '')
-    const match = /^(?:请|帮我|帮忙)?(?:用|拿|以)(.+?)(?:替换|换掉)(.+)$/u.exec(normalized)
-    if (!match) return null
-    const replacementHint = match[1]
-      ?.replace(/[，。！？；：、,.!?;:]/gu, '')
-      .trim()
-    const targetProgramName = match[2]
-      ?.replace(/^(?:把|将|这个|那个|当前|今天|今日|播单里|节目单里|的)+/u, '')
-      .replace(/(?:这个|那个|当前|今天|今日|的)?(?:节目|栏目|内容|素材|条目|这条|那条)$/u, '')
-      .replace(/[，。！？；：、,.!?;:]/gu, '')
-      .trim()
-    return {
-      targetProgramName: targetProgramName || undefined,
-      replacementHint: replacementHint || undefined,
-    }
-  }
-
-  private extractReplaceProgramHint(userInput: string, clockText?: string): string | undefined {
-    let normalized = userInput.replace(/\s+/g, '')
-    if (clockText) normalized = normalized.replace(clockText, '')
-    const match = /(?:替换成|替换为|换成|改成|改为|换播|替换)(?:节目|栏目|内容)?(.+)$/u.exec(normalized)
-    const raw = (match?.[1] ?? normalized)
-      .replace(/^(?:把|将|在|到|给|的|节目|栏目|内容)+/u, '')
-      .replace(/^(?:替换成|替换为|换成|改成|改为|换播|替换)+/u, '')
-      .replace(/(?:节目|栏目|内容)$/u, '')
-      .trim()
-    return raw || undefined
-  }
-
-  private extractQueryKeyword(userInput: string, clockText?: string): string | undefined {
-    let normalized = userInput.replace(/\s+/g, '')
-    if (clockText) normalized = normalized.replace(clockText, '')
-    const raw = normalized
-      .replace(/^(?:请|帮我|帮忙|查一下|查询|查找|查看|看看|当前|现在|一个)+/u, '')
-      .replace(/(?:当前节目单|当前播单|节目单|播单|节目库|素材库|候选库|候选|可用|可播|有哪些|是什么|有什么|在哪里|在哪儿|在哪|什么时候播|几点播|播在几点|排在几点|播出时间|播出位置|里面|的节目|节目|栏目|内容|情况)+/gu, '')
-      .replace(/[，。！？；：、,.!?;:]/gu, '')
-      .trim()
-    return raw || undefined
+  private isAtomicActionOnlyHint(value: string): boolean {
+    const normalized = value.replace(/\s+/g, '')
+    return /^(?:就|那|那就|吧|啊|呀|呢|好|好的|可以|行|定|放|排|安排|插|插入|替换|替换成|替换为|换成|换到|改成|改为|改到|改在|换|改|成|为)+$/u.test(normalized)
   }
 
   private resolveInsertCandidates(candidates: AgentProgramCandidate[], programHint: string): AgentProgramCandidate[] {
@@ -4363,30 +4171,29 @@ export class AtomicCommandCapability implements AgentCapability {
     })
 
     const resolved = Array.from(merged.values())
-    runtime.trace.record('planning', 'Candidate search retried with rewritten keywords.', {
+    runtime.trace.record('planning', 'Candidate search retried with LLM-provided alternatives.', {
       originalKeyword: primaryHint,
-      matchedBy: resolved.length > 0 ? 'rewritten_keywords' : 'none',
+      matchedBy: resolved.length > 0 ? 'llm_alternatives' : 'none',
       attempts,
     })
 
     return {
       candidates: resolved,
       attempts,
-      matchedBy: resolved.length > 0 ? 'rewritten_keywords' : 'none',
+      matchedBy: resolved.length > 0 ? 'llm_alternatives' : 'none',
     }
   }
 
   private buildCandidateRetryKeywords(
     primaryHint: string,
     input: AgentSubmitInput,
-  ): Array<{ keyword: string; source: 'llm_alternative' | 'fallback' }> {
+  ): Array<{ keyword: string; source: 'llm_alternative' }> {
     const normalizedPrimary = this.normalizeSearchText(primaryHint)
     const keywords = [
       ...(input.interpretation?.searchAlternatives ?? []).map((keyword) => ({ keyword, source: 'llm_alternative' as const })),
-      ...this.buildFallbackSearchAlternatives(primaryHint).map((keyword) => ({ keyword, source: 'fallback' as const })),
     ]
     const seen = new Set<string>([normalizedPrimary])
-    const result: Array<{ keyword: string; source: 'llm_alternative' | 'fallback' }> = []
+    const result: Array<{ keyword: string; source: 'llm_alternative' }> = []
     keywords.forEach((item) => {
       const keyword = item.keyword.trim()
       const normalized = this.normalizeSearchText(keyword)
@@ -4411,22 +4218,9 @@ export class AtomicCommandCapability implements AgentCapability {
   }
 
   private buildInsertSearchFacets(programHint: string): string[] {
-    const normalized = this.normalizeSearchText(programHint)
-    const phraseFacets = [
-      normalized.includes('城市形象') ? '城市形象' : '',
-      normalized.includes('春日花路') ? '春日花路' : '',
-      normalized.includes('上海') ? '上海' : '',
-      normalized.includes('旅游景点') ? '旅游景点' : '',
-      normalized.includes('景点') ? '景点' : '',
-      normalized.includes('宣传片') ? '宣传片' : '',
-      normalized.includes('短片') ? '短片' : '',
-      normalized.includes('视频') ? '视频' : '',
-      normalized.includes('无节目编号') ? '无节目编号' : '',
-    ].map((facet) => this.normalizeSearchText(facet)).filter((facet) => facet.length > 1)
-    const fallbackFacets = buildAgentSearchFacets(programHint)
+    return buildAgentSearchFacets(programHint)
       .map((facet) => this.normalizeSearchText(facet))
       .filter((facet) => facet.length > 1)
-    return Array.from(new Set(phraseFacets.length > 0 ? phraseFacets : fallbackFacets))
   }
 
   private buildCandidateSearchRetryPlan(
@@ -4442,7 +4236,6 @@ export class AtomicCommandCapability implements AgentCapability {
     const llmAlternatives = input.interpretation?.searchAlternatives ?? []
     const suggestedKeywords = Array.from(new Set([
       ...llmAlternatives,
-      ...this.buildFallbackSearchAlternatives(keyword),
       ...searchedFacets,
     ].map((item) => item.trim()).filter((item) => item.length >= 2))).slice(0, 5)
 
@@ -4455,21 +4248,6 @@ export class AtomicCommandCapability implements AgentCapability {
       suggestedKeywords,
       nextAction: 'rewrite_keywords_and_retry',
     }
-  }
-
-  private buildFallbackSearchAlternatives(keyword: string): string[] {
-    const normalized = keyword.replace(/\s+/g, '').trim()
-    const suggestions: string[] = []
-    if (!normalized) return suggestions
-    if (normalized.includes('上海')) suggestions.push('上海 新闻', '上海 早间 新闻')
-    if (normalized.includes('早新闻')) suggestions.push('早间新闻', '东方卫视 早新闻')
-    if (normalized.includes('看东方')) suggestions.push('看东方', '东方卫视 看东方')
-    if (normalized.includes('东方新闻')) suggestions.push('东方新闻', '东方卫视 新闻')
-    if (normalized.includes('城市形象')) suggestions.push('城市形象 短片', '城市宣传片')
-    if (normalized.includes('春日花路')) suggestions.push('春日花路', '春日 花路 短片')
-    if (normalized.includes('景点')) suggestions.push('上海 景点 视频', '旅游景点 短片')
-    suggestions.push(...buildAgentSearchFacets(keyword))
-    return suggestions
   }
 
   private buildValidationSourceEvidenceIssues(context: SchedulingContext): AgentConstraintIssue[] {
@@ -4656,6 +4434,29 @@ export class AtomicCommandCapability implements AgentCapability {
     targetTime?: string,
     replacementTarget?: ScheduleItemSnapshot,
   ): Promise<CandidateSelectionResult> {
+    const latestIssueSelection = this.selectLatestIssueCandidateIfRequested(
+      input,
+      context,
+      commandIntent,
+      candidates,
+      targetTime,
+      replacementTarget,
+    )
+    if (latestIssueSelection) {
+      runtime.trace.record(
+        latestIssueSelection.candidate ? 'planning' : 'needs_selection',
+        latestIssueSelection.candidate
+          ? '用户明确要求期数最大，按候选期数选择最新一期。'
+          : '用户明确要求期数最大，但最新一期仍有多个版本，需要人工选择。',
+        {
+          commandIntent,
+          candidateCount: candidates.length,
+          diagnostics: latestIssueSelection.diagnostics,
+        },
+      )
+      return latestIssueSelection
+    }
+
     const sequenceSelection = this.tvSequenceSelector.selectBestCandidate(context, candidates)
     if (sequenceSelection.candidateOptions?.length) {
       runtime.trace.record('needs_selection', '电视播单续集候选存在多个精确匹配，等待编排人员选择。', {
@@ -4767,53 +4568,322 @@ export class AtomicCommandCapability implements AgentCapability {
       return assessment.hardBlockCodes.length === 0
     })
     const judgeCandidates = playableJudgeCandidates.length > 0 ? playableJudgeCandidates : rawJudgeCandidates
+    const tvSequenceEvidence = this.tvSequenceSelector.buildEvidence(context, judgeCandidates)
+    runtime.trace.record('planning', '电视播单顺播证据检查', {
+      commandIntent,
+      candidateCount: judgeCandidates.length,
+      evidence: tvSequenceEvidence,
+    })
     if (judgeCandidates.length > 1) {
-      runtime.trace.record('needs_selection', '候选判断前发现多个可用候选，等待编排人员选择。', {
+      runtime.trace.record('planning', '候选决策前发现多个可用候选，调用 LLM 在候选中决策。', {
         commandIntent,
         candidateCount: judgeCandidates.length,
         candidateOptionIds: judgeCandidates.slice(0, 8).map((candidate) => candidate.id),
+        tvSequenceEvidence,
       })
-      return {
-        candidate: null,
-        candidateOptions: judgeCandidates,
-        diagnostics: {
-          method: 'candidate_judge',
-          source: 'fallback',
-          candidateCount: judgeCandidates.length,
-          candidateOptionIds: judgeCandidates.slice(0, 8).map((candidate) => candidate.id),
-          reason: '候选库里有多个可用节目，不能替编排人员自动选择其中一个。',
-        },
-      }
     }
     const judgePool = this.prepareCandidateJudgePool(judgeCandidates, input, context, commandIntent, targetTime, replacementTarget)
-    const candidate = await runtime.candidateJudge.selectBestCandidate({
+    const decision = await runtime.candidateJudge.selectBestCandidate({
       userInput: input.userInput,
       playlistType: context.playlistType,
       commandIntent,
       candidates: judgePool.candidates,
       context,
       professionalAssessments: judgePool.assessments,
+      tvSequenceEvidence,
+    })
+    // LLM 决策结果记录 + 分流（auto_select / needs_clarification / unable_to_decide）
+    const selectedName = decision.candidate?.programName
+      ?? decision.candidate?.instanceName
+      ?? ''
+    runtime.trace.record('planning', 'LLM 候选决策完成', {
+      commandIntent,
+      candidateCount: judgeCandidates.length,
+      selectedCandidateId: decision.candidate?.id ?? null,
+      selectedCandidateName: selectedName,
+      reasoning: decision.reasoning,
+      considerations: decision.considerations ?? [],
+      decisionType: decision.decisionType,
+    })
+
+    // auto_select：本地后置校验顺播硬约束（C17）
+    if (decision.decisionType === 'auto_select' && decision.candidate) {
+      const sequenceViolation = this.tvSequenceSelector.validateCandidateAgainstSequence(
+        decision.candidate,
+        tvSequenceEvidence,
+      )
+      if (sequenceViolation) {
+        runtime.trace.record('needs_selection', 'LLM 选择的候选违反顺播硬约束，已拒绝。', {
+          commandIntent,
+          violation: sequenceViolation,
+          selectedCandidateId: decision.candidate.id,
+        })
+        return {
+          candidate: null,
+          candidateOptions: judgeCandidates,
+          diagnostics: {
+            method: 'candidate_judge_llm',
+            source: 'none',
+            decisionType: decision.decisionType,
+            failureReason: `顺播校验失败：${sequenceViolation}`,
+            candidateCount: judgeCandidates.length,
+            candidateOptionIds: judgeCandidates.slice(0, 8).map((candidate) => candidate.id),
+            reason: `LLM 选择的候选违反顺播规则（${sequenceViolation}），请手动选择。`,
+          },
+        }
+      }
+      return {
+        candidate: decision.candidate,
+        diagnostics: {
+          method: 'candidate_judge_llm',
+          source: 'fallback',
+          selectedCandidateId: decision.candidate.id,
+          selectedProgramCode: decision.candidate.programCode,
+          decisionType: decision.decisionType,
+          reasoning: decision.reasoning,
+          considerations: decision.considerations,
+          candidateCount: judgeCandidates.length,
+          professionalAssessment: judgePool.assessments[decision.candidate.id]
+            ?? professionalAssessmentByCandidateId.get(decision.candidate.id)
+            ?? this.buildProfessionalAssessment(decision.candidate, input, context, commandIntent, targetTime, replacementTarget),
+          reason: decision.reasoning,
+        },
+      }
+    }
+
+    // needs_clarification / unable_to_decide：进入 needs_selection（暴露失败，不本地兜底）
+    runtime.trace.record('needs_selection', 'LLM 候选决策需用户澄清或无法决策，等待编排人员选择。', {
+      commandIntent,
+      candidateCount: judgeCandidates.length,
+      decisionType: decision.decisionType,
+      failureReason: decision.reasoning,
     })
     return {
-      candidate,
+      candidate: null,
+      candidateOptions: decision.candidateOptions ?? judgeCandidates,
       diagnostics: {
-        method: 'candidate_judge',
-        source: candidate ? 'fallback' : 'none',
-        selectedCandidateId: candidate?.id,
-        selectedProgramCode: candidate?.programCode,
+        method: 'candidate_judge_llm',
+        source: 'none',
+        decisionType: decision.decisionType,
+        failureReason: decision.reasoning,
         candidateCount: judgeCandidates.length,
-        professionalAssessment: candidate
-          ? judgePool.assessments[candidate.id]
-            ?? professionalAssessmentByCandidateId.get(candidate.id)
-            ?? this.buildProfessionalAssessment(candidate, input, context, commandIntent, targetTime, replacementTarget)
-          : undefined,
-        reason: candidate
-          ? exactReplacementCandidates.length > 0
-            ? '替换命令存在精确节目名候选，因此只在精确候选内判断，避免自动改选相近节目。'
-            : '没有更强的顺播证据，因此由候选判断选择最贴合的内容。'
-          : '顺播检查和候选判断后，仍没有匹配到可用候选。',
+        candidateOptionIds: judgeCandidates.slice(0, 8).map((candidate) => candidate.id),
+        reason: decision.decisionType === 'unable_to_decide'
+          ? `LLM 候选决策失败：${decision.reasoning}。请在下方候选中选择。`
+          : `LLM 建议需用户确认：${decision.reasoning}。请在下方候选中选择。`,
       },
     }
+  }
+
+  private selectLatestIssueCandidateIfRequested(
+    input: AgentSubmitInput,
+    context: SchedulingContext,
+    commandIntent: 'insert' | 'replace',
+    candidates: AgentProgramCandidate[],
+    targetTime?: string,
+    replacementTarget?: ScheduleItemSnapshot,
+  ): CandidateSelectionResult | null {
+    if (!this.hasLatestIssueCue(input)) return null
+
+    const hintedBase = this.resolveLatestIssueBaseHint(input)
+    const normalizedBase = this.normalizeProgramSeriesTitle(hintedBase ?? '')
+    const issueSourceCandidates = this.resolveLatestIssueSourceCandidates(candidates, context, normalizedBase)
+    const withIssues = issueSourceCandidates
+      .map((candidate) => ({
+        candidate,
+        issue: this.extractCandidateIssueNumber(candidate),
+        seriesTitle: this.normalizeProgramSeriesTitle(candidate.programName || candidate.instanceName || ''),
+      }))
+      .filter((item): item is { candidate: AgentProgramCandidate, issue: number, seriesTitle: string } => typeof item.issue === 'number')
+
+    if (!withIssues.length) {
+      return {
+        candidate: null,
+        diagnostics: {
+          method: 'candidate_judge',
+          source: 'none',
+          candidateCount: issueSourceCandidates.length,
+          reason: '用户明确要求期数最大，但候选节目里没有可识别的期数信息。',
+        },
+      }
+    }
+
+    const exactSeries = normalizedBase
+      ? withIssues.filter((item) => item.seriesTitle === normalizedBase)
+      : []
+    const issuePool = exactSeries.length > 0 ? exactSeries : withIssues
+    const maxIssue = issuePool.reduce((max, item) => Math.max(max, item.issue), 0)
+    const maxIssueCandidates = this.dedupeLatestIssueCandidates(
+      issuePool.filter((item) => item.issue === maxIssue).map((item) => item.candidate),
+    )
+
+    if (maxIssueCandidates.length === 1) {
+      const candidate = maxIssueCandidates[0]!
+      return {
+        candidate,
+        diagnostics: {
+          method: 'explicit',
+          source: 'explicit',
+          selectedCandidateId: candidate.id,
+          selectedProgramCode: candidate.programCode,
+          candidateCount: issueSourceCandidates.length,
+          selectedSequence: maxIssue,
+          seriesKey: hintedBase,
+          professionalAssessment: this.buildProfessionalAssessment(candidate, input, context, commandIntent, targetTime, replacementTarget),
+          reason: `用户明确要求期数最大，候选中只有《${candidate.programName}》符合最新一期。`,
+        },
+      }
+    }
+
+    return {
+      candidate: null,
+      candidateOptions: maxIssueCandidates,
+      diagnostics: {
+        method: 'explicit',
+        source: 'explicit',
+        candidateCount: issueSourceCandidates.length,
+        selectedSequence: maxIssue,
+        seriesKey: hintedBase,
+        candidateOptionIds: maxIssueCandidates.map((candidate) => candidate.id),
+        reason: `用户明确要求期数最大，但第 ${maxIssue} 期有多个候选版本，需要编排人员选择。`,
+      },
+    }
+  }
+
+  private hasLatestIssueCue(input: AgentSubmitInput): boolean {
+    const values = [
+      input.userInput,
+      input.interpretation?.keyword,
+      input.interpretation?.slots?.programHint,
+      input.interpretation?.slots?.replacementHint,
+      this.readStringSlot(input.pendingTask?.collectedSlots.programHint),
+      this.readStringSlot(input.pendingTask?.collectedSlots.replacementHint),
+    ].filter((value): value is string => Boolean(value))
+    return values.some((value) => /(?:期数最大|期数最高|最大期|最高期|最新一期|最新一集|最新的?一期|最新的?一集|最大的一期|最大的一集)/u.test(value.replace(/\s+/g, '')))
+  }
+
+  private resolveLatestIssueSourceCandidates(
+    candidates: AgentProgramCandidate[],
+    context: SchedulingContext,
+    normalizedBase: string,
+  ): AgentProgramCandidate[] {
+    const merged = new Map<string, AgentProgramCandidate>()
+    const addCandidate = (candidate: AgentProgramCandidate) => {
+      const key = candidate.id || candidate.programCode || candidate.programId || `${candidate.programName}:${candidate.issueNo ?? ''}:${candidate.duration}`
+      if (!merged.has(key)) merged.set(key, candidate)
+    }
+
+    candidates.forEach(addCandidate)
+    if (!normalizedBase) return Array.from(merged.values())
+
+    context.programCandidates.forEach((candidate) => {
+      const seriesTitle = this.normalizeProgramSeriesTitle(candidate.programName || candidate.instanceName || '')
+      if (seriesTitle === normalizedBase) addCandidate(candidate)
+    })
+
+    return Array.from(merged.values())
+  }
+
+  private resolveLatestIssueBaseHint(input: AgentSubmitInput): string | undefined {
+    return this.cleanLatestIssueSeriesHint(input.interpretation?.slots?.programHint)
+      ?? this.cleanLatestIssueSeriesHint(input.interpretation?.slots?.replacementHint)
+      ?? this.cleanLatestIssueSeriesHint(this.readStringSlot(input.pendingTask?.collectedSlots.programHint))
+      ?? this.cleanLatestIssueSeriesHint(this.readStringSlot(input.pendingTask?.collectedSlots.replacementHint))
+  }
+
+  private cleanLatestIssueSeriesHint(value?: string): string | undefined {
+    const cleaned = (this.cleanInsertProgramHint(value) ?? this.cleanReplacementHint(value))
+      ?.replace(/(?:期数最大(?:的)?|期数最高(?:的)?|最大期(?:的)?|最高期(?:的)?|最新(?:一)?期(?:的)?|最新(?:一)?集(?:的)?|最大(?:的)?一期|最大(?:的)?一集)/gu, '')
+      .replace(/第?\s*\d{1,4}\s*[期集]/gu, '')
+      .replace(/第?\s*[一二两三四五六七八九十百零〇]{1,8}\s*[期集]/gu, '')
+      .replace(/[《》"'“”]/gu, '')
+      .replace(/[，。！？；：、,.!?;:]/gu, '')
+      .replace(/\s+/g, '')
+      .trim()
+    if (!cleaned || cleaned.length < 2) return undefined
+    if (this.isAtomicActionOnlyHint(cleaned)) return undefined
+    return cleaned
+  }
+
+  private dedupeLatestIssueCandidates(candidates: AgentProgramCandidate[]): AgentProgramCandidate[] {
+    const seen = new Set<string>()
+    return candidates.filter((candidate) => {
+      const issue = this.extractCandidateIssueNumber(candidate) ?? ''
+      const title = this.normalizeSearchText(candidate.programName || candidate.instanceName || '')
+      const instance = this.normalizeSearchText(candidate.instanceName || candidate.programName || '')
+      const key = `${title}:${instance}:${issue}:${Math.round(candidate.duration)}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  private extractCandidateIssueNumber(candidate: AgentProgramCandidate): number | undefined {
+    const rawIssueNo = (candidate as AgentProgramCandidate & { issueNo?: unknown }).issueNo
+    if (typeof rawIssueNo === 'number' && Number.isFinite(rawIssueNo) && rawIssueNo > 0) return Math.floor(rawIssueNo)
+    if (typeof rawIssueNo === 'string') {
+      const parsed = this.parseIssueNumberText(rawIssueNo)
+      if (typeof parsed === 'number') return parsed
+    }
+    return this.parseIssueNumberText(candidate.programName)
+      ?? this.parseIssueNumberText(candidate.instanceName)
+  }
+
+  private parseIssueNumberText(value?: string): number | undefined {
+    if (!value) return undefined
+    const digitMatch = value.match(/(?:第)?\s*(\d{1,4})\s*[期集]/u)
+    if (digitMatch?.[1]) {
+      const parsed = Number(digitMatch[1])
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+    }
+    const chineseMatch = value.match(/第\s*([一二两三四五六七八九十百零〇]{1,8})\s*[期集]/u)
+    if (chineseMatch?.[1]) return this.parseSmallChineseNumber(chineseMatch[1])
+    return undefined
+  }
+
+  private parseSmallChineseNumber(value: string): number | undefined {
+    const digits: Record<string, number> = {
+      零: 0,
+      〇: 0,
+      一: 1,
+      二: 2,
+      两: 2,
+      三: 3,
+      四: 4,
+      五: 5,
+      六: 6,
+      七: 7,
+      八: 8,
+      九: 9,
+    }
+    if (value === '十') return 10
+    const hundredIndex = value.indexOf('百')
+    if (hundredIndex >= 0) {
+      const left = value.slice(0, hundredIndex)
+      const right = value.slice(hundredIndex + 1)
+      const hundreds = left ? digits[left] ?? 0 : 1
+      const rest = right ? this.parseSmallChineseNumber(right) ?? 0 : 0
+      const result = hundreds * 100 + rest
+      return result > 0 ? result : undefined
+    }
+    const tenIndex = value.indexOf('十')
+    if (tenIndex >= 0) {
+      const left = value.slice(0, tenIndex)
+      const right = value.slice(tenIndex + 1)
+      const tens = left ? digits[left] ?? 0 : 1
+      const ones = right ? digits[right] ?? 0 : 0
+      const result = tens * 10 + ones
+      return result > 0 ? result : undefined
+    }
+    return digits[value]
+  }
+
+  private normalizeProgramSeriesTitle(value: string): string {
+    return this.normalizeSearchText(value
+      .replace(/第?\s*\d+\s*[集期]/gu, '')
+      .replace(/第?\s*[一二两三四五六七八九十百零〇]+\s*[集期]/gu, '')
+      .replace(/\d+\s*(秒|分钟|分)/gu, '')
+      .replace(/[：:·\-—_].*$/u, ''))
   }
 
   private filterExactReplacementHintCandidates(
@@ -4839,7 +4909,7 @@ export class AtomicCommandCapability implements AgentCapability {
     )
     if (pendingHint) return pendingHint
 
-    return this.cleanReplacementHint(this.extractReplaceProgramHint(input.userInput))
+    return undefined
   }
 
   private cleanReplacementHint(value?: string): string | undefined {
@@ -4848,6 +4918,7 @@ export class AtomicCommandCapability implements AgentCapability {
       .replace(/^(?:节目|栏目|内容|素材)[:：]/u, '')
       .replace(/(?:节目|栏目|内容|素材)$/u, '')
       .trim()
+    if (cleaned && this.isAtomicActionOnlyHint(cleaned)) return undefined
     return cleaned || undefined
   }
 
@@ -4892,6 +4963,9 @@ export class AtomicCommandCapability implements AgentCapability {
   ): AgentResult | null {
     if (!options.candidates?.length) return null
     const recommendations = this.buildRecommendations(options.candidates, input.userInput, options.context)
+    const requestedHint = options.intent === 'insert'
+      ? this.readStringSlot(options.collectedSlots.programHint)
+      : this.readStringSlot(options.collectedSlots.replacementHint)
     const pendingTask = createPendingTask({
       intent: options.intent,
       phase: 'needs_selection',
@@ -4906,8 +4980,8 @@ export class AtomicCommandCapability implements AgentCapability {
       ? '我找到了多个都符合顺播规则的候选节目，还需要你确认要插入哪一个。'
       : '我找到了多个都符合顺播规则的候选节目，还需要你确认要替换成哪一个。'
     const genericMessage = options.intent === 'insert'
-      ? '我找到了多个可插入候选，还需要你确认要插入哪一个。'
-      : '我找到了多个可替换候选，还需要你确认要使用哪一个。'
+      ? `我按${requestedHint ? `《${requestedHint}》` : '这条线索'}找到了多个可插入候选，还需要你确认要插入哪一个。`
+      : `我按${requestedHint ? `《${requestedHint}》` : '这条线索'}找到了多个可替换候选，还需要你确认要使用哪一个。`
     const message = options.diagnostics.method === 'tv_sequence' ? sequenceMessage : genericMessage
 
     return {
@@ -6174,6 +6248,16 @@ export class AtomicCommandCapability implements AgentCapability {
   }
 
   private isRelevantPendingContextSourceChange(pendingTask: AgentPendingTask, sourceKey: string): boolean {
+    if (pendingTask.phase === 'needs_clarification') {
+      if (
+        sourceKey === 'candidates'
+        && this.canRefreshCandidatesWhileClarifying(pendingTask)
+      ) {
+        return false
+      }
+      return ['today', 'constraints'].includes(sourceKey)
+    }
+
     if (
       pendingTask.phase === 'needs_selection'
       && sourceKey === 'candidates'
@@ -6190,6 +6274,20 @@ export class AtomicCommandCapability implements AgentCapability {
       return ['today', 'constraints', 'policy'].includes(sourceKey)
     }
     return ['today', 'constraints', 'policy'].includes(sourceKey)
+  }
+
+  private canRefreshCandidatesWhileClarifying(pendingTask: AgentPendingTask): boolean {
+    if (pendingTask.intent !== 'insert' && pendingTask.intent !== 'replace' && pendingTask.intent !== 'query') {
+      return false
+    }
+    const hasCandidateCue = Boolean(
+      this.readStringSlot(pendingTask.collectedSlots.candidateId)
+      || this.readStringSlot(pendingTask.collectedSlots.programHint)
+      || this.readStringSlot(pendingTask.collectedSlots.replacementHint),
+    )
+    if (hasCandidateCue) return false
+    return pendingTask.missingSlots.includes('programHint')
+      || pendingTask.missingSlots.includes('replacementHint')
   }
 
   private describePendingContextSourceChanges(
@@ -6366,8 +6464,14 @@ export class AtomicCommandCapability implements AgentCapability {
       }
     }
     const userInput = typeof input === 'string' ? input : input.userInput
-    const ordinalMatch = /第?([一二三123])个?/u.exec(userInput.trim())
+    const normalized = userInput.replace(/\s+/g, '')
+    if (parseAtomicClockExpression(userInput) && !/(?:候选|方案|选|用|就|第[一二三123]个?|[一二三123](?:个|号|项|条))/u.test(normalized)) {
+      return undefined
+    }
+    const ordinalMatch = /(?:第([一二三123])个?|选(?:第)?([一二三123])(?:个|号|项|条)?|用(?:第)?([一二三123])(?:个|号|项|条)?|就(?:第)?([一二三123])(?:个|号|项|条)?|([一二三123])(?:个|号|项|条))/u.exec(normalized)
     if (!ordinalMatch) return undefined
+    const ordinal = ordinalMatch.slice(1).find((item): item is string => Boolean(item))
+    if (!ordinal) return undefined
     const indexMap: Record<string, number> = {
       一: 0,
       '1': 0,
@@ -6376,7 +6480,7 @@ export class AtomicCommandCapability implements AgentCapability {
       三: 2,
       '3': 2,
     }
-    const index = indexMap[ordinalMatch[1]!]
+    const index = indexMap[ordinal]
     return typeof index === 'number' ? pendingTask.recommendations?.[index]?.candidateId : undefined
   }
 

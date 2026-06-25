@@ -278,6 +278,78 @@ const getStringList = (value: unknown): string[] =>
     ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
     : []
 
+const getDetailNumber = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) ? value : undefined
+
+const formatDurationMsText = (value: unknown): string => {
+  const ms = getDetailNumber(value)
+  if (typeof ms !== 'number') return ''
+  if (ms >= 1000) {
+    const seconds = ms / 1000
+    return `${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(2)}秒`
+  }
+  return `${Math.max(0, Math.round(ms))}毫秒`
+}
+
+const formatCountText = (value: unknown): string => {
+  const count = getDetailNumber(value)
+  if (typeof count !== 'number') return ''
+  return Math.round(count).toLocaleString('zh-CN')
+}
+
+const formatEvidenceBudgetPair = (value: unknown, label: string): string => {
+  const record = toDetailMap(value)
+  if (!record) return ''
+  const included = getDetailNumber(record.included)
+  const total = getDetailNumber(record.total)
+  if (typeof included !== 'number' && typeof total !== 'number') return ''
+  const truncated = record.truncated === true
+  const countText = typeof included === 'number' && typeof total === 'number'
+    ? `${included}/${total}`
+    : `${included ?? total}`
+  return `${label}${countText}${truncated ? '，已截取重点' : ''}`
+}
+
+const formatAgentRunTraceText = (details?: DetailMap): string => {
+  const summary = toDetailMap(details?.agentRunTraceSummary)
+  if (!summary) return ''
+
+  const intent = typeof summary.intent === 'string' ? summary.intent : ''
+  const status = typeof summary.status === 'string' ? summary.status : ''
+  const pendingPhase = typeof summary.pendingPhase === 'string' ? summary.pendingPhase : ''
+  const llmCallCount = getDetailNumber(summary.llmCallCount)
+  const llmDurationText = formatDurationMsText(summary.llmTotalDurationMs)
+  const llmPromptCharText = formatCountText(summary.llmPromptCharCount)
+  const totalDurationText = formatDurationMsText(summary.totalElapsedMs)
+  const recommendationCount = getDetailNumber(summary.recommendationCount)
+  const affectedItemCount = getDetailNumber(summary.affectedItemCount)
+  const issueCodes = getStringList(summary.issueCodes).slice(0, 2)
+  const evidenceBudget = toDetailMap(summary.evidenceBudget)
+  const evidenceText = [
+    formatEvidenceBudgetPair(evidenceBudget?.scheduleItems, '播单'),
+    formatEvidenceBudgetPair(evidenceBudget?.candidates, '候选'),
+    formatEvidenceBudgetPair(evidenceBudget?.latestHistoryItems, '历史'),
+  ].filter(Boolean).join('、')
+
+  const parts = [
+    intent ? INTENT_LABELS[intent] ?? intent : '',
+    status === 'executed' ? '已完成' : STATUS_LABELS[status] ?? '',
+    typeof llmCallCount === 'number' && llmCallCount > 0
+      ? `模型 ${llmCallCount} 次${llmDurationText ? `，${llmDurationText}` : ''}${llmPromptCharText ? `，上下文 ${llmPromptCharText} 字` : ''}`
+      : '',
+    totalDurationText ? `本轮 ${totalDurationText}` : '',
+    evidenceText ? `证据：${evidenceText}` : '',
+    pendingPhase ? PHASE_LABELS[pendingPhase] ?? pendingPhase : '',
+    typeof recommendationCount === 'number' && recommendationCount > 0 ? `建议 ${recommendationCount} 个` : '',
+    summary.wroteFormalPlaylist === true
+      ? `已写入${typeof affectedItemCount === 'number' && affectedItemCount > 0 ? ` ${affectedItemCount} 条` : ''}`
+      : '未写入',
+    issueCodes.length > 0 ? `提示：${issueCodes.join('、')}` : '',
+  ].filter(Boolean)
+
+  return truncateText(parts.join('；'), 220)
+}
+
 const INTENT_LABELS: Record<string, string> = {
   insert: '插入',
   move: '移动',
@@ -300,7 +372,6 @@ const ACTION_LABELS: Record<string, string> = {
   reject: '拒绝',
   start_new_task: '开始新任务',
   cancel_pending: '取消当前任务',
-  continue_pending: '继续补充',
   select_candidate: '选择候选',
 }
 
@@ -904,7 +975,6 @@ export const buildCandidateComparisonItems = (details?: DetailMap): CandidateCom
       const selected =
         (typeof selectedId === 'string' && selectedId === id)
         || (typeof selectedName === 'string' && selectedName === name)
-        || (index === 0 && !selectedId && !selectedName)
       const sequenceLabel = formatSequenceLabel(item)
       const selectionModeLabel = formatSelectionModeLabel(
         typeof item.selectionMode === 'string' ? item.selectionMode : undefined,
@@ -1015,6 +1085,7 @@ export const buildDetailsSummary = (
   pushItem('播单变化', formatAgentContextConflictText(details))
   pushItem('占用检查', formatAgentTimeOverlapText(details, deps.formatDisplayTimeRange))
   pushItem('参考信息', formatAgentPendingLlmContextText(details))
+  pushItem('本轮轨迹', formatAgentRunTraceText(details))
   pushItem('约束处置', formatAgentConstraintHandlingText(details))
   pushItem('检索动作', formatAgentCandidateSearchText(details))
   pushItem('继续检索', formatAgentCandidateRetryText(details))

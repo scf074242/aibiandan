@@ -29,7 +29,6 @@ export interface PendingReviewSnapshot {
   allowedResponses: Array<'confirm' | 'cancel' | 'select' | 'clarify'>
   expiresOnNextNonAnswer: true
   summary: string
-  continueAsConfirm?: boolean
 }
 
 export interface ForegroundAgentContextPackage {
@@ -145,7 +144,7 @@ export interface ResolvePendingReviewLifecycleInput {
   pendingAtomicContext?: RuntimePendingAtomicContext | null
 }
 
-const ATOMIC_VERB_PATTERN = /(插入|插个|插一|插播|加播|添加|补点|删除|删掉|移除|去掉|移动|移到|调到|调整到|放到|挪到|后移|前移|顺延|推迟|延迟|延后|提前|替换|换成|换播|改成|改为|查询|校验)/u
+const ATOMIC_VERB_PATTERN = /(插入|插个|插一|插播|加播|添加|补点|填入|排入|放入|安排到|插到|排到|删除|删掉|移除|去掉|移动|移到|调到|调整到|放到|挪到|后移|前移|顺延|推迟|延迟|延后|提前|替换|换成|换播|改成|改为|查询|校验)/u
 const FULL_GENERATE_PATTERN = /(全天|整天|全日).*(编排|排播|补排|生成)|帮我全天编排|全天编排/u
 const PARTIAL_GENERATE_PATTERN = /(补齐|补全|填充).*(空窗|空档|缺口)|局部补排|补排/u
 const FORMAL_DAYPART_GENERATE_PATTERN = /(上午|中午|午间|下午|晚间|晚上|夜间|黄金时段|黄金档|七点档|八点档).*(安排|编排|排入|排播|排满|铺满|补排|填充|改成|改为|统一成|调整为|主打|为主)/u
@@ -161,7 +160,7 @@ export const buildForegroundAgentContextPackage = (
   const review = buildPendingReviewSnapshot(input.pendingCommand, input.pendingAtomicContext)
   const activeReactTaskRun = input.activeReactTaskRun ?? null
   const lastObservation = activeReactTaskRun?.observations.at(-1)
-  const scenario = inferScenario(input.latestUserInput, review)
+  const scenario = inferScenario(input.latestUserInput, review, input.pendingAtomicContext)
   const normalizedInput = normalizeText(input.latestUserInput)
   const referencedByCurrentTask = DRAFT_REFERENCE_PATTERN.test(normalizedInput)
     || (scenario === 'layout_draft_switch')
@@ -368,6 +367,14 @@ export const resolvePendingReviewLifecycle = (
     }
   }
 
+  if (input.pendingAtomicContext?.agentPendingTask) {
+    return {
+      hasPendingReview: true,
+      canUsePendingReview: true,
+      shouldExpire: false,
+    }
+  }
+
   const scenario = inferScenario(input.latestUserInput, review)
   if (scenario !== 'review') {
     return {
@@ -388,9 +395,19 @@ export const resolvePendingReviewLifecycle = (
 const inferScenario = (
   latestUserInput: string,
   review: PendingReviewSnapshot | null,
+  pendingAtomicContext?: RuntimePendingAtomicContext | null,
 ): ForegroundAgentScenario => {
   const normalized = normalizeText(latestUserInput)
   if (review && isStrongReviewResponse(normalized, review)) return 'review'
+  if (
+    pendingAtomicContext
+    && (
+      pendingAtomicContext.phase === 'clarifying'
+      || pendingAtomicContext.phase === 'selecting_target'
+      || pendingAtomicContext.phase === 'recommending_insert'
+      || Boolean(pendingAtomicContext.agentPendingTask)
+    )
+  ) return 'atomic'
   if (DRAFT_SWITCH_PATTERN.test(normalized) && /版面|草案/u.test(normalized)) return 'layout_draft_switch'
   if (DRAFT_REFERENCE_PATTERN.test(normalized)) return 'layout_reference'
   if (FULL_GENERATE_PATTERN.test(normalized)) return 'full_generate'
@@ -447,7 +464,6 @@ const buildPendingReviewSnapshot = (
       allowedResponses: ['confirm', 'cancel'],
       expiresOnNextNonAnswer: true,
       summary: pendingAtomicContext.summary,
-      continueAsConfirm: true,
     }
   }
   if (pendingAtomicContext.agentPendingTask?.phase === 'needs_confirmation') {
@@ -460,25 +476,7 @@ const buildPendingReviewSnapshot = (
       summary: pendingAtomicContext.summary,
     }
   }
-  if (pendingAtomicContext.phase === 'selecting_target' || pendingAtomicContext.phase === 'recommending_insert') {
-    return {
-      kind: 'candidate_selection',
-      action: pendingAtomicContext.action ?? 'select',
-      riskLevel: 'medium',
-      allowedResponses: ['select', 'cancel'],
-      expiresOnNextNonAnswer: true,
-      summary: pendingAtomicContext.summary,
-    }
-  }
-
-  return {
-    kind: 'parameter_clarification',
-    action: pendingAtomicContext.action ?? 'clarify',
-    riskLevel: 'low',
-    allowedResponses: ['clarify', 'cancel'],
-    expiresOnNextNonAnswer: true,
-    summary: pendingAtomicContext.summary,
-  }
+  return null
 }
 
 const resolveInjectionProfile = (
@@ -681,14 +679,9 @@ const isStrongReviewResponse = (normalized: string, review: PendingReviewSnapsho
     review.kind === 'layout_draft_update'
     && /^(可以|好的|好|确认|确定|更新|更新草案|更新到草案|写入草案|改到草案|改进草案|就按这个|就这个|用这个|用这个方向|按这个方向|没问题|ok|yes)$/iu.test(normalized)
   ) return review.allowedResponses.includes('confirm')
-  if (
-    review.continueAsConfirm
-    && /^(继续|继续执行|继续处理|下一批|重试|再试一次|retry|continue)$/iu.test(normalized)
-  ) return review.allowedResponses.includes('confirm')
   if (/^(确认|确定|执行|可以|好的|好|ok|yes)$/iu.test(normalized)) return review.allowedResponses.includes('confirm')
   if (/^(取消|不用了|算了|先不用|no|cancel)$/iu.test(normalized)) return review.allowedResponses.includes('cancel')
   if (/^(第?[一二三四五六七八九十123456789]|选.+|用.+)$/iu.test(normalized)) return review.allowedResponses.includes('select')
-  if (review.allowedResponses.includes('clarify') && /^(\d{1,2}点|\d{1,2}:\d{2}|《.+》|.+节目.+)$/u.test(normalized)) return true
   return false
 }
 

@@ -142,6 +142,51 @@ const createRotationDraft = (): LayoutDraft => ({
   ],
 })
 
+const createTvDraft = (): LayoutDraft => ({
+  id: 'tv-draft-existing',
+  channelId: 'dragon',
+  date: '2026-03-25',
+  source: 'channel_default',
+  userIntent: '东方卫视电视播单草案',
+  draftKind: 'time_slots',
+  coverage: { start: '06:00:00', end: '23:59:59' },
+  layoutReference: {
+    id: 'tv-layout-existing',
+    name: '东方卫视版面草案',
+    channelId: 'dragon',
+    slots: [
+      {
+        id: 'slot-dongfang-kuaibao',
+        channelId: 'dragon',
+        columnId: 'column-dongfang-kuaibao',
+        startTime: '2026-03-25T06:00:00+08:00',
+        endTime: '2026-03-25T07:00:00+08:00',
+      },
+    ],
+  },
+  columns: [
+    {
+      columnId: 'column-dongfang-kuaibao',
+      columnName: '东方快报',
+      channelId: 'dragon',
+      defaultProgramType: 'news',
+      source: 'default',
+      semanticLabel: '东方快报',
+      queryHints: ['东方快报'],
+    },
+  ],
+  durationSegments: [
+    {
+      id: 'duration-dongfang-kuaibao',
+      label: '东方快报',
+      targetDurationSeconds: 60 * 60,
+      selectionPriority: 'content_match',
+      repeatPolicy: 'avoid_repeat',
+      fallbackPolicy: 'ask_user',
+    },
+  ],
+})
+
 const createExistingRotationSchedule = (): RuntimeScheduleItem[] => [
   {
     id: 'rotation-existing-1',
@@ -160,7 +205,7 @@ const mockPlanner = (plan: unknown) => {
   })
 }
 
-describe('DemoRuntimeFacade LLM-first agent planner foreground path', () => {
+describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     taskClassifierClassifyMock.mockImplementation(async () => {
@@ -171,6 +216,206 @@ describe('DemoRuntimeFacade LLM-first agent planner foreground path', () => {
       confidence: 0.1,
       reasoning: 'layout recognizer should not run before planner',
     })
+  })
+
+  it('lets a formal fill request anchored by the TV draft run through the planner atomic path', async () => {
+    llmClientChatMock
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          actions: [
+            {
+              type: 'atomic_command',
+            },
+          ],
+          assistantReplyDraft: '我先按草案里的东方快报时段定位，再继续筛选期数最大的一期。',
+          reasoning: 'LLM planner 判断“填入”是正式播单动作，当前草案提供东方快报锚点。',
+        }),
+      })
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          intent: 'insert',
+          confidence: 0.92,
+          slots: {
+            targetTime: '06:00:00',
+            programHint: '东方快报',
+          },
+          searchAlternatives: ['东方快报', '东方快报 最新一期', '东方快报 期数最大'],
+          assistantFeedback: '我会按草案里的东方快报时段定位到06:00，再按你说的期数最大去筛选节目。',
+          reasoning: 'The active layout draft provides the 东方快报 anchor slot.',
+        }),
+      })
+
+    const progressEvents: Array<{ content: string; details?: Record<string, unknown> }> = []
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'tv-playlist',
+        playlistType: 'tv',
+        channelId: 'dragon',
+        channelName: '东方卫视',
+        isEmpty: true,
+        itemCount: 0,
+        gapCount: 1,
+      }),
+      userInput: '在东方快报里，帮我找到期数最大的一期填入',
+      currentSchedule: [],
+      currentLayoutDraft: createTvDraft(),
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+      onProgress: (event) => {
+        progressEvents.push(event)
+      },
+    })
+
+    expect(result.kind).toBe('agent_execution')
+    if (result.kind !== 'agent_execution') throw new Error('expected formal agent execution')
+    expect(progressEvents.length).toBeGreaterThanOrEqual(3)
+    expect(progressEvents[0]?.content).toBe('我先按草案里的东方快报时段定位，再继续筛选期数最大的一期。')
+    expect(progressEvents[0]?.details?.source).toBe('llm_assistantReplyDraft')
+    expect(progressEvents.some((event) => event.details?.progressStage === 'intent_understood')).toBe(true)
+    expect(progressEvents.some((event) => event.details?.progressStage === 'candidate_lookup')).toBe(true)
+    expect(result.feedback.content).toContain('按草案里的东方快报时段定位到06:00')
+    expect(result.result.decision.candidateSelection?.selectedSequence).toBe(24)
+    expect(result.result.executionResult?.committed).toBe(true)
+    expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps fuzzy atomic insert ReAct research on the insert recommendation path', async () => {
+    llmClientChatMock
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          mode: 'react',
+          actions: [],
+          reactTask: {
+            objective: '先查证近期观众关心内容相关素材，再进入9点插入候选选择',
+            maxTurns: 3,
+            batchSize: 3,
+            stopCondition: '找到插入候选后进入选择确认，不直接写播单',
+            nextActions: [
+              {
+                type: 'research_check',
+                purpose: 'candidate_precheck',
+                targetTime: '09:00:00',
+                semanticLabel: '近期观众关心内容相关视频',
+                programTypeHint: 'news_magazine',
+                queries: ['看东方 民生 热点', '新闻 观众 关心 民生'],
+              },
+            ],
+          },
+          assistantReplyDraft: '我先查一下近期观众关心的相关视频素材，找到候选后让你选，不会直接写播单。',
+          reasoning: '用户有插入时间，但节目内容模糊，需要先查证素材。',
+        }),
+      })
+      .mockResolvedValueOnce({
+        content: '我查了一下素材库，找到几条和近期民生热点相关的视频。你选一个后我再写入，不会自动替你选。',
+      })
+
+    const facade = new DemoRuntimeFacade()
+    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([
+      {
+        id: 'candidate-hot-topic-1',
+        programName: '看东方第113期：民生第一线',
+        programCode: '002601010113',
+        duration: 2700,
+        programType: 'news_magazine',
+        popularityScore: 91,
+      },
+      {
+        id: 'candidate-hot-topic-2',
+        programName: '热点面对面第003期：民生追踪',
+        programCode: '002609990003',
+        duration: 1800,
+        programType: 'news_magazine',
+        popularityScore: 84,
+      },
+    ])
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'tv-playlist',
+        playlistType: 'tv',
+        channelId: 'dragon',
+        channelName: '东方卫视',
+        isEmpty: true,
+        itemCount: 0,
+        gapCount: 1,
+      }),
+      userInput: '9点插入一个与近期观众特别关心内容相关联的视频内容',
+      currentSchedule: [],
+      currentLayoutDraft: createTvDraft(),
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected recommendation advisory')
+    expect(result.statusHint).toBe('needs_clarification')
+    expect(result.feedback.content).toContain('你选一个后我再写入')
+    expect(result.feedback.content).toContain('目标位置是 09:00:00')
+    expect(result.feedback.details?.recommendedCandidateCount).toBeGreaterThan(0)
+    expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps candidate precheck on insert clarification path when target position is missing', async () => {
+    llmClientChatMock
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          mode: 'react',
+          actions: [
+            {
+              type: 'research_check',
+              purpose: 'candidate_precheck',
+              semanticLabel: '上海市景点宣传片',
+              programTypeHint: 'short_video',
+              queries: ['上海市景点宣传片', '上海旅游宣传片'],
+            },
+          ],
+          assistantReplyDraft: '我先查一下素材库里有没有上海市景点宣传片，再请你确认插入位置。',
+          reasoning: '用户要插入素材，但没有说明插入到轮播队列哪个位置。',
+        }),
+      })
+
+    const facade = new DemoRuntimeFacade()
+    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([
+      {
+        id: 'shanghai-scenic-1',
+        programName: '上海城市宣传片：外滩晨光',
+        programCode: 'SH-PROMO-001',
+        duration: 300,
+        programType: 'short_video',
+        popularityScore: 88,
+      },
+    ])
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'rotation-playlist',
+        playlistType: 'rotation',
+        isEmpty: true,
+        itemCount: 0,
+        gapCount: 0,
+      }),
+      userInput: '帮我插入一个跟上海市景点相关的宣传片',
+      currentSchedule: [],
+      currentLayoutDraft: null,
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected clarification message')
+    expect(result.statusHint).toBe('needs_clarification')
+    expect(result.feedback.content).toContain('插入到轮播队列的哪个位置')
+    expect(result.feedback.content).toContain('队列末尾')
+    expect(result.feedback.content).not.toContain('更新草案')
+    expect(result.feedback.content).not.toContain('当前还没有可更新的草案')
+    expect(llmClientChatMock).toHaveBeenCalledTimes(1)
+    expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
   })
 
   it('routes typed bare playlist creation through the LLM planner', async () => {
@@ -706,26 +951,26 @@ describe('DemoRuntimeFacade LLM-first agent planner foreground path', () => {
     expect(plannerUserMessage).toContain('02:00:00')
   })
 
-  it('lets the planner ask for a ReAct-style draft and asset-library check before changing a draft', async () => {
+  it('lets the planner check assets and update the draft without confirmation', async () => {
     llmClientChatMock
       .mockResolvedValueOnce({
         content: JSON.stringify({
           actions: [
             {
               type: 'research_check',
-              purpose: 'candidate_precheck',
+              purpose: 'draft_precheck',
               targetSegmentIndex: 1,
               semanticLabel: '金山区最近三年热门景点',
               programTypeHint: '宣传片',
               queries: ['金山区 近三年 热门景点 宣传片', '金山 乐高乐园 景点 宣传片'],
             },
           ],
-          assistantReplyDraft: '我先查一下素材库，确认前不会改草案。',
+          assistantReplyDraft: '我先查一下素材库，能定位到草案段就直接更新草案。',
           reasoning: '用户要求先为草案块选择更合适的素材方向。',
         }),
       })
       .mockResolvedValueOnce({
-        content: '我先看了当前第一段草案，并按金山区热门景点方向查了素材库。乐高乐园这类方向可以继续核验；确认前我不会更新草案，也不会写入节目。需要我把这个方向更新到草案吗？',
+        content: '我先看了当前第一段草案，并按金山区热门景点方向查了素材库。乐高乐园这类方向可以继续核验。',
       })
 
     const facade = new DemoRuntimeFacade()
@@ -764,53 +1009,29 @@ describe('DemoRuntimeFacade LLM-first agent planner foreground path', () => {
       inputSource: 'user',
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending research context')
-    expect(result.feedback.processTypeLabel).toBe('素材核验')
-    expect(result.feedback.content).toContain('需要我把这个方向更新到草案吗')
-    expect(result.feedback.details?.noMutation).toBe(true)
+    expect(result.kind).toBe('layout_draft')
+    if (result.kind !== 'layout_draft') throw new Error('expected direct layout draft update')
+    expect(result.feedback.processTypeLabel).toBe('版面草案')
+    expect(result.feedback.content).toContain('已把“金山区最近三年热门景点”更新到左侧草案')
+    expect(result.feedback.content).not.toContain('需要我把这个方向更新到草案吗')
+    expect(result.feedback.content).not.toContain('确认前我不会更新草案')
+    expect(result.feedback.details?.noFormalPlaylistWrite).toBe(true)
+    expect(result.feedback.details?.draftUpdatePolicy).toBe('draft_updates_do_not_require_confirmation')
     expect(result.feedback.details?.candidateCount).toBe(1)
-    expect(result.pendingAtomicContext.phase).toBe('draft_research_confirmation')
-    expect(result.pendingAtomicContext.layoutDraftSuggestion?.semanticLabel).toBe('金山区最近三年热门景点')
+    expect(result.draft.columns[0]?.semanticLabel).toBe('金山区最近三年热门景点')
+    expect(result.draft.columns[0]?.queryHints).toEqual(expect.arrayContaining([
+      '金山乐高乐园宣传片',
+      '乐高乐园',
+    ]))
+    expect(result.draft.durationSegments?.[0]?.label).toBe('金山区最近三年热门景点')
     expect((result.feedback.details?.reactTask as any)?.tools).toEqual(['read_current_draft', 'search_asset_library'])
     expect(searchPrograms).toHaveBeenCalledWith(expect.objectContaining({
       channelId: 'rotation',
       programName: '金山区 近三年 热门景点 宣传片',
-      programTypes: undefined,
+      programTypes: ['short_clip', 'short_video'],
     }))
     expect(llmClientChatMock).toHaveBeenCalledTimes(2)
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
-
-    const confirmed = await facade.submitInstruction({
-      scheduleState: createScheduleState({
-        playlistId: 'rotation-playlist',
-        playlistType: 'rotation',
-        channelId: 'rotation',
-        channelName: '轮播单',
-        rotationStrategy: 'content_match',
-        rotationDurationSeconds: 2 * 60 * 60,
-      }),
-      userInput: '更新到草案',
-      currentSchedule: [],
-      currentLayoutDraft: currentDraft,
-      currentLayoutDraftMode: 'full_generate',
-      pendingAtomicContext: result.pendingAtomicContext,
-      history: ['第一段金山区景点部分，选择金山区最近3年最火热的景点'],
-      agentCoreEnabled: true,
-      layoutDraftEnabled: true,
-      inputSource: 'user',
-    })
-
-    expect(confirmed.kind).toBe('layout_draft')
-    if (confirmed.kind !== 'layout_draft') throw new Error('expected layout draft update')
-    expect(confirmed.feedback.content).toContain('正式播单还没有开始编排')
-    expect(confirmed.draft.columns[0]?.semanticLabel).toBe('金山区最近三年热门景点')
-    expect(confirmed.draft.columns[0]?.queryHints).toEqual(expect.arrayContaining([
-      '金山乐高乐园宣传片',
-      '乐高乐园',
-    ]))
-    expect(confirmed.draft.durationSegments?.[0]?.label).toBe('金山区最近三年热门景点')
-    expect(llmClientChatMock).toHaveBeenCalledTimes(2)
   })
 
   it('keeps the prompt contract that ordinal-hour changes on an existing draft are draft refinements', async () => {
@@ -962,25 +1183,12 @@ describe('DemoRuntimeFacade LLM-first agent planner foreground path', () => {
     mockPlanner({
       actions: [
         {
-          type: 'prepare_layout_draft',
-          mode: 'full_generate',
-          semanticLabel: '新闻和电视剧生命树',
-          segments: [
-            {
-              start: '00:00:00',
-              end: '01:00:00',
-              semanticLabel: '新闻',
-            },
-            {
-              start: '01:00:00',
-              end: '02:00:00',
-              semanticLabel: '电视剧生命树',
-            },
-          ],
+          type: 'clarify',
+          question: '请先说明播单类型：要新建电视播单还是轮播单，我再把这两小时内容整理成草案。',
         },
       ],
-      assistantReplyDraft: '我先帮你整理草案。',
-      reasoning: '模型识别到草案内容，但没有播单工作区。',
+      assistantReplyDraft: '请先说明播单类型：要新建电视播单还是轮播单，我再把这两小时内容整理成草案。',
+      reasoning: '模型识别到草案内容，但没有播单工作区，需要用户补充播单类型。',
     })
 
     const result = await new DemoRuntimeFacade().submitInstruction({

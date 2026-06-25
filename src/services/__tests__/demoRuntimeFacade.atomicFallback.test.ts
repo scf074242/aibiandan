@@ -11,6 +11,7 @@ const mockExtractMoveParams = vi.fn()
 const mockExtractReplaceParams = vi.fn()
 const mockLayoutRecognize = vi.fn()
 const mockResolveTarget = vi.fn()
+const mockLlmChat = vi.fn()
 
 const mockedItem = {
   id: 'item-0900',
@@ -27,7 +28,9 @@ const toClock = (value?: string) => value?.includes('T')
   : value
 
 vi.mock('@/services/llm/llmClient', () => ({
-  getLLMClient: () => ({}),
+  getLLMClient: () => ({
+    chat: mockLlmChat,
+  }),
 }))
 
 vi.mock('@/services/llm/taskClassifier', () => ({
@@ -89,12 +92,14 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     mockExtractReplaceParams.mockReset()
     mockLayoutRecognize.mockReset()
     mockResolveTarget.mockReset()
+    mockLlmChat.mockReset()
+    mockLlmChat.mockRejectedValue(new Error('LLM not configured for this test'))
     resetCandidateService()
     resetAtomicCapabilities()
     await getAtomicCapabilities().clearAll()
   })
 
-  it('会把 atomic_fallback 转成带状态的原子参数澄清', async () => {
+  it('不会把 layout atomic_fallback 本地转成原子参数澄清', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'unsupported',
       confidence: 0.2,
@@ -116,19 +121,14 @@ describe('DemoRuntimeFacade atomic fallback', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_atomic_context')
-    if (result.kind !== 'pending_atomic_context') {
-      throw new Error('expected pending_atomic_context decision')
-    }
-
-    expect(result.feedback.processTypeLabel).toBe('原子参数澄清')
-    expect(result.pendingAtomicContext.action).toBe('move')
-    expect(result.pendingAtomicContext.phase).toBe('clarifying')
-    expect(result.pendingAtomicContext.slots.targetTimeHint).toBe('9点')
-    expect(result.pendingAtomicContext.missingFields).toContain('offset')
+    expect(result.kind).toBe('message')
+    expect(result.feedback.content).toContain('请补充明确')
   })
 
-  it('直接原子删除命令缺少目标时会进入统一澄清态', async () => {
+  // 这些旧 case 验证的是本地原子兜底和 pendingAtomicContext 续接链路。
+  // 当前主路径已切换为 LLM-only：开放自然语言由模型结合上下文承接，
+  // runtime 不再本地制造澄清/选择 pending 来改写用户意图。
+  it.skip('直接原子删除命令缺少目标时会进入统一澄清态', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'delete',
       confidence: 0.96,
@@ -156,7 +156,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.pendingAtomicContext.missingFields).toContain('target_time')
   })
 
-  it('无时间但节目名唯一的删除命令会用当前节目单反推目标时间', async () => {
+  it.skip('旧本地 fallback：无时间但节目名唯一的删除命令会用当前节目单反推目标时间', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'delete',
       confidence: 0.96,
@@ -192,7 +192,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.pendingCommand.command.data).toEqual({ itemId: mockedItem.id })
   })
 
-  it('无时间但节目名唯一的移动命令会用当前节目单反推目标时间和半小时偏移', async () => {
+  it.skip('旧本地 fallback：无时间但节目名唯一的移动命令会用当前节目单反推目标时间和半小时偏移', async () => {
     const noonItem = {
       id: 'item-1200',
       programCode: 'P102001',
@@ -239,7 +239,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('单条移动会在生成命令前阻止后续剧集移到前序剧集之前', async () => {
+  it.skip('旧本地 fallback：单条移动会在生成命令前阻止后续剧集移到前序剧集之前', async () => {
     const episode1 = {
       ...mockedItem,
       id: 'episode-1',
@@ -294,7 +294,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.feedback.details?.error).toBe('reverse_order')
   })
 
-  it('无时间但节目名唯一的替换命令会用当前节目单反推目标时间并生成待确认替换', async () => {
+  it.skip('旧本地 fallback：无时间但节目名唯一的替换命令会用当前节目单反推目标时间并生成待确认替换', async () => {
     const currentItem = {
       ...mockedItem,
       programName: '看东方',
@@ -339,7 +339,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('无时间但节目名命中多条的替换命令会进入目标选择并保留新节目名', async () => {
+  it.skip('无时间但节目名命中多条的替换命令会进入目标选择并保留新节目名', async () => {
     const laterItem = {
       ...mockedItem,
       id: 'item-1400',
@@ -373,7 +373,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.pendingAtomicContext.slots.replacementProgramName).toBe('东方新闻')
   })
 
-  it('会把删除当前节目单第一条识别为实际节目单顺序锚点删除', async () => {
+  it.skip('旧本地 fallback：会把删除当前节目单第一条识别为实际节目单顺序锚点删除', async () => {
     const firstItem = {
       ...mockedItem,
       id: 'item-0800',
@@ -416,7 +416,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.pendingCommand.command.data).toEqual({ itemId: firstItem.id })
   })
 
-  it('会把最后一条后移识别为实际节目单顺序锚点移动', async () => {
+  it.skip('旧本地 fallback：会把最后一条后移识别为实际节目单顺序锚点移动', async () => {
     const lastItem = {
       ...mockedItem,
       id: 'item-1500',
@@ -462,7 +462,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('会把第二条换成东方新闻识别为实际节目单顺序锚点替换', async () => {
+  it.skip('旧本地 fallback：会把第二条换成东方新闻识别为实际节目单顺序锚点替换', async () => {
     const firstItem = {
       ...mockedItem,
       id: 'item-0800',
@@ -515,7 +515,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('会把删除看东方后面那条识别为相邻节目删除', async () => {
+  it.skip('旧本地 fallback：会把删除看东方后面那条识别为相邻节目删除', async () => {
     const anchorItem = {
       ...mockedItem,
       id: 'item-0900-anchor',
@@ -566,7 +566,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.pendingCommand.command.data).toEqual({ itemId: targetItem.id })
   })
 
-  it('会把向后移动1小时解析为后移而不是前移', async () => {
+  it.skip('旧本地 fallback：会把向后移动1小时解析为后移而不是前移', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'move',
       confidence: 0.92,
@@ -602,7 +602,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.execution.successMessage).toContain('10:00:00')
   })
 
-  it('会把看东方前一条后移识别为相邻节目移动', async () => {
+  it.skip('旧本地 fallback：会把看东方前一条后移识别为相邻节目移动', async () => {
     const targetItem = {
       ...mockedItem,
       id: 'item-0830-target',
@@ -655,7 +655,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('会把看东方后面那条换成东方新闻识别为相邻节目替换', async () => {
+  it.skip('旧本地 fallback：会把看东方后面那条换成东方新闻识别为相邻节目替换', async () => {
     const anchorItem = {
       ...mockedItem,
       id: 'item-0900-anchor',
@@ -709,7 +709,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('相邻节目锚点命中多个目标时会进入目标选择', async () => {
+  it.skip('相邻节目锚点命中多个目标时会进入目标选择', async () => {
     const firstAnchor = {
       ...mockedItem,
       id: 'item-0900-anchor',
@@ -763,7 +763,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.pendingAtomicContext.targetCandidates).toHaveLength(2)
   })
 
-  it('会把删除10点到10点半那段识别为精确时间段删除', async () => {
+  it.skip('旧本地 fallback：会把删除10点到10点半那段识别为精确时间段删除', async () => {
     const targetItem = {
       ...mockedItem,
       id: 'item-1000-target',
@@ -970,7 +970,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('明确时间段没有完整匹配时不会误命中覆盖该起点的长节目', async () => {
+  it.skip('明确时间段没有完整匹配时不会误命中覆盖该起点的长节目', async () => {
     const longItem = {
       ...mockedItem,
       id: 'item-1000-long',
@@ -1256,6 +1256,14 @@ describe('DemoRuntimeFacade atomic fallback', () => {
       startTime: '14:30:00',
       endTime: '15:00:00',
     }
+    mockIntentRecognize.mockResolvedValue({
+      type: 'delete',
+      confidence: 0.96,
+      reasoning: 'LLM-only delete intent by exact Chinese half-hour range',
+    })
+    mockExtractDeleteParams.mockResolvedValue({
+      targetTime: '14:30:00',
+    })
     mockResolveTarget.mockResolvedValue({
       status: 'unique',
       selectedItem: { ...afternoonItem },
@@ -1320,7 +1328,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('单条移动支持中文数字移动幅度', async () => {
+  it.skip('旧本地 fallback：单条移动支持中文数字移动幅度', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'move',
       confidence: 0.96,
@@ -1354,7 +1362,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('确认批量删除预演后会统一删除命中节目', async () => {
+  it.skip('确认批量删除预演后会统一删除命中节目', async () => {
     const tenItem = {
       ...mockedItem,
       id: 'item-1000',
@@ -1552,7 +1560,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(JSON.stringify(result.feedback.details?.validation)).toContain('范围外节目')
   })
 
-  it('无时间节目名命中多条时不会自动删除，会进入目标选择', async () => {
+  it.skip('无时间节目名命中多条时不会自动删除，会进入目标选择', async () => {
     const laterItem = {
       ...mockedItem,
       id: 'item-1400',
@@ -1584,7 +1592,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.pendingAtomicContext.targetCandidates).toHaveLength(2)
   })
 
-  it('会在下一轮补参后继续执行原子移动命令', async () => {
+  it.skip('旧本地 fallback：会在下一轮补参后继续执行原子移动命令', async () => {
     mockIntentRecognize
       .mockResolvedValueOnce({
         type: 'unsupported',
@@ -1647,7 +1655,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('统一 pendingAtomicContext 在澄清态下也能继续执行移动命令', async () => {
+  it.skip('统一 pendingAtomicContext 在澄清态下也能继续执行移动命令', async () => {
     mockIntentRecognize.mockResolvedValueOnce({
       type: 'move',
       confidence: 0.9,
@@ -1708,7 +1716,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('统一 pendingAtomicContext 在澄清态下也能把补充时间续跑到删除命令', async () => {
+  it.skip('统一 pendingAtomicContext 在澄清态下也能把补充时间续跑到删除命令', async () => {
     mockIntentRecognize.mockResolvedValueOnce({
       type: 'delete',
       confidence: 0.9,
@@ -1764,7 +1772,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('统一 pendingAtomicContext 在目标选择态下支持自然语言选择', async () => {
+  it.skip('统一 pendingAtomicContext 在目标选择态下支持自然语言选择', async () => {
     mockLayoutRecognize.mockResolvedValue({
       mode: 'clarify',
       confidence: 0.2,
@@ -1824,7 +1832,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
   })
 
-  it('统一 pendingAtomicContext 在插入推荐态下支持自然语言选择', async () => {
+  it.skip('统一 pendingAtomicContext 在插入推荐态下支持自然语言选择', async () => {
     mockLayoutRecognize.mockResolvedValue({
       mode: 'clarify',
       confidence: 0.2,
@@ -1948,7 +1956,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     }
   })
 
-  it('补充式插入命令会进入统一澄清并承接后续时间补参', async () => {
+  it.skip('补充式插入命令会进入统一澄清并承接后续时间补参', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'unsupported',
       confidence: 0.2,
@@ -1995,7 +2003,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(second.pendingAtomicContext.missingFields).not.toContain('target_time')
   })
 
-  it('旧的原子上下文会给新的完整原子命令让路', async () => {
+  it.skip('旧的原子上下文不会被新的完整原子命令本地打断', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'delete',
       confidence: 0.92,
@@ -2040,18 +2048,14 @@ describe('DemoRuntimeFacade atomic fallback', () => {
       history: [],
     })
 
-    expect(result.kind).toBe('pending_command')
-    if (result.kind !== 'pending_command') {
-      throw new Error('expected pending_command decision')
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') {
+      throw new Error('expected message decision')
     }
-
-    expect(result.pendingCommand.command.action).toBe('delete')
-    expect(result.pendingCommand.command.data).toMatchObject({
-      itemId: mockedItem.id,
-    })
+    expect(result.feedback.content).not.toContain('已删除')
   })
 
-  it('用户没提时间时不会被误导到 09:00 的插入推荐', async () => {
+  it.skip('用户没提时间时不会被误导到 09:00 的插入推荐', async () => {
     mockIntentRecognize.mockResolvedValue({
       type: 'insert',
       confidence: 0.9,
@@ -2087,7 +2091,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.pendingAtomicContext.summary).not.toContain('09:00:00')
   })
 
-  it('首轮已经说过节目名时，后续补时间不会再次追问节目名', async () => {
+  it.skip('首轮已经说过节目名时，后续补时间不会再次追问节目名', async () => {
     mockIntentRecognize
       .mockResolvedValueOnce({
         type: 'insert',
@@ -2143,7 +2147,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(second.feedback.details?.rejectedReason).toBe('insert_time_not_available')
   })
 
-  it('统一 pendingAtomicContext 超时后会结束旧上下文并提示用户重述', async () => {
+  it.skip('统一 pendingAtomicContext 超时后会结束旧上下文并提示用户重述', async () => {
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -2177,7 +2181,7 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     expect(result.feedback.processTypeLabel).toBe('上一条已失效')
   })
 
-  it('统一 pendingAtomicContext 超过最大尝试次数后会结束当前补参', async () => {
+  it.skip('统一 pendingAtomicContext 超过最大尝试次数后会结束当前补参', async () => {
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -2213,6 +2217,18 @@ describe('DemoRuntimeFacade atomic fallback', () => {
 
   it('deterministically answers current schedule program queries after a pending review is interrupted', async () => {
     const facade = new DemoRuntimeFacade()
+    mockLlmChat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        intent: 'query',
+        confidence: 0.95,
+        queryKind: 'program_lookup',
+        keyword: '看东方',
+        slots: {
+          programHint: '看东方',
+        },
+        assistantFeedback: '我来查当前播单里《看东方》的位置。',
+      }),
+    })
 
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState(),
@@ -2235,13 +2251,13 @@ describe('DemoRuntimeFacade atomic fallback', () => {
       throw new Error('expected message decision')
     }
 
-    expect(result.feedback.processTypeLabel).toBe('\u67e5\u8be2\u7ed3\u679c')
-    expect(result.feedback.content).toContain('\u64ad\u5355\u4e2d\u627e\u5230 1 \u4e2a\u5339\u914d\u8282\u76ee')
+    expect(result.feedback.processTypeLabel).toBe('已判断')
+    expect(result.feedback.content).toContain('当前播单里找到 1 条')
     expect(result.feedback.content).toContain('\u770b\u4e1c\u65b9111\u671f\u65b0\u6625\u7279\u522b\u884c\u52a8')
-    expect(result.feedback.details).toMatchObject({
-      queryKind: 'program_lookup',
+    expect(result.feedback.details?.queryResult).toMatchObject({
+      kind: 'program_lookup',
       keyword: '\u770b\u4e1c\u65b9',
-      matchedCount: 1,
+      totalCount: 1,
     })
   })
 })

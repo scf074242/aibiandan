@@ -889,10 +889,41 @@ const resolveCurrentTvLayoutDraft = () => resolveForegroundLayoutDraft({
   playlistType: 'tv',
 })
 
+const createEmptyRotationLayoutDraft = (): LayoutDraft => ({
+  id: `rotation-draft-empty-${Date.now()}`,
+  channelId: 'rotation',
+  date: scheduleDate.value,
+  version: 1,
+  source: 'generated',
+  userIntent: '等待补充轮播草案',
+  draftKind: 'duration_segments',
+  purpose: 'rotation_draft',
+  targetDurationSeconds: rotationTargetDurationSeconds.value ?? undefined,
+  durationSegments: [],
+  coverage: {
+    start: '00:00:00',
+    end: '00:00:00',
+  },
+  layoutReference: {
+    id: `rotation-empty-reference-${Date.now()}`,
+    name: '轮播草案',
+    slots: [],
+  },
+  columns: [],
+  warnings: ['轮播草案还没有内容块。'],
+})
+
 const ensureCurrentTvLayoutDraft = () => {
   if (playlistType.value !== 'tv') return
   if (currentLayoutDraft.value) return
   currentLayoutDraft.value = resolveCurrentTvLayoutDraft()
+  currentLayoutDraftFeasibility.value = null
+}
+
+const ensureCurrentRotationLayoutDraft = () => {
+  if (playlistType.value !== 'rotation') return
+  if (currentLayoutDraft.value) return
+  currentLayoutDraft.value = createEmptyRotationLayoutDraft()
   currentLayoutDraftFeasibility.value = null
 }
 
@@ -1337,9 +1368,9 @@ const handleChatLayoutDraftUpdated = (payload: {
   draft: LayoutDraft | null
   feasibilityReport?: DraftFeasibilityReport | null
 }) => {
-  currentLayoutDraft.value = payload.draft
+  currentLayoutDraft.value = payload.draft ?? (playlistType.value === 'rotation' ? createEmptyRotationLayoutDraft() : null)
   currentLayoutDraftFeasibility.value = payload.feasibilityReport ?? null
-  if (payload.draft) {
+  if (currentLayoutDraft.value) {
     showLayoutReference.value = false
     activeWorkspaceTab.value = 'draft'
   } else {
@@ -1355,7 +1386,7 @@ const handleCreatePlaylist = (type: Exclude<PlaylistType, 'none'>) => {
   rotationStrategy.value = type === 'rotation' ? 'content_match' : rotationStrategy.value
   rotationTargetDurationSeconds.value = null
   scheduleItems.value = []
-  currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : null
+  currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : createEmptyRotationLayoutDraft()
   currentLayoutDraftFeasibility.value = null
   activeWorkspaceTab.value = type === 'tv' && currentLayoutDraft.value ? 'draft' : 'schedule'
   persistCurrentPlaylistDocument()
@@ -1413,7 +1444,7 @@ const seedBrowserHarnessSchedule = (
   rotationStrategy.value = type === 'rotation' ? 'content_match' : rotationStrategy.value
   rotationTargetDurationSeconds.value = type === 'rotation' ? options?.rotationDurationSeconds ?? null : null
   scheduleItems.value = items.map((item, index) => createBrowserHarnessScheduleItem(item, index, type))
-  currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : null
+  currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : createEmptyRotationLayoutDraft()
   currentLayoutDraftFeasibility.value = null
   activeWorkspaceTab.value = 'schedule'
   if (type === 'rotation') {
@@ -1482,7 +1513,7 @@ const handlePlaylistStateChanged = (payload: {
     ensureCurrentTvLayoutDraft()
   }
   if (payload.playlistType === 'rotation' && (isNewPlaylistDocument || isSwitchingPlaylistType)) {
-    currentLayoutDraft.value = null
+    currentLayoutDraft.value = createEmptyRotationLayoutDraft()
     currentLayoutDraftFeasibility.value = null
     activeWorkspaceTab.value = 'schedule'
   }
@@ -1490,6 +1521,15 @@ const handlePlaylistStateChanged = (payload: {
   rotationTargetDurationSeconds.value = payload.playlistType === 'rotation'
     ? payload.rotationDurationSeconds ?? null
     : null
+  if (payload.playlistType === 'rotation') {
+    ensureCurrentRotationLayoutDraft()
+    if (currentLayoutDraft.value) {
+      currentLayoutDraft.value = {
+        ...currentLayoutDraft.value,
+        targetDurationSeconds: payload.rotationDurationSeconds ?? currentLayoutDraft.value.targetDurationSeconds,
+      }
+    }
+  }
   if (payload.playlistType === 'rotation' && payload.rotationDurationSeconds) {
     currentBroadcastWindow.value = {
       startTime: '00:00:00',
@@ -1886,7 +1926,7 @@ const formatClockGapDurationText = (startTime: string, endTime: string) => {
 
 const formatGapEntryText = (gap: GapEntry) => {
   if (playlistType.value === 'rotation') {
-    return `缺失时长：${formatClockGapDurationText(gap.from, gap.to)}（0 点起算的相对位置）`
+    return `缺失时长：${formatClockGapDurationText(gap.from, gap.to)}（内容队列相对位置）`
   }
   return `缺失时间：${formatTime4(gap.from)} - ${formatTime4(gap.to)}`
 }
@@ -2360,6 +2400,7 @@ onBeforeUnmount(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   overflow: hidden;
   padding: var(--xnews-spacing-4);
   transition: width 0.3s ease;
@@ -2519,6 +2560,7 @@ onBeforeUnmount(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   background-color: var(--xnews-bg-white);
   border-radius: 0 0 var(--xnews-radius-lg) var(--xnews-radius-lg);
   border: 1px solid var(--xnews-border-color);
@@ -2575,6 +2617,7 @@ onBeforeUnmount(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   overflow: auto;
   box-sizing: border-box;
   padding-right: 0;
@@ -2981,6 +3024,7 @@ onBeforeUnmount(() => {
 .content-wrapper {
   display: flex;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 
   &.with-ai-sidebar {
@@ -2995,6 +3039,8 @@ onBeforeUnmount(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
   transition: width 0.3s ease;
 }
@@ -3086,7 +3132,9 @@ onBeforeUnmount(() => {
 }
 
 .create-schedule-page {
+  height: 100vh;
   min-height: 100vh;
+  overflow: hidden;
   background: #f7f8fa;
   padding-bottom: 0;
 }
@@ -3204,8 +3252,10 @@ onBeforeUnmount(() => {
 }
 
 .content-wrapper {
-  gap: 16px;
-  padding: 0 16px 16px;
+  gap: 0;
+  padding: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .content-wrapper.with-ai-sidebar .schedule-content {
@@ -3399,9 +3449,17 @@ onBeforeUnmount(() => {
 }
 
 .timeline-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   border-radius: 0 0 10px 10px;
   border-color: #e5e7eb;
   box-shadow: none;
+}
+
+.timeline-content {
+  overflow-x: auto;
+  overflow-y: auto;
 }
 
 .timeline-horizontal-scroll {
@@ -3966,7 +4024,7 @@ onBeforeUnmount(() => {
   }
 
   .content-wrapper {
-    padding: 0 12px 12px;
+    padding: 0;
   }
 
   .timeline-header {

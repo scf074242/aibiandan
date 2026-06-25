@@ -170,8 +170,8 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
         {
           id: 'llm_intent_contract',
           appliesTo: ['move', 'batch_move', 'insert', 'replace', 'delete', 'batch_delete', 'query', 'validate'],
-          mode: 'reroute',
-          description: expect.stringContaining('low-confidence output falls back'),
+          mode: 'block',
+          description: expect.stringContaining('low-confidence or failed output stops'),
         },
         {
           id: 'capability_route_conflict',
@@ -961,7 +961,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     expect(context.scheduleItems[0]?.startTime).toBe('2026-03-25T10:00:00+08:00')
   })
 
-  it('falls back from natural multi-turn move utterances by carrying the target programme into the destination follow-up', async () => {
+  it('continues LLM-only natural multi-turn move utterances by carrying the target programme into the destination follow-up', async () => {
     const { dataGateway, runtime } = buildRuntime({
       playlistType: 'tv',
       items: [buildItem({
@@ -978,6 +978,14 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       userInput: '移动看东方',
       channelId,
       date,
+      interpretation: {
+        intent: 'move',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetProgramName: '看东方',
+        },
+      },
     })
 
     expect(first.status).toBe('needs_clarification')
@@ -995,6 +1003,15 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       channelId,
       date,
       pendingTask: first.decision.pendingTask,
+      interpretation: {
+        intent: 'move',
+        pendingAction: 'continue_pending',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          newStartTime: '10:00:00',
+        },
+      },
     })
 
     expect(result.status).toBe('executed')
@@ -1012,7 +1029,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     })
   })
 
-  it('blocks natural move utterances when the destination already has scheduled content', async () => {
+  it('blocks LLM-only natural move utterances when the destination already has scheduled content', async () => {
     const { dataGateway, runtime } = buildRuntime({
       playlistType: 'tv',
       items: [
@@ -1040,6 +1057,15 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       userInput: '把看东方移到10点',
       channelId,
       date,
+      interpretation: {
+        intent: 'move',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetProgramName: '看东方',
+          newStartTime: '10:00:00',
+        },
+      },
     })
 
     expect(result.status).toBe('blocked')
@@ -1932,7 +1958,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     expect(context.scheduleItems.map((item) => item.programName)).toEqual(['Replacement News'])
   })
 
-  it('falls back through multi-turn rotation short-clip insert without programme code and waits for confirmation', async () => {
+  it('continues LLM-only multi-turn rotation short-clip insert without programme code and waits for confirmation', async () => {
     const clipCandidate = buildCandidate({
       id: 'asset-short-city-flower',
       programId: 'asset-short-city-flower',
@@ -1955,6 +1981,14 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       userInput: '插入城市形象春日花路短片',
       channelId,
       date,
+      interpretation: {
+        intent: 'insert',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          programHint: '城市形象春日花路短片',
+        },
+      },
     })
 
     expect(first.status).toBe('needs_clarification')
@@ -1974,6 +2008,15 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       channelId,
       date,
       pendingTask: first.decision.pendingTask,
+      interpretation: {
+        intent: 'insert',
+        pendingAction: 'continue_pending',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetTime: '00:00:00',
+        },
+      },
     })
 
     expect(second.status).toBe('needs_confirmation')
@@ -2004,7 +2047,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     expect(context.scheduleItems).toHaveLength(0)
   })
 
-  it('blocks natural rotation short-clip insert when the relative destination is already occupied', async () => {
+  it('blocks LLM-only natural rotation short-clip insert when the relative destination is already occupied', async () => {
     const clipCandidate = buildCandidate({
       id: 'asset-short-city-flower',
       programId: 'asset-short-city-flower',
@@ -2036,6 +2079,15 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       userInput: '0点插入城市形象春日花路短片',
       channelId,
       date,
+      interpretation: {
+        intent: 'insert',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetTime: '00:00:00',
+          programHint: '城市形象春日花路短片',
+        },
+      },
     })
 
     expect(result.status).toBe('blocked')
@@ -3671,7 +3723,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     expect(context.scheduleItems[0]?.programName).toBe('Morning Special')
   })
 
-  it('does not continue insert clarifications after candidate source evidence changes', async () => {
+  it('keeps insert clarifications recoverable when candidate source evidence changes before the programme is fixed', async () => {
     const initialCandidate = buildCandidate({
       id: 'candidate-original',
       programCode: 'ORIGINAL1000',
@@ -3734,37 +3786,13 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
 
     expect(result.status).toBe('needs_clarification')
     expect(result.executionResult).toBeUndefined()
-    expect(result.explanation).toContain('pending task context changed')
+    expect(result.explanation).toContain('保留这次插入任务')
     expect(result.decision.constraintReport?.issues[0]).toMatchObject({
-      code: 'context_conflict',
-      detail: {
-        changedSourceKeys: ['candidates'],
-        sourceChangeSummary: [
-          expect.objectContaining({
-            sourceKey: 'candidates',
-            previousSamples: expect.arrayContaining([
-              expect.stringContaining('Original Candidate'),
-            ]),
-            currentSamples: expect.arrayContaining([
-              expect.stringContaining('Replacement Candidate'),
-            ]),
-          }),
-        ],
-      },
+      code: 'program_not_found',
+      detail: expect.objectContaining({
+        searchedKeyword: 'Original Candidate',
+      }),
     })
-    expect(result.decision.auditSummary?.pendingTask).toMatchObject({
-      id: first.decision.pendingTask?.id,
-      contextSourceSummary: expect.arrayContaining([
-        expect.stringMatching(/^candidates=in_memory_seed:1#/),
-      ]),
-    })
-    expect(result.decision.auditSummary?.keyPoints).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('待处理任务：'),
-        expect.stringContaining('上下文来源='),
-        expect.stringContaining('约束处理：context_conflict=block'),
-      ]),
-    )
 
     const context = await dataGateway.loadContext({ userInput: '', channelId, date })
     expect(context.scheduleItems).toHaveLength(0)
@@ -3978,7 +4006,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     })
   })
 
-  it('does not continue replace clarifications after candidate evidence changes', async () => {
+  it('keeps replace clarifications recoverable when candidate evidence changes before the replacement is fixed', async () => {
     const originalCandidate = buildCandidate({
       id: 'candidate-original',
       programCode: 'ORIGINAL1000',
@@ -4042,10 +4070,10 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     expect(result.status).toBe('needs_clarification')
     expect(result.executionResult).toBeUndefined()
     expect(result.decision.constraintReport?.issues[0]).toMatchObject({
-      code: 'context_conflict',
-      detail: {
-        changedSourceKeys: ['candidates'],
-      },
+      code: 'program_not_found',
+      detail: expect.objectContaining({
+        searchedKeyword: 'Original Candidate',
+      }),
     })
 
     const context = await dataGateway.loadContext({ userInput: '', channelId, date })
@@ -4083,8 +4111,8 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       ],
     })
     expect(result.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
-      source: 'fallback',
+      method: 'candidate_judge_llm',
+      source: 'none',
       candidateOptionIds: ['candidate-low', 'candidate-high'],
     })
     expect(result.executionResult).toBeUndefined()
@@ -5138,8 +5166,8 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     expect(result.status).toBe('needs_selection')
     expect(result.decision.command).toBeUndefined()
     expect(result.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
-      source: 'fallback',
+      method: 'candidate_judge_llm',
+      source: 'none',
       candidateOptionIds: ['candidate-drama-replacement', 'candidate-news-replacement'],
     })
     expect(result.decision.pendingTask).toMatchObject({
@@ -5982,7 +6010,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     expect(context.scheduleItems.map((item) => item.id)).toEqual(['news-0900'])
   })
 
-  it('falls back from a natural delete utterance to programme-name target resolution', async () => {
+  it('resolves an LLM-only natural delete utterance to programme-name target resolution', async () => {
     const { dataGateway, runtime } = buildRuntime({
       playlistType: 'tv',
       items: [buildItem({
@@ -5996,6 +6024,14 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       userInput: '删除看东方',
       channelId,
       date,
+      interpretation: {
+        intent: 'delete',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetProgramName: '看东方',
+        },
+      },
     })
 
     expect(result.status).toBe('needs_confirmation')
@@ -6018,7 +6054,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     expect(context.scheduleItems).toHaveLength(1)
   })
 
-  it('falls back from a natural replace utterance to target programme and replacement candidate slots', async () => {
+  it('uses LLM-only natural replace utterance slots for target programme and replacement candidate', async () => {
     const { dataGateway, runtime } = buildRuntime({
       playlistType: 'tv',
       items: [buildItem({
@@ -6042,6 +6078,15 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       userInput: '把看东方换成东方新闻',
       channelId,
       date,
+      interpretation: {
+        intent: 'replace',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetProgramName: '看东方',
+          replacementHint: '东方新闻',
+        },
+      },
     })
 
     expect(result.status).toBe('executed')
@@ -6090,6 +6135,15 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       userInput: '用东方新闻替换看东方',
       channelId,
       date,
+      interpretation: {
+        intent: 'replace',
+        confidence: 1,
+        source: 'test',
+        slots: {
+          targetProgramName: '看东方',
+          replacementHint: '东方新闻',
+        },
+      },
     })
 
     expect(result.status).toBe('executed')
@@ -6107,7 +6161,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     })
   })
 
-  it('falls back from a natural programme-location query to read-only programme lookup', async () => {
+  it('uses LLM-only natural programme-location query slots for read-only programme lookup', async () => {
     const { dataGateway, runtime } = buildRuntime({
       playlistType: 'tv',
       items: [buildItem({
@@ -6121,6 +6175,16 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       userInput: '看看看东方在哪',
       channelId,
       date,
+      interpretation: {
+        intent: 'query',
+        confidence: 1,
+        source: 'test',
+        queryKind: 'program_lookup',
+        slots: {
+          targetProgramName: '看东方',
+        },
+        keyword: '看东方',
+      },
     })
 
     expect(result.status).toBe('executed')
@@ -6394,7 +6458,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       candidateId: 'candidate-city-lens',
     })
     expect(result.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
+      method: 'candidate_judge_llm',
       source: 'fallback',
       selectedCandidateId: 'candidate-city-lens',
     })
@@ -6529,7 +6593,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
       candidateId: 'asset-short-city-flower',
     })
     expect(first.decision.candidateSelection).toMatchObject({
-      method: 'candidate_judge',
+      method: 'candidate_judge_llm',
       source: 'fallback',
       selectedCandidateId: 'asset-short-city-flower',
     })

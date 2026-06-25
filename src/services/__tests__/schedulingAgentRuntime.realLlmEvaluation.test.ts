@@ -93,7 +93,7 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
       model,
       temperature: 0,
       maxTokens: 1200,
-      timeout: 12000,
+      timeout: 30000,
     })
     const interpreter = new LlmAgentIntentInterpreter({
       chat: llmClient.chat.bind(llmClient),
@@ -113,7 +113,7 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
       model,
       temperature: 0,
       maxTokens: 1200,
-      timeout: 12000,
+      timeout: 30000,
     })
     const interpreter = new LlmAgentIntentInterpreter({
       chat: llmClient.chat.bind(llmClient),
@@ -139,7 +139,7 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
       model,
       temperature: 0,
       maxTokens: 1200,
-      timeout: 12000,
+      timeout: 30000,
     })
     const interpreter = new LlmAgentIntentInterpreter({
       chat: llmClient.chat.bind(llmClient),

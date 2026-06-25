@@ -54,22 +54,38 @@ const waitForServer = async (url, timeoutMs = 30_000) => {
   return false
 }
 
-const startDevServer = async (port) => {
-  const url = `http://127.0.0.1:${port}/`
-  if (await waitForServer(url, 1_000)) {
+const startDevServer = async (port, options = {}) => {
+  if (options.reuseExisting) {
+    const url = `http://127.0.0.1:${port}/`
+    if (await waitForServer(url, 1_000)) {
+      return { url, stop: async () => undefined, reused: true }
+    }
+  }
+
+  let selectedPort = port
+  while (await waitForServer(`http://127.0.0.1:${selectedPort}/`, 400)) {
+    selectedPort += 1
+    if (selectedPort > port + 20) {
+      throw new Error(`No available foreground browser test port from ${port} to ${port + 20}.`)
+    }
+  }
+
+  const url = `http://127.0.0.1:${selectedPort}/`
+  if (options.reuseExisting && await waitForServer(url, 1_000)) {
     return { url, stop: async () => undefined, reused: true }
   }
 
   const command = process.platform === 'win32' ? 'cmd.exe' : 'npm'
   const args = process.platform === 'win32'
-    ? ['/d', '/s', '/c', `npm run dev -- --host 127.0.0.1 --port ${port}`]
-    : ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(port)]
+    ? ['/d', '/s', '/c', `npm run dev -- --host 127.0.0.1 --port ${selectedPort}`]
+    : ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(selectedPort)]
   const child = spawn(command, args, {
     cwd: rootDir,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
       FORCE_COLOR: '0',
+      VITE_AGENT_RUNTIME_MODE: 'local',
     },
   })
 
@@ -171,10 +187,10 @@ const installBrowserLlmMock = async (page) => {
           mode: 'react',
           actions: [],
           reactTask: {
-            objective: '继续核验世界杯亚洲球队素材后再决定是否更新草案',
+            objective: '继续核验世界杯亚洲球队素材后更新草案方向',
             maxTurns: 3,
             batchSize: 2,
-            stopCondition: '素材方向明确后进入草案确认，不直接写正式播单',
+            stopCondition: '素材方向明确后直接更新草案，不直接写正式播单',
             nextActions: [{
               type: 'research_check',
               purpose: 'candidate_precheck',
@@ -184,7 +200,7 @@ const installBrowserLlmMock = async (page) => {
               queries: ['世界杯 亚洲球队 介绍', '中国队 日本队 韩国队 足球介绍'],
             }],
           },
-          assistantReplyDraft: '我接着上一轮任务先核素材库，确认前不会更新草案，也不会写入正式轮播单。',
+          assistantReplyDraft: '我接着上一轮任务先核素材库；能定位到草案段就直接更新草案，不会写入正式轮播单。',
           reasoning: '前台上下文里存在 activeReactTask，用户说继续，应续跑查证任务。',
         }))
       }
@@ -198,7 +214,131 @@ const installBrowserLlmMock = async (page) => {
       }
 
       if (options?.traceLabel === 'agent_react_synthesize') {
-        return markReturn('我先查了当前草案段和素材库，静安寺、商圈现场这类素材比较贴近这个方向。确认前我不会更新草案，也不会写入节目。需要我把这个方向更新到草案吗？')
+        return markReturn('我先查了当前草案段和素材库，静安寺、商圈现场这类素材比较贴近这个方向。能定位到草案段时我会直接更新草案；正式播单不会被写入。')
+      }
+
+      if (userInput.includes('看东方后继续插入一个看东方节目')) {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'insert',
+            confidence: 0.94,
+            pendingAction: 'continue_pending',
+            slots: {
+              targetTime: '01:00:00',
+              programHint: '看东方',
+            },
+            searchAlternatives: ['看东方', '东方卫视 看东方'],
+            assistantFeedback: '我会接在当前轮播单里已排的《看东方》后面继续插入，写入前先让你确认候选。',
+            reasoning: '轮播单当前已有看东方节目，用户要求接在它后面继续插入同栏目节目。',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command' }],
+          assistantReplyDraft: '我会接在当前轮播单里已排的《看东方》后面继续插入，写入前先让你确认候选。',
+          reasoning: '用户提出基于当前轮播队列锚点的插入。',
+        }))
+      }
+
+      if (userInput.includes('继续插入一个看东方节目')) {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'insert',
+            confidence: 0.9,
+            slots: {
+              programHint: '看东方',
+            },
+            searchAlternatives: ['看东方', '东方卫视 看东方'],
+            assistantFeedback: '我知道你想继续插入《看东方》，还需要确认插在队列的哪个位置。',
+            reasoning: '用户给了节目线索，但没有给轮播队列位置。',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command' }],
+          assistantReplyDraft: '我知道你想继续插入《看东方》，还需要确认插在队列的哪个位置。',
+          reasoning: '用户提出插入节目但缺少位置。',
+        }))
+      }
+
+      if (userInput === '插入看东方') {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'insert',
+            confidence: 0.9,
+            slots: {
+              programHint: '看东方',
+            },
+            searchAlternatives: ['看东方', '东方卫视 看东方'],
+            assistantFeedback: '我知道你想插入《看东方》，还需要确认插在队列的哪个位置。',
+            reasoning: '用户给了节目线索，但没有给轮播队列位置。',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command' }],
+          assistantReplyDraft: '我知道你想插入《看东方》，还需要确认插在队列的哪个位置。',
+          reasoning: '用户提出插入节目但缺少位置。',
+        }))
+      }
+
+      if (userInput.includes('换成1点插入')) {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'insert',
+            confidence: 0.92,
+            pendingAction: promptText.includes('pendingTask') ? 'continue_pending' : undefined,
+            slots: {
+              targetTime: '01:00:00',
+            },
+            assistantFeedback: '我把插入位置改到轮播队列的1点位置，节目线索继续沿用《看东方》。',
+            reasoning: '用户在补充上一条插入任务的位置，应该沿用上一轮节目线索。',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command' }],
+          assistantReplyDraft: '我把插入位置改到轮播队列的1点位置，节目线索继续沿用《看东方》。',
+          reasoning: '用户在补充上一条插入任务的位置。',
+        }))
+      }
+
+      if (userInput.includes('就在已插入的看东方节目后')) {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'insert',
+            confidence: 0.92,
+            pendingAction: 'continue_pending',
+            slots: {
+              targetTime: '01:00:00',
+            },
+            assistantFeedback: '我会接在当前轮播单里已排的《看东方》后面继续插入。',
+            reasoning: '用户在补充上一条待确认插入的位置，沿用上一轮节目线索。',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command' }],
+          assistantReplyDraft: '我会接在当前轮播单里已排的《看东方》后面继续插入。',
+          reasoning: '用户在补充上一条插入任务的位置。',
+        }))
+      }
+
+      if (userInput.includes('1点的看东方向后移动1小时')) {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'move',
+            confidence: 0.93,
+            slots: {
+              targetTime: '13:00:00',
+              targetProgramName: '看东方',
+              offsetSeconds: 3600,
+              direction: 'forward',
+            },
+            assistantFeedback: '我会按当前轮播队列里的《看东方》这一条，向后顺延1小时。',
+            reasoning: '轮播单里1点按相对队列位置理解，同时用户给出了节目名，应按节目名定位。',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command' }],
+          assistantReplyDraft: '我会按当前轮播队列里的《看东方》这一条，向后顺延1小时。',
+          reasoning: '用户要求移动当前轮播队列中的看东方节目。',
+        }))
       }
 
       if (userInput.includes('9点插入看东方')) {
@@ -227,6 +367,75 @@ const installBrowserLlmMock = async (page) => {
           actions: [{ type: 'atomic_command' }],
           assistantReplyDraft: '我理解你要在9点插入《生命树》第5集，我会先核对候选，符合规则后再处理。',
           reasoning: '用户给出了明确时间和具体剧集，属于精准原子插入，不需要 ReAct。',
+        }))
+      }
+
+      if (userInput.includes('23:30之后帮我再排入个节目')) {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'insert',
+            confidence: 0.8,
+            slots: {
+              targetTime: '23:30:00',
+            },
+            assistantFeedback: '我理解你想在23:30之后补一个节目，但还缺节目方向。你可以说具体节目名，也可以让我按晚间时段推荐。',
+            reasoning: '用户给出了电视播单里的插入位置，但没有给出节目线索。',
+          }))
+        }
+        if (options?.traceLabel === 'atomic_intent') {
+          return markReturn(JSON.stringify({
+            type: 'insert',
+            confidence: 0.82,
+            reasoning: '用户给出了插入位置，但节目方向还不明确。',
+          }))
+        }
+        if (options?.traceLabel === 'atomic_insert_params') {
+          return markReturn(JSON.stringify({
+            targetTime: '23:30:00',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command' }],
+          assistantReplyDraft: '我先按23:30之后这个正式播单位置理解，但还需要节目方向；你也可以让我推荐。',
+          reasoning: '用户提出正式播单插入，但节目线索缺失。',
+        }))
+      }
+
+      if (userInput.includes('你可以推荐') && promptText.includes('23:30')) {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'insert',
+            confidence: 0.88,
+            pendingAction: promptText.includes('pendingTask') ? 'continue_pending' : undefined,
+            slots: {
+              targetTime: '23:30:00',
+              programHint: '今晚',
+            },
+            searchAlternatives: ['今晚 晚间观察', '晚间专题 观察', '夜间 新闻评论'],
+            assistantFeedback: '我按当前电视播单的23:30位置继续推荐。这个时段更适合晚间观察或新闻评论类节目，我先查《今晚》方向。',
+            reasoning: '用户回复“你可以推荐”，应沿用上一轮23:30正式播单插入位置，并补入晚间节目推荐方向。',
+          }))
+        }
+        if (options?.traceLabel === 'atomic_intent') {
+          return markReturn(JSON.stringify({
+            type: 'insert',
+            confidence: 0.9,
+            reasoning: '用户是在继续上一条23:30之后插入节目请求，并要求系统推荐。',
+          }))
+        }
+        if (options?.traceLabel === 'atomic_insert_params') {
+          return markReturn(JSON.stringify({
+            targetTime: '23:30:00',
+            programName: '今晚',
+            rawProgramText: '今晚',
+            semanticLabel: '晚间观察',
+            programTypeHint: 'news_commentary',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command' }],
+          assistantReplyDraft: '我会沿用刚才的23:30之后位置，按晚间观察方向查节目候选，不会改草案。',
+          reasoning: '用户要求系统推荐，应继续上一轮正式播单插入任务。',
         }))
       }
 
@@ -289,6 +498,17 @@ const installBrowserLlmMock = async (page) => {
       }
 
       if (userInput.includes('当前播单有什么节目') || userInput.includes('这张编单整体风格怎么样') || userInput.includes('那怎么优化')) {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'query',
+            confidence: 0.94,
+            pendingAction: promptText.includes('pendingTask') ? 'start_new_task' : undefined,
+            queryKind: 'schedule_summary',
+            slots: {},
+            assistantFeedback: '我先看当前播单内容，这只是查询，不会改动播单。',
+            reasoning: '用户开始询问当前播单内容，应结束上一条待确认修改并按只读查询处理。',
+          }))
+        }
         return markReturn(plannerResponse({
           actions: [{ type: 'read_only_analysis', analysisKind: userInput.includes('优化') ? 'optimization_suggestion' : 'playlist_analysis' }],
           assistantReplyDraft: '我先只看当前编单内容，不会改动播单。',
@@ -322,7 +542,7 @@ const installBrowserLlmMock = async (page) => {
             programTypeHint: 'news_magazine',
             queries: ['静安寺 宣传片', '静安寺 商圈 现场', '上海 景点 城市宣传片'],
           }],
-          assistantReplyDraft: '我先查一下这一段有没有合适素材，确认前不会更新草案，也不会写入节目。',
+          assistantReplyDraft: '我先查一下这一段有没有合适素材；能定位到草案段就直接更新草案，不会写入节目。',
           reasoning: '用户要求先核验草案段的素材方向。',
         }))
       }
@@ -332,6 +552,42 @@ const installBrowserLlmMock = async (page) => {
           actions: [{ type: 'formal_orchestration', mode: 'full_generate', useLayoutDraft: true }],
           assistantReplyDraft: '我先检查这张轮播单的草案。没有草案时，我不能直接排完整单；你可以先告诉我总时长和主要内容，我帮你整理草案。',
           reasoning: '用户要整体编排轮播单，轮播单整体编排必须有草案。',
+        }))
+      }
+
+      if (userInput.includes('新建一个1小时40分钟轮播单，拆成10段亚洲队介绍')) {
+        return markReturn(plannerResponse({
+          actions: [
+            { type: 'create_playlist', playlistType: 'rotation', rotationStrategy: 'content_match', rotationDurationSeconds: 6000 },
+            {
+              type: 'prepare_layout_draft',
+              rotationDurationSeconds: 6000,
+              semanticLabel: '亚洲队介绍轮播草案',
+              segments: Array.from({ length: 10 }, (_, index) => ({
+                start: `0${Math.floor(index / 6)}:${String((index % 6) * 10).padStart(2, '0')}:00`,
+                end: `0${Math.floor((index + 1) / 6)}:${String(((index + 1) % 6) * 10).padStart(2, '0')}:00`,
+                semanticLabel: `亚洲队${index + 1}介绍`,
+                programTypeHint: 'sports',
+              })),
+            },
+          ],
+          assistantReplyDraft: '我先建一张1小时40分钟轮播单，并拆成10个亚洲队介绍草案块。确认前不会写入正式节目。',
+          reasoning: '用户要求新建轮播单并生成10个编号草案块。',
+        }))
+      }
+
+      if (userInput.includes('亚洲队10介绍换成中国队介绍')) {
+        return markReturn(plannerResponse({
+          actions: [{
+            type: 'refine_layout_draft',
+            rotationDurationSeconds: 6000,
+            targetSegmentIndex: 10,
+            targetSegmentLabel: '亚洲队10介绍',
+            semanticLabel: '中国队介绍',
+            programTypeHint: 'sports',
+          }],
+          assistantReplyDraft: '我会把第10段从亚洲队10介绍调整为中国队介绍，只更新草案，不写正式节目。',
+          reasoning: '用户按草案块名称提出局部微调。',
         }))
       }
 
@@ -518,6 +774,15 @@ const bodyLines = async (page, matcher) => {
   return text.split('\n').map((line) => line.trim()).filter((line) => line && (!matcher || matcher.test(line)))
 }
 
+const openLatestDetailsAndRead = async (page) => {
+  const processToggles = page.locator('.process-toggle')
+  await processToggles.last().click({ timeout: 10_000 })
+  const toggles = page.locator('.details-toggle')
+  await toggles.last().click({ timeout: 10_000 })
+  await waitForText(page, ['本轮轨迹'])
+  return page.locator('body').innerText()
+}
+
 const waitForPageHarness = async (page) => {
   await page.waitForFunction(() => Boolean(window.__AIBIANDAN_PAGE_HARNESS__), { timeout: 30_000 })
 }
@@ -570,14 +835,43 @@ const scenarios = [
   },
   {
     id: 'one-shot-create-rotation-with-draft',
-    description: '用户一句话同时新建轮播单和草案，LLM 返回两个动作并落到左侧草案',
+    description: '用户一句话同时新建轮播单和草案，LLM 返回两个动作并落到左侧草案；可拆成多段，也可先保留一个总内容块',
     run: async (page) => {
       await sendMessage(page, '新建一个1小时轮播单，主要涵盖世界杯亚洲球队介绍')
-      await waitForText(page, ['当前工作区 · 轮播单', '中国队介绍', '日本队介绍', '韩国队介绍'])
+      await waitForText(page, ['当前工作区 · 轮播单', '轮播草案', '目标总时长 1小时', '世界杯亚洲球队介绍'])
 
       const lines = await bodyLines(page, /轮播|草案|中国队|日本队|韩国队|正式/)
       return {
         evidence: lines.slice(-16),
+        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
+  {
+    id: 'rotation-draft-numbered-segment-refine',
+    description: '轮播草案按编号块局部修改时，第10段不能被误认为第1段',
+    run: async (page) => {
+      await sendMessage(page, '新建一个1小时40分钟轮播单，拆成10段亚洲队介绍')
+      await waitForText(page, ['当前工作区 · 轮播单', '亚洲队1介绍', '亚洲队10介绍'])
+
+      await sendMessage(page, '亚洲队10介绍换成中国队介绍')
+      await waitForText(page, ['已按你的要求更新当前轮播草案', '中国队介绍'])
+
+      const labels = await page.locator('.layout-draft-workspace-label').allTextContents()
+      if (labels[0] !== '亚洲队1介绍') {
+        throw new Error(`Expected first draft segment to stay 亚洲队1介绍, got ${labels[0] ?? '<missing>'}.`)
+      }
+      if (labels[9] !== '中国队介绍') {
+        throw new Error(`Expected tenth draft segment to become 中国队介绍, got ${labels[9] ?? '<missing>'}.`)
+      }
+      if (labels.filter((label) => label === '亚洲队1介绍').length !== 1) {
+        throw new Error(`Expected only one 亚洲队1介绍 segment, got ${labels.join(' / ')}.`)
+      }
+
+      const lines = await bodyLines(page, /亚洲队|中国队|第10段|轮播|草案/)
+      return {
+        evidence: lines.slice(-20),
         llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
         runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
       }
@@ -602,19 +896,34 @@ const scenarios = [
     },
   },
   {
-    id: 'atomic-insert-pending-review',
-    description: '电视播单原子插入走 LLM 理解，并在写入前进入待确认',
+    id: 'atomic-insert-candidate-recommendation',
+    description: '电视播单原子插入候选不唯一时，只给候选建议和补充方向，不进入待确认执行',
     run: async (page) => {
       await page.getByRole('button', { name: '新建电视播单' }).click()
       await waitForText(page, ['当前工作区 · 电视播单'])
 
       await sendMessage(page, '9点插入看东方')
-      await waitForText(page, ['看东方', '待确认'])
+      await waitForText(page, ['看东方', '现在还不能替你直接选其中一个', '你可以补充'])
+      const text = await page.locator('body').innerText()
+      if (text.includes('待确认插入节目') || text.includes('候选推荐')) {
+        throw new Error('Multiple insert candidates should be shown as assistant recommendation text, not a pending selection panel.')
+      }
+      const calls = await page.evaluate(() => window.__goal37LlmCalls ?? [])
+      const insertCalls = calls.filter((call) =>
+        call.traceLabel === 'agent.intent_interpreter' && call.userInput.includes('9点插入看东方')
+      )
+      if (insertCalls.length !== 1) {
+        throw new Error(`Expected one intent-interpreter call for precise TV insert, got ${insertCalls.length}.`)
+      }
+      const detailsText = await openLatestDetailsAndRead(page)
+      if (!detailsText.includes('本轮轨迹') || !detailsText.includes('模型 1 次') || !detailsText.includes('未写入')) {
+        throw new Error('Precise insert details should show one-call trace and non-write status.')
+      }
 
-      const lines = await bodyLines(page, /电视播单|看东方|9点|待确认|确认|写入/)
+      const lines = await bodyLines(page, /电视播单|看东方|9点|候选|补充|直接选/)
       return {
         evidence: lines.slice(-18),
-        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        llmCalls: calls,
         runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
       }
     },
@@ -633,6 +942,16 @@ const scenarios = [
       if (plannerCall?.responsePreview?.includes('"mode":"react"') || plannerCall?.responsePreview?.includes('"reactTask"')) {
         throw new Error('Precise atomic insert unexpectedly activated ReAct.')
       }
+      const preciseCalls = calls.filter((call) =>
+        call.traceLabel === 'agent.intent_interpreter' && call.userInput.includes('生命树第5集')
+      )
+      if (preciseCalls.length !== 1) {
+        throw new Error(`Expected one intent-interpreter call for precise drama insert, got ${preciseCalls.length}.`)
+      }
+      const detailsText = await openLatestDetailsAndRead(page)
+      if (!detailsText.includes('本轮轨迹') || !detailsText.includes('模型 1 次')) {
+        throw new Error('Precise drama insert details should expose one-call trace summary.')
+      }
 
       const lines = await bodyLines(page, /生命树|9点|待确认|候选|插入/)
       return {
@@ -643,14 +962,53 @@ const scenarios = [
     },
   },
   {
-    id: 'pending-new-topic-expires',
-    description: '原子插入待确认时，用户改问当前播单内容，旧 pending 自然失效',
+    id: 'tv-followup-recommend-keeps-formal-insert-context',
+    description: '电视播单缺节目线索后回复“你可以推荐”，继续正式插入上下文，不误更新草案',
     run: async (page) => {
-      await page.getByRole('button', { name: '新建电视播单' }).click()
-      await waitForText(page, ['当前工作区 · 电视播单'])
+      await seedTvSchedule(page, [
+        { startTime: '22:30:00', endTime: '23:00:00', programName: '锦点第001期：当日观察', durationSeconds: 1800, programType: 'commentary' },
+        { startTime: '23:00:00', endTime: '23:30:00', programName: '两说第001期：双城观察', durationSeconds: 1800, programType: 'commentary' },
+      ])
+      await waitForText(page, ['当前工作区 · 电视播单', '两说第001期'])
 
-      await sendMessage(page, '9点插入看东方')
-      await waitForText(page, ['看东方', '待确认'])
+      await sendMessage(page, '23:30之后帮我再排入个节目')
+      await waitForText(page, ['我理解你想在23:30之后补一个节目', '23:30', '缺节目方向'])
+      await sendMessage(page, '你可以推荐')
+      await waitForText(page, ['我按当前电视播单的23:30位置继续推荐'])
+      await waitForText(page, ['查节目库', '今晚', '23:30'])
+      await waitForText(page, ['23:30', '晚间观察', '现在还不能替你直接选其中一个'])
+
+      const text = await page.locator('body').innerText()
+      if (!text.includes('正在按') || !text.includes('查节目库')) {
+        throw new Error('Follow-up recommendation should expose a visible candidate lookup progress step.')
+      }
+      if (text.includes('已更新草案') || text.includes('待确认更新草案')) {
+        throw new Error('Follow-up recommendation should stay on the formal insert path, not update layout draft.')
+      }
+      if (text.includes('上一条待确认操作已失效')) {
+        throw new Error('A non-write clarification context should not expire when the user asks for a recommendation.')
+      }
+
+      const lines = await bodyLines(page, /理解|查节目库|23:30|晚间观察|推荐|候选|草案|失效|正式播单/)
+      return {
+        evidence: lines.slice(-20),
+        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
+  {
+    id: 'pending-new-topic-expires',
+    description: '正式重编待确认时，用户改问当前播单内容，旧 pending 自然失效',
+    run: async (page) => {
+      await seedTvSchedule(page, [
+        { startTime: '07:00:00', endTime: '08:00:00', programName: '看东方 第112期', durationSeconds: 3600 },
+        { startTime: '09:00:00', endTime: '09:45:00', programName: '品质剧场 第8集', durationSeconds: 2700 },
+      ])
+      await waitForText(page, ['当前工作区 · 电视播单', '看东方 第112期'])
+
+      await sendMessage(page, '帮我全天编排')
+      await waitForText(page, ['待确认重新编排', '确认重新编排'])
 
       await sendMessage(page, '当前播单有什么节目')
       await waitForText(page, ['上一条待确认操作已失效', '现在只是分析，没有改动播单'])
@@ -737,13 +1095,13 @@ const scenarios = [
   },
   {
     id: 'rotation-research-check-pending',
-    description: '轮播草案已存在时，用户要求局部素材核验，进入更新草案确认而不直接写入',
+    description: '轮播草案已存在时，用户要求局部素材核验，直接更新草案而不写正式播单',
     run: async (page) => {
       await sendMessage(page, '新建一个1小时轮播单，主要涵盖上海景点介绍')
       await waitForText(page, ['当前工作区 · 轮播单', '静安寺景点宣传片', '商圈现场与城市形象片'])
 
       await sendMessage(page, '第一段静安区景点部分，选择最近3年最火热的景点')
-      await waitForText(page, ['静安寺、商圈现场这类素材', '需要我把这个方向更新到草案吗', '待确认更新草案'])
+      await waitForText(page, ['静安寺、商圈现场这类素材', '已把“静安寺和商圈热门景点素材”更新到左侧草案的第 1 段', '正式播单还没有开始编排'])
 
       const lines = await bodyLines(page, /静安|商圈|素材|更新草案|确认|正式|轮播/)
       return {
@@ -818,7 +1176,7 @@ const scenarios = [
       await waitForText(page, ['当前工作区 · 轮播单', '世界杯亚洲球队素材', '素材核验作为下一步任务'])
 
       await sendMessage(page, '继续')
-      await waitForText(page, ['素材库', '需要我把这个方向更新到草案吗'])
+      await waitForText(page, ['素材库', '已把“世界杯亚洲球队素材”更新到左侧草案的第 1 段', '正式播单还没有开始编排'])
 
       const lines = await bodyLines(page, /世界杯|素材|继续|更新草案|正式轮播单|ReAct|核验/)
       return {
@@ -830,18 +1188,21 @@ const scenarios = [
   },
   {
     id: 'fuzzy-atomic-insert-reacts-then-recommends',
-    description: '模糊原子插入先 ReAct 查证素材，再进入插入候选选择而不是更新草案',
+    description: '模糊原子插入先 ReAct 查证素材，再给插入候选建议而不是更新草案或进入待选择',
     run: async (page) => {
       await page.getByRole('button', { name: '新建电视播单' }).click()
       await waitForText(page, ['当前工作区 · 电视播单'])
 
       await sendMessage(page, '9点插入一个与近期观众特别关心内容相关联的视频内容')
-      await waitForText(page, ['插入推荐', '需选择', '你选一个后我再写入'])
+      await waitForText(page, ['现在还不能替你直接选其中一个', '你可以补充'])
 
       const lines = await bodyLines(page, /近期观众|素材|插入推荐|需选择|更新草案|正式播单|写入/)
       const text = await page.locator('body').innerText()
       if (text.includes('待确认更新草案')) {
         throw new Error('Fuzzy atomic insert should recommend insertion candidates, not update layout draft.')
+      }
+      if (text.includes('待确认插入节目') || text.includes('候选推荐')) {
+        throw new Error('Fuzzy atomic insert should not open a candidate-selection pending panel.')
       }
       return {
         evidence: lines.slice(-22),
@@ -852,19 +1213,113 @@ const scenarios = [
   },
   {
     id: 'rotation-atomic-insert-without-draft',
-    description: '轮播单没有草案时，单条插入仍然走原子确认，不被整体编排门禁拦住',
+    description: '轮播单没有草案时，单条插入仍然走原子候选建议，不被整体编排门禁拦住',
     run: async (page) => {
       await page.getByRole('button', { name: '新建轮播单' }).click()
       await waitForText(page, ['当前工作区 · 轮播单'])
 
       await sendMessage(page, '9点插入看东方')
-      await waitForText(page, ['看东方', '待确认'])
+      await waitForText(page, ['看东方', '现在还不能替你直接选其中一个', '你可以补充'])
+      const text = await page.locator('body').innerText()
+      if (text.includes('这张轮播单还没有可用草案') || text.includes('待确认插入节目')) {
+        throw new Error('Rotation atomic insert should not be blocked by draft gate or open candidate pending.')
+      }
 
-      const lines = await bodyLines(page, /轮播单|看东方|待确认|插入|确认/)
+      const lines = await bodyLines(page, /轮播单|看东方|候选|插入|补充/)
       return {
         evidence: lines.slice(-18),
         llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
         runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
+  {
+    id: 'rotation-queue-anchor-followup-and-relative-move',
+    description: '轮播队列里已排节目后续插入、pending 位置补充和1点相对移动都按队列语义承接',
+    run: async (page) => {
+      await seedRotationSchedule(page, [
+        { startTime: '00:00:00', endTime: '01:00:00', programName: '看东方111期新春特别行动', durationSeconds: 3600, programType: 'news' },
+      ], { rotationDurationSeconds: 7200, rotationStrategy: 'content_match' })
+      await waitForText(page, ['当前工作区 · 轮播单', '看东方111期新春特别行动'])
+
+      await sendMessage(page, '继续插入一个看东方节目')
+      await waitForText(page, ['还需要确认插在队列的哪个位置'])
+
+      await sendMessage(page, '就在已插入的看东方节目后')
+      await waitForText(page, ['看东方', '现在还不能替你直接选其中一个'])
+      let text = await page.locator('body').innerText()
+      if (text.includes('上一条待确认操作已失效')) {
+        throw new Error('Position clarification should continue the pending insert, not expire it.')
+      }
+      if (text.includes('还需要补充插入节目的播出时间')) {
+        throw new Error('Position clarification after an existing rotation item should resolve the insertion point.')
+      }
+
+      await sendMessage(page, '看东方后继续插入一个看东方节目')
+      await waitForText(page, ['看东方', '现在还不能替你直接选其中一个'])
+      text = await page.locator('body').innerText()
+      if (text.includes('还需要补充插入节目的播出时间')) {
+        throw new Error('Direct after-anchor rotation insert should not ask for a clock time.')
+      }
+
+      await sendMessage(page, '1点的看东方向后移动1小时')
+      await waitForText(page, ['操作已完成', '+1小时'])
+      text = await page.locator('body').innerText()
+      if (text.includes('+13小时')) {
+        throw new Error('Rotation move treated 1点 as +13小时 instead of a relative queue position.')
+      }
+
+      const lines = await bodyLines(page, /轮播单|看东方|候选|操作已完成|\+1小时|\+13小时|失效/)
+      return {
+        evidence: lines.slice(-28),
+        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
+  {
+    id: 'rotation-clarification-time-correction-keeps-program',
+    description: '轮播单插入补参时，用户只改时间，必须保留节目名并按轮播相对位置理解',
+    run: async (page) => {
+      await page.getByRole('button', { name: '新建轮播单' }).click()
+      await waitForText(page, ['当前工作区 · 轮播单'])
+
+      await sendMessage(page, '插入看东方')
+      await waitForText(page, ['看东方'])
+      const traceCount = await page.evaluate(() => (window.__AIBIANDAN_RUNTIME_TRACE__ ?? []).length)
+
+      await sendMessage(page, '换成1点插入')
+      await page.waitForFunction((previousCount) => (
+        (window.__AIBIANDAN_RUNTIME_TRACE__ ?? []).length > previousCount
+      ), traceCount, { timeout: 60_000 })
+      await waitForText(page, ['看东方', '1点'])
+
+      const text = await page.locator('body').innerText()
+      if (text.includes('换成插入')) {
+        throw new Error('Pending time correction polluted the programme hint as "换成插入".')
+      }
+      if (text.includes('上一条待确认操作已失效')) {
+        throw new Error('Pending time correction should continue the pending insert, not expire it.')
+      }
+
+      if (text.includes('+13小时')) {
+        throw new Error('Rotation time correction treated 1点 as +13小时 instead of a relative queue position.')
+      }
+
+      const runtimeTrace = await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? [])
+      const traceText = JSON.stringify(runtimeTrace)
+      if (!traceText.includes('看东方')) {
+        throw new Error('Pending time correction lost the original programme hint.')
+      }
+      if (!traceText.includes('01:00:00') && !text.includes('1点')) {
+        throw new Error('Rotation time correction did not keep the corrected 1点 position.')
+      }
+
+      const lines = await bodyLines(page, /轮播单|看东方|1点|插入|候选|确认|失效/)
+      return {
+        evidence: lines.slice(-20),
+        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        runtimeTrace,
       }
     },
   },
@@ -997,7 +1452,7 @@ const main = async () => {
 
   const server = args.has('--no-server')
     ? { url: `http://127.0.0.1:${port}/`, reused: true, stop: async () => undefined }
-    : await startDevServer(port)
+    : await startDevServer(port, { reuseExisting: args.has('--reuse-server') })
   const playwright = await resolvePlaywright()
   const executablePath = resolveChromiumExecutable()
   const results = []

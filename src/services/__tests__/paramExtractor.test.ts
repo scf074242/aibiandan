@@ -48,7 +48,7 @@ describe('ParamExtractor', () => {
     expect(context.nearbyScheduleSummary).toContain('14:30:00-15:00:00 午后新闻')
   })
 
-  it('会在 LLM 返回坏结果时回退到规则提取，并识别补充说明中的删除时间', async () => {
+  it('LLM 返回坏结果时不再回退到本地规则抽参', async () => {
     const extractor = new ParamExtractor({
       chat: vi.fn(async () => ({
         content: 'not-json',
@@ -63,16 +63,13 @@ describe('ParamExtractor', () => {
       }),
     )
 
-    expect(result).toEqual({
-      targetTime: '09:00:00',
-      programName: undefined,
-    })
+    expect(result).toBeNull()
   })
 
-  it('会把补充说明样式的移动补参解析成统一 slot patch', async () => {
+  it('LLM 返回有效移动参数时只做时间格式和偏移量规范化', async () => {
     const extractor = new ParamExtractor({
       chat: vi.fn(async () => ({
-        content: '{"type":"invalid"}',
+        content: '{"targetTime":"9:00","direction":"forward","offsetSeconds":1800}',
       })),
     } as never)
 
@@ -109,187 +106,29 @@ describe('ParamExtractor', () => {
     expect(result).toBeNull()
   })
 
-  it('能识别更口语化的插入表达', async () => {
+  it('LLM 返回有效插入参数时采用模型结构并保留时长换算', async () => {
     const chat = vi.fn(async () => ({
-      content: 'should-not-be-used',
+      content: '{"targetTime":"9:00","rawProgramText":"30分钟宣传片","semanticLabel":"城市宣传片","programTypeHint":"short_clip"}',
     }))
     const extractor = new ParamExtractor({ chat } as never)
 
     const result = await extractor.extractInsertParams(
       buildDialogueContext({
         scheduleState: createScheduleState(),
-        userInput: '9点来个看东方',
+        userInput: '9点插入30分钟宣传片',
         currentSchedule: [],
       }),
     )
 
     expect(result).toEqual({
       targetTime: '09:00:00',
-      programName: '看东方',
-      rawProgramText: '看东方',
-      semanticLabel: undefined,
-      programTypeHint: undefined,
+      programName: '宣传片',
+      rawProgramText: '宣传片',
+      semanticLabel: '城市宣传片',
+      programTypeHint: 'short_clip',
+      expectedDurationSeconds: 1800,
     })
     expect(chat).toHaveBeenCalled()
-  })
-
-  it.each([
-    ['10点加一档东方新闻', {
-      targetTime: '10:00:00',
-      programName: '东方新闻',
-      rawProgramText: '东方新闻',
-      semanticLabel: '新闻',
-      programTypeHint: 'news',
-    }],
-    ['10点放个纪录片', {
-      targetTime: '10:00:00',
-      programName: undefined,
-      rawProgramText: '纪录片',
-      semanticLabel: '纪实',
-      programTypeHint: 'documentary',
-    }],
-    ['10点前垫一条预告', {
-      targetTime: '10:00:00',
-      programName: undefined,
-      rawProgramText: '预告',
-      semanticLabel: '资讯',
-      programTypeHint: 'news_magazine',
-    }],
-    ['10点后放一段现场导视', {
-      targetTime: '10:00:00',
-      programName: undefined,
-      rawProgramText: '现场导视',
-      semanticLabel: '资讯',
-      programTypeHint: 'news_magazine',
-    }],
-    ['10点有没有适合的新闻节目', {
-      targetTime: '10:00:00',
-      programName: undefined,
-      rawProgramText: '新闻节目',
-      semanticLabel: '新闻',
-      programTypeHint: 'news',
-    }],
-    ['10点帮我推荐几个纪录片候选', {
-      targetTime: '10:00:00',
-      programName: undefined,
-      rawProgramText: '纪录片',
-      semanticLabel: '纪实',
-      programTypeHint: 'documentary',
-    }],
-  ])('能从口语化插入命令提取时间和节目偏好: %s', async (input, expected) => {
-    const chat = vi.fn(async () => ({
-      content: 'should-not-be-used',
-    }))
-    const extractor = new ParamExtractor({ chat } as never)
-
-    const result = await extractor.extractInsertParams(
-      buildDialogueContext({
-        scheduleState: createScheduleState(),
-        userInput: input,
-        currentSchedule,
-      }),
-    )
-
-    expect(result).toEqual(expected)
-    expect(chat).toHaveBeenCalled()
-  })
-
-  it('能从撤掉这类删除表达中提取目标时间', async () => {
-    const extractor = new ParamExtractor({
-      chat: vi.fn(async () => ({
-        content: 'should-not-be-used',
-      })),
-    } as never)
-
-    const result = await extractor.extractDeleteParams(
-      buildDialogueContext({
-        scheduleState: createScheduleState(),
-        userInput: '撤掉10点那条节目',
-        currentSchedule,
-      }),
-    )
-
-    expect(result).toEqual({
-      targetTime: '10:00:00',
-      programName: undefined,
-    })
-  })
-
-  it('能从往后挪这类移动表达中提取目标时间和偏移量', async () => {
-    const extractor = new ParamExtractor({
-      chat: vi.fn(async () => ({
-        content: 'should-not-be-used',
-      })),
-    } as never)
-
-    const result = await extractor.extractMoveParams(
-      buildDialogueContext({
-        scheduleState: createScheduleState(),
-        userInput: '10点那档往后挪15分钟',
-        currentSchedule,
-      }),
-    )
-
-    expect(result).toEqual({
-      targetTime: '10:00:00',
-      direction: 'forward',
-      offsetSeconds: 900,
-    })
-  })
-
-  it.each([
-    ['10点那档往后挪十五分钟', '10:00:00', 'forward', 900],
-    ['10点那档提前十分钟', '10:00:00', 'backward', 600],
-    ['10点那档后移半个小时', '10:00:00', 'forward', 1800],
-    ['九点那档往后挪十五分钟', '09:00:00', 'forward', 900],
-    ['两点半那档提前十分钟', '14:30:00', 'backward', 600],
-  ])('能从中文数字移动表达中提取目标时间和偏移量: %s', async (input, targetTime, direction, offsetSeconds) => {
-    const extractor = new ParamExtractor({
-      chat: vi.fn(async () => ({
-        content: 'should-not-be-used',
-      })),
-    } as never)
-
-    const result = await extractor.extractMoveParams(
-      buildDialogueContext({
-        scheduleState: createScheduleState(),
-        userInput: input,
-        currentSchedule,
-      }),
-    )
-
-    expect(result).toEqual({
-      targetTime,
-      direction,
-      offsetSeconds,
-    })
-  })
-
-  it.each([
-    ['10点那条换成一档纪录片', {
-      targetTime: '10:00:00',
-      programName: '纪录片',
-    }],
-    ['把10点节目改成更适合午间的健康节目', {
-      targetTime: '10:00:00',
-      programName: '健康节目',
-    }],
-  ])('能从类别替换命令提取目标时间和替换偏好: %s', async (input, expected) => {
-    const extractor = new ParamExtractor({
-      chat: vi.fn(async () => ({
-        content: 'should-not-be-used',
-      })),
-    } as never)
-
-    const result = await extractor.extractReplaceParams(
-      buildDialogueContext({
-        scheduleState: createScheduleState(),
-        userInput: input,
-        currentSchedule,
-      }),
-    )
-
-    expect(result).toEqual(expected)
   })
 
   it('用户没提时间时不会让 LLM 猜一个 09:00:00 出来', async () => {

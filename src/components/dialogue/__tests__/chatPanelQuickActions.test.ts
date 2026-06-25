@@ -225,9 +225,10 @@ describe('ChatPanel quick actions', () => {
   })
 
   it('formats rotation ranges as duration and relative position in the foreground chat', () => {
-    expect(chatPanelSource).toContain('总时长${durationText}，0点起算')
+    expect(chatPanelSource).toContain('总时长${durationText}')
     expect(chatPanelSource).toContain('相对位置 +${formatPlaylistDurationText(startSeconds)}，持续${durationText}')
     expect(chatPanelSource).toContain('\\d{1,2}:\\d{2}(?::\\d{2})?')
+    expect(chatPanelSource).not.toContain('总时长${durationText}，0点起算')
     expect(chatPanelSource).not.toContain('0点起算，持续${durationText}')
   })
 
@@ -337,10 +338,10 @@ describe('ChatPanel quick actions', () => {
     const createPlaylistBlock = broadcastPlanSource.match(/const handleCreatePlaylist = \(type: Exclude<PlaylistType, 'none'>\) => \{[\s\S]*?\n\}/)?.[0] ?? ''
     const playlistStateChangedBlock = broadcastPlanSource.match(/const handlePlaylistStateChanged = \(payload: \{[\s\S]*?\nconst handlePlaylistFileOpenRequested/)?.[0] ?? ''
 
-    expect(createPlaylistBlock).toContain("currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : null")
+    expect(createPlaylistBlock).toContain("currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : createEmptyRotationLayoutDraft()")
     expect(createPlaylistBlock).toContain("activeWorkspaceTab.value = type === 'tv' && currentLayoutDraft.value ? 'draft' : 'schedule'")
     expect(playlistStateChangedBlock).toContain("payload.playlistType === 'rotation' && (isNewPlaylistDocument || isSwitchingPlaylistType)")
-    expect(playlistStateChangedBlock).toContain('currentLayoutDraft.value = null')
+    expect(playlistStateChangedBlock).toContain('currentLayoutDraft.value = createEmptyRotationLayoutDraft()')
     expect(playlistStateChangedBlock).toContain('currentLayoutDraftFeasibility.value = null')
     expect(playlistStateChangedBlock).toContain("activeWorkspaceTab.value = payload.playlistType === 'tv' && currentLayoutDraft.value ? 'draft' : 'schedule'")
     expect(broadcastPlanSource).toContain("playlistType.value === 'rotation' && Boolean(currentLayoutDraft.value)")
@@ -438,12 +439,15 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).not.toContain('history: messages.value.slice(-6).map((message) => message.content)')
   })
 
-  it('expires pending review state before routing an unrelated foreground message', () => {
+  it('expires write review state before routing an unrelated foreground message without dropping normal LLM context', () => {
     expect(chatPanelSource).toContain('resolvePendingReviewLifecycle')
     expect(chatPanelSource).toContain('const currentWorkspaceKey = resolveCurrentPendingWorkspaceKey()')
     expect(chatPanelSource).toContain('const pendingReviewLifecycle = resolvePendingReviewLifecycle')
     expect(chatPanelSource).toContain('pendingWorkspaceKey: pendingReviewWorkspaceKey.value')
-    expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null')
+    expect(chatPanelSource).toContain('const hasWriteReview = Boolean(pendingCommand.value) || isAtomicContextWriteReview(pendingAtomicContext.value)')
+    expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.hasPendingReview')
+    expect(chatPanelSource).toContain('? (pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null)')
+    expect(chatPanelSource).toContain(': pendingAtomicContext.value')
     expect(chatPanelSource).toContain('if (pendingReviewLifecycle.shouldExpire)')
     expect(chatPanelSource).toContain('pendingCommand.value = null')
     expect(chatPanelSource).toContain('pendingAtomicContext.value = null')
@@ -452,16 +456,11 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('pendingAtomicContext: usablePendingAtomicContext')
   })
 
-  it('routes the next user turn as layout draft continuation after a partial draft prompt', () => {
-    expect(chatPanelSource).toContain('const preferLayoutDraftContinuation = ref(false)')
-    expect(chatPanelSource).toContain('const rememberLayoutDraftContinuationIfNeeded = (feedback: RuntimeFeedback) =>')
-    expect(chatPanelSource).toContain("feedback.processTypeLabel !== '还要补草案'")
-    expect(chatPanelSource).toContain("draftCompleteness?.status !== 'partial'")
-    expect(chatPanelSource).toContain('preferLayoutDraftContinuation.value = true')
-    expect(chatPanelSource).toContain('const preferLayoutDraftRefine = foregroundLayoutDraftRuntimeEnabled')
-    expect(chatPanelSource).toContain('&& preferLayoutDraftContinuation.value')
-    expect(chatPanelSource).toContain('preferLayoutDraftContinuation.value = false')
-    expect(chatPanelSource).toContain('preferLayoutDraftRefine,')
+  it('does not keep a local layout-draft continuation switch for the next user turn', () => {
+    expect(chatPanelSource).not.toContain('preferLayoutDraftContinuation')
+    expect(chatPanelSource).not.toContain('rememberLayoutDraftContinuationIfNeeded')
+    expect(chatPanelSource).not.toContain('clearLayoutDraftContinuationPreference')
+    expect(chatPanelSource).toContain('preferLayoutDraftRefine: false')
   })
 
   it('interrupts stale pending review state before sending a new foreground message to runtime', () => {
@@ -628,10 +627,13 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('transition.changed')
   })
 
-  it('treats pending review like a one-turn Codex review gate in the foreground input path', () => {
+  it('treats write confirmation review like a one-turn UI gate while keeping other LLM context alive', () => {
     expect(chatPanelSource).toContain('const pendingReviewLifecycle = resolvePendingReviewLifecycle')
     expect(chatPanelSource).toContain('const usablePendingCommand = pendingReviewLifecycle.canUsePendingReview ? pendingCommand.value : null')
-    expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null')
+    expect(chatPanelSource).toContain('const hasWriteReview = Boolean(pendingCommand.value) || isAtomicContextWriteReview(pendingAtomicContext.value)')
+    expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.hasPendingReview')
+    expect(chatPanelSource).toContain('? (pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null)')
+    expect(chatPanelSource).toContain(': pendingAtomicContext.value')
     expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewCancelText(content))')
     expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewConfirmText(content))')
     expect(chatPanelSource).toContain('const buildPendingExecuteInput = (pendingCommand: RuntimePendingCommand) =>')
