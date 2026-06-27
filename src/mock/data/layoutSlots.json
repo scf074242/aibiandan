@@ -1,0 +1,135 @@
+[
+  {
+    "id": "dragon-0600",
+    "channelId": "dragon",
+    "startClock": "06:00:00",
+    "endClock": "07:00:00",
+    "columnId": "115"
+  },
+  {
+    "id": "dragon-0700",
+    "channelId": "dragon",
+    "startClock": "07:00:00",
+    "endClock": "09:00:00",
+    "columnId": "101"
+  },
+  {
+    "id": "dragon-0900",
+    "channelId": "dragon",
+    "startClock": "09:00:00",
+    "endClock": "09:30:00",
+    "columnId": "107"
+  },
+  {
+    "id": "dragon-0930",
+    "channelId": "dragon",
+    "startClock": "09:30:00",
+    "endClock": "12:00:00",
+    "columnId": "112"
+  },
+  {
+    "id": "dragon-1200",
+    "channelId": "dragon",
+    "startClock": "12:00:00",
+    "endClock": "12:30:00",
+    "columnId": "102"
+  },
+  {
+    "id": "dragon-1230",
+    "channelId": "dragon",
+    "startClock": "12:30:00",
+    "endClock": "13:00:00",
+    "columnId": "104"
+  },
+  {
+    "id": "dragon-1300",
+    "channelId": "dragon",
+    "startClock": "13:00:00",
+    "endClock": "13:30:00",
+    "columnId": "105"
+  },
+  {
+    "id": "dragon-1330",
+    "channelId": "dragon",
+    "startClock": "13:30:00",
+    "endClock": "17:30:00",
+    "columnId": "113"
+  },
+  {
+    "id": "dragon-1730",
+    "channelId": "dragon",
+    "startClock": "17:30:00",
+    "endClock": "17:45:00",
+    "columnId": "106"
+  },
+  {
+    "id": "dragon-1745",
+    "channelId": "dragon",
+    "startClock": "17:45:00",
+    "endClock": "18:00:00",
+    "columnId": "105"
+  },
+  {
+    "id": "dragon-1830",
+    "channelId": "dragon",
+    "startClock": "18:30:00",
+    "endClock": "19:00:00",
+    "columnId": "103"
+  },
+  {
+    "id": "dragon-1900",
+    "channelId": "dragon",
+    "startClock": "19:00:00",
+    "endClock": "19:30:00",
+    "columnId": "118"
+  },
+  {
+    "id": "dragon-1930",
+    "channelId": "dragon",
+    "startClock": "19:30:00",
+    "endClock": "21:00:00",
+    "columnId": "119"
+  },
+  {
+    "id": "dragon-2100",
+    "channelId": "dragon",
+    "startClock": "21:00:00",
+    "endClock": "21:30:00",
+    "columnId": "120"
+  },
+  {
+    "id": "dragon-2130",
+    "channelId": "dragon",
+    "startClock": "21:30:00",
+    "endClock": "22:00:00",
+    "columnId": "121"
+  },
+  {
+    "id": "dragon-2200",
+    "channelId": "dragon",
+    "startClock": "22:00:00",
+    "endClock": "22:30:00",
+    "columnId": "122"
+  },
+  {
+    "id": "dragon-2230",
+    "channelId": "dragon",
+    "startClock": "22:30:00",
+    "endClock": "23:00:00",
+    "columnId": "109"
+  },
+  {
+    "id": "dragon-2300",
+    "channelId": "dragon",
+    "startClock": "23:00:00",
+    "endClock": "23:30:00",
+    "columnId": "123"
+  },
+  {
+    "id": "dragon-2330",
+    "channelId": "dragon",
+    "startClock": "23:30:00",
+    "endClock": "23:59:59",
+    "columnId": "124"
+  }
+]

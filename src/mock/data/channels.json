@@ -1,0 +1,10 @@
+[
+  {
+    "id": "dragon",
+    "name": "东方卫视",
+    "code": "DRAGON",
+    "timeZone": "Asia/Shanghai",
+    "defaultStartTime": "06:00:00",
+    "defaultEndTime": "23:59:59"
+  }
+]

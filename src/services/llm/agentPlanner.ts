@@ -1,0 +1,581 @@
+import type {
+  LayoutIntentSegment,
+  LayoutDraft,
+  LlmFailureInfo,
+  PlaylistType,
+  RotationPlaylistStrategy,
+  ScheduleState,
+  TaskMode,
+} from '@/types/orchestration'
+import type { ChatMessage } from '@/types/llm'
+import type { ForegroundAgentContextPackage } from '@/services/runtime/foregroundAgentContextPackage'
+import type { ReactTaskPlannerDraft } from '@/services/runtime/reactTaskTypes'
+import type { RuntimeScheduleItem } from '@/services/runtime/demoRuntimeFacade'
+import type { LLMClient } from './llmClient'
+import { buildLlmFailureInfo } from './llmFailure'
+
+export type AgentPlannerAtomicIntent = 'move' | 'insert' | 'replace' | 'delete' | 'batch_move' | 'batch_delete' | 'query' | 'validate'
+
+export type AgentPlannerAction =
+  | {
+      type: 'create_playlist'
+      playlistType: Exclude<PlaylistType, 'none'>
+      rotationStrategy?: RotationPlaylistStrategy
+      rotationDurationSeconds?: number
+    }
+  | {
+      type: 'prepare_layout_draft' | 'refine_layout_draft'
+      userIntent?: string
+      semanticLabel?: string
+      programTypeHint?: string
+      targetSegmentIndex?: number
+      targetSegmentLabel?: string
+      targetTimeRange?: { start: string; end: string }
+      rotationDurationSeconds?: number
+      ignoreExistingLayout?: boolean
+      segments?: LayoutIntentSegment[]
+    }
+  | {
+      type: 'commit_layout_draft'
+      mode?: Extract<TaskMode, 'full_generate' | 'partial_generate'>
+      useLayoutDraft?: boolean
+    }
+  | {
+      type: 'formal_orchestration'
+      mode: Extract<TaskMode, 'full_generate' | 'partial_generate'>
+      useLayoutDraft?: boolean
+      targetTimeRange?: { start: string; end: string }
+    }
+  | {
+      type: 'atomic_command'
+      intent?: AgentPlannerAtomicIntent
+      targetTime?: string
+      newStartTime?: string
+      rangeStart?: string
+      rangeEnd?: string
+      programHint?: string
+      replacementHint?: string
+      offsetSeconds?: number
+      direction?: 'forward' | 'backward'
+      candidateId?: string
+      targetItemId?: string
+      targetProgramName?: string
+      keyword?: string
+      searchAlternatives?: string[]
+    }
+  | {
+      type: 'read_only_analysis'
+      analysisKind?: 'playlist_analysis' | 'optimization_suggestion'
+    }
+  | {
+      type: 'research_check'
+      purpose?: 'draft_precheck' | 'candidate_precheck' | 'external_trend_check'
+      targetTime?: string
+      targetSegmentIndex?: number
+      targetSegmentLabel?: string
+      semanticLabel?: string
+      programTypeHint?: string
+      queries?: string[]
+    }
+  | {
+      type: 'validate'
+    }
+  | {
+      type: 'clarify'
+      question?: string
+    }
+
+export type AgentPlanMode = 'single' | 'react'
+
+export interface AgentPlannerInput {
+  scheduleState: ScheduleState
+  userInput: string
+  currentSchedule: RuntimeScheduleItem[]
+  currentLayoutDraft?: LayoutDraft | null
+  history?: string[]
+  contextPackage?: ForegroundAgentContextPackage
+}
+
+export interface AgentPlan {
+  mode?: AgentPlanMode
+  actions: AgentPlannerAction[]
+  reactTask?: ReactTaskPlannerDraft<AgentPlannerAction>
+  assistantReplyDraft?: string
+  reasoning?: string
+  llmFailure?: LlmFailureInfo
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+  typeof value === 'object' && value !== null
+)
+
+const normalizeClock = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  if (!match) return undefined
+  const hour = Number(match[1])
+  const minute = Number(match[2])
+  const second = Number(match[3] ?? '0')
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return undefined
+  return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:${second.toString().padStart(2, '0')}`
+}
+
+const normalizeTimeRange = (value: unknown): { start: string; end: string } | undefined => {
+  if (!isRecord(value)) return undefined
+  const start = normalizeClock(value.start)
+  const end = normalizeClock(value.end)
+  return start && end ? { start, end } : undefined
+}
+
+const buildPlannerForegroundContext = (contextPackage?: ForegroundAgentContextPackage) => {
+  if (!contextPackage) return undefined
+  return {
+    scenario: contextPackage.scenario,
+    workspace: {
+      playlistType: contextPackage.workspace.playlistType,
+      channelName: contextPackage.workspace.channelName,
+      date: contextPackage.workspace.date,
+      rotationStrategy: contextPackage.workspace.rotationStrategy,
+      rotationDurationSeconds: contextPackage.workspace.rotationDurationSeconds,
+      itemCount: contextPackage.workspace.itemCount,
+      gapCount: contextPackage.workspace.gapCount,
+      scheduleSummary: contextPackage.workspace.scheduleSummary.slice(0, 8),
+    },
+    layoutDraft: {
+      available: contextPackage.layoutDraft.available,
+      referencedByCurrentTask: contextPackage.layoutDraft.referencedByCurrentTask,
+      coverage: contextPackage.layoutDraft.coverage,
+      segmentCount: contextPackage.layoutDraft.segmentCount,
+      completeness: contextPackage.layoutDraft.completeness,
+      segments: contextPackage.layoutDraft.segments?.slice(0, 12),
+    },
+    review: contextPackage.review
+      ? {
+          kind: contextPackage.review.kind,
+          action: contextPackage.review.action,
+          summary: contextPackage.review.summary,
+        }
+      : null,
+    activeReactTask: contextPackage.reactTask.active || contextPackage.reactTask.recovery?.canRetry
+      ? contextPackage.reactTask
+      : null,
+    allowedActions: contextPackage.allowedActions.slice(0, 12),
+  }
+}
+
+const normalizeSegment = (value: unknown): LayoutIntentSegment | null => {
+  if (!isRecord(value)) return null
+  const start = normalizeClock(value.start)
+  const end = normalizeClock(value.end)
+  const semanticLabel = typeof value.semanticLabel === 'string'
+    ? value.semanticLabel.trim()
+    : typeof value.label === 'string'
+      ? value.label.trim()
+      : ''
+  if (!start || !end || !semanticLabel) return null
+  return {
+    start,
+    end,
+    semanticLabel,
+    programTypeHint: typeof value.programTypeHint === 'string' ? value.programTypeHint.trim() : undefined,
+    sequential: typeof value.sequential === 'boolean' ? value.sequential : undefined,
+  }
+}
+
+const normalizeAction = (value: unknown): AgentPlannerAction | null => {
+  if (!isRecord(value) || typeof value.type !== 'string') return null
+  if (value.type === 'create_playlist') {
+    const playlistType = value.playlistType === 'tv' || value.playlistType === 'rotation'
+      ? value.playlistType
+      : null
+    if (!playlistType) return null
+    const rotationStrategy = value.rotationStrategy === 'rating' || value.rotationStrategy === 'trending' || value.rotationStrategy === 'content_match'
+      ? value.rotationStrategy
+      : undefined
+    return {
+      type: 'create_playlist',
+      playlistType,
+      rotationStrategy,
+      rotationDurationSeconds: typeof value.rotationDurationSeconds === 'number'
+        ? value.rotationDurationSeconds
+        : typeof value.targetDurationSeconds === 'number'
+          ? value.targetDurationSeconds
+          : undefined,
+    }
+  }
+  if (value.type === 'prepare_layout_draft' || value.type === 'refine_layout_draft') {
+    const segments = Array.isArray(value.segments)
+      ? value.segments.map(normalizeSegment).filter((item): item is LayoutIntentSegment => Boolean(item))
+      : undefined
+    const targetSegmentIndex = typeof value.targetSegmentIndex === 'number' && Number.isFinite(value.targetSegmentIndex)
+      ? Math.max(1, Math.floor(value.targetSegmentIndex))
+      : undefined
+    return {
+      type: value.type,
+      userIntent: typeof value.userIntent === 'string' ? value.userIntent.trim() : undefined,
+      semanticLabel: typeof value.semanticLabel === 'string'
+        ? value.semanticLabel.trim()
+        : typeof value.theme === 'string'
+          ? value.theme.trim()
+          : undefined,
+      programTypeHint: typeof value.programTypeHint === 'string' ? value.programTypeHint.trim() : undefined,
+      targetSegmentIndex,
+      targetSegmentLabel: typeof value.targetSegmentLabel === 'string' ? value.targetSegmentLabel.trim() : undefined,
+      targetTimeRange: normalizeTimeRange(value.targetTimeRange),
+      rotationDurationSeconds: typeof value.rotationDurationSeconds === 'number'
+        ? value.rotationDurationSeconds
+        : typeof value.targetDurationSeconds === 'number'
+          ? value.targetDurationSeconds
+          : undefined,
+      ignoreExistingLayout: value.ignoreExistingLayout === true,
+      segments,
+    }
+  }
+  if (value.type === 'commit_layout_draft') {
+    return {
+      type: 'commit_layout_draft',
+      mode: value.mode === 'full_generate' || value.mode === 'partial_generate' ? value.mode : undefined,
+      useLayoutDraft: value.useLayoutDraft === true,
+    }
+  }
+  if (value.type === 'formal_orchestration') {
+    return {
+      type: 'formal_orchestration',
+      mode: value.mode === 'partial_generate' ? 'partial_generate' : 'full_generate',
+      useLayoutDraft: value.useLayoutDraft === true,
+      targetTimeRange: normalizeTimeRange(value.targetTimeRange),
+    }
+  }
+  if (value.type === 'atomic_command') {
+    const searchAlternatives = Array.isArray(value.searchAlternatives)
+      ? value.searchAlternatives
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 8)
+      : undefined
+    const intent = (
+      value.intent === 'move'
+      || value.intent === 'insert'
+      || value.intent === 'replace'
+      || value.intent === 'delete'
+      || value.intent === 'batch_move'
+      || value.intent === 'batch_delete'
+      || value.intent === 'query'
+      || value.intent === 'validate'
+    )
+      ? value.intent
+      : undefined
+    return {
+      type: 'atomic_command',
+      intent,
+      targetTime: normalizeClock(value.targetTime),
+      newStartTime: normalizeClock(value.newStartTime),
+      rangeStart: normalizeClock(value.rangeStart),
+      rangeEnd: normalizeClock(value.rangeEnd),
+      programHint: typeof value.programHint === 'string' ? value.programHint.trim() : undefined,
+      replacementHint: typeof value.replacementHint === 'string' ? value.replacementHint.trim() : undefined,
+      offsetSeconds: typeof value.offsetSeconds === 'number' && Number.isFinite(value.offsetSeconds) ? value.offsetSeconds : undefined,
+      direction: value.direction === 'forward' || value.direction === 'backward' ? value.direction : undefined,
+      candidateId: typeof value.candidateId === 'string' ? value.candidateId.trim() : undefined,
+      targetItemId: typeof value.targetItemId === 'string' ? value.targetItemId.trim() : undefined,
+      targetProgramName: typeof value.targetProgramName === 'string' ? value.targetProgramName.trim() : undefined,
+      keyword: typeof value.keyword === 'string' ? value.keyword.trim() : undefined,
+      searchAlternatives,
+    }
+  }
+  if (value.type === 'validate' || value.type === 'read_only_analysis') {
+    return value.type === 'read_only_analysis'
+      ? {
+          type: 'read_only_analysis',
+          analysisKind: value.analysisKind === 'optimization_suggestion' ? 'optimization_suggestion' : 'playlist_analysis',
+        }
+      : { type: value.type }
+  }
+  if (value.type === 'research_check') {
+    const purpose = value.purpose === 'candidate_precheck' || value.purpose === 'external_trend_check'
+      ? value.purpose
+      : 'draft_precheck'
+    const targetSegmentIndex = typeof value.targetSegmentIndex === 'number' && Number.isFinite(value.targetSegmentIndex)
+      ? Math.max(1, Math.floor(value.targetSegmentIndex))
+      : undefined
+    const queries = Array.isArray(value.queries)
+      ? value.queries
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 8)
+      : undefined
+    return {
+      type: 'research_check',
+      purpose,
+      targetTime: normalizeClock(value.targetTime),
+      targetSegmentIndex,
+      targetSegmentLabel: typeof value.targetSegmentLabel === 'string' ? value.targetSegmentLabel.trim() : undefined,
+      semanticLabel: typeof value.semanticLabel === 'string' ? value.semanticLabel.trim() : undefined,
+      programTypeHint: typeof value.programTypeHint === 'string' ? value.programTypeHint.trim() : undefined,
+      queries,
+    }
+  }
+  if (value.type === 'clarify') {
+    return {
+      type: 'clarify',
+      question: typeof value.question === 'string' ? value.question.trim() : undefined,
+    }
+  }
+  return null
+}
+
+const normalizeReactTask = (value: unknown): ReactTaskPlannerDraft<AgentPlannerAction> | undefined => {
+  if (!isRecord(value)) return undefined
+  const rawActions = Array.isArray(value.nextActions)
+    ? value.nextActions
+    : Array.isArray(value.actions)
+      ? value.actions
+      : []
+  const nextActions = rawActions
+    .map(normalizeAction)
+    .filter((item): item is AgentPlannerAction => Boolean(item))
+  if (!nextActions.length) return undefined
+  const objective = typeof value.objective === 'string' && value.objective.trim()
+    ? value.objective.trim()
+    : '长程编排任务'
+  return {
+    objective,
+    maxTurns: typeof value.maxTurns === 'number' ? Math.max(1, Math.min(5, Math.floor(value.maxTurns))) : undefined,
+    batchSize: typeof value.batchSize === 'number' ? Math.max(1, Math.min(10, Math.floor(value.batchSize))) : undefined,
+    stopCondition: typeof value.stopCondition === 'string' ? value.stopCondition.trim() : undefined,
+    nextActions,
+  }
+}
+
+export class AgentPlanner {
+  constructor(private llmClient: LLMClient) {}
+
+  async plan(input: AgentPlannerInput): Promise<AgentPlan> {
+    try {
+      const response = await this.llmClient.chat(this.buildPrompt(input), {
+        temperature: 0.2,
+        maxTokens: 1100,
+        timeout: 30000,
+        maxRetries: 1,
+        traceLabel: 'agent_planner',
+      })
+      return this.parsePlan(response.content)
+    } catch (error) {
+      return {
+        actions: [],
+        llmFailure: buildLlmFailureInfo('agent_planning', error),
+      }
+    }
+  }
+
+  private buildPrompt(input: AgentPlannerInput): ChatMessage[] {
+    const schedule = input.scheduleState
+    const draft = input.currentLayoutDraft
+    const currentDraft = draft
+      ? {
+          exists: true,
+          draftKind: draft.draftKind,
+          targetDurationSeconds: draft.targetDurationSeconds,
+          coverage: draft.coverage,
+          segments: draft.layoutReference.slots.slice(0, 24).map((slot) => {
+            const column = draft.columns.find((item) => item.columnId === slot.columnId)
+            return {
+              start: slot.startTime.split('T')[1]?.slice(0, 8) ?? slot.startTime,
+              end: slot.endTime.split('T')[1]?.slice(0, 8) ?? slot.endTime,
+              label: column?.semanticLabel ?? column?.columnName ?? slot.columnId,
+              programType: column?.defaultProgramType,
+              queryHints: column?.queryHints?.slice(0, 6),
+            }
+          }),
+        }
+      : { exists: false }
+    return [
+      {
+        role: 'system',
+        content: this.buildSystemInstructions(input).join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          workspace: {
+            playlistType: schedule.playlistType ?? 'none',
+            channelId: schedule.channelId,
+            channelName: schedule.channelName,
+            date: schedule.date,
+            itemCount: schedule.itemCount,
+            gapCount: schedule.gapCount,
+            rotationStrategy: schedule.rotationStrategy,
+            rotationDurationSeconds: schedule.rotationDurationSeconds,
+          },
+          currentDraft,
+          currentSchedulePreview: input.currentSchedule.slice(0, 12).map((item) => ({
+            id: item.id,
+            programName: item.programName,
+            startTime: item.startTime,
+            endTime: item.endTime,
+            duration: item.duration,
+            programType: item.programType,
+          })),
+          history: input.history?.slice(-8) ?? [],
+          userInput: input.userInput,
+          foregroundContext: buildPlannerForegroundContext(input.contextPackage),
+        }),
+      },
+    ]
+  }
+
+  private buildSystemInstructions(input: AgentPlannerInput): string[] {
+    const playlistType = input.scheduleState.playlistType ?? 'none'
+    const hasDraft = Boolean(input.currentLayoutDraft)
+    const hasActiveReactTask = Boolean(input.contextPackage?.reactTask.active || input.contextPackage?.reactTask.recovery?.canRetry)
+    return [
+      ...this.buildCorePlannerPolicy(),
+      ...this.buildWorkspacePlannerPolicy(playlistType),
+      ...this.buildDraftPlannerPolicy({ playlistType, hasDraft }),
+      ...this.buildReactPlannerPolicy({ hasActiveReactTask }),
+      ...this.buildOutputPlannerPolicy({ playlistType, hasDraft }),
+    ]
+  }
+
+  private buildCorePlannerPolicy(): string[] {
+    return [
+      '你是 AI 编审助手的 LLM planner。你的任务是理解编排员的自然语言，并返回一个可执行的多动作计划。',
+      '不要把一句话压成单个分类。用户一句话可能同时包含：创建播单、生成草案、细分内容块、只读分析、正式编排、原子修改。',
+      '本地系统只负责安全裁决和执行；你负责理解业务意图、拆动作、生成草案结构。',
+      '上一轮候选、缺参或确认信息会作为上下文提供给你；普通自然语言追问、选择和修正都由你结合上下文理解，不要假设本地会用关键词替你续接。',
+      '当你返回 atomic_command 时，如果你已经从本轮或历史上下文理解到动作、时间/队列位置、节目线索、替换线索或候选选择，必须写入 action 字段：intent、targetTime、programHint、replacementHint、candidateId、targetItemId、targetProgramName、searchAlternatives 等。不要只返回 {"type":"atomic_command"} 后让下一层重新猜。',
+      '多轮补充也一样：如果上一轮是“插入上海景点宣传片”且系统追问位置，用户本轮说“队列最开始”，应返回 {"type":"atomic_command","intent":"insert","targetTime":"00:00:00","programHint":"上海市景点相关的宣传片"}。轮播单队列开头用 targetTime:"00:00:00" 表示。',
+      '如果用户是在问“整体怎么样/怎么优化”，返回 read_only_analysis，除非用户明确确认更新草案。',
+      '只返回 JSON，不要 Markdown。',
+    ]
+  }
+
+  private buildWorkspacePlannerPolicy(playlistType: PlaylistType): string[] {
+    if (playlistType === 'none') {
+      return [
+        '当前没有已打开播单。用户只说“新建草案/做草案/调整草案”，但没有明确电视播单或轮播单时，不要默认创建电视播单，应返回 clarify 追问播单类型。',
+        '用户说“新建一个...轮播单，主要...”时，返回 create_playlist + prepare_layout_draft 两个动作；如果他说了总时长，也把 rotationDurationSeconds 写进动作。',
+        '如果用户只给总时长和主题，你可以返回一段式草案，也可以按业务常识拆成多段，但不要写正式节目。',
+      ]
+    }
+    if (playlistType === 'rotation') {
+      return [
+        '当前工作区是轮播单。轮播单是内容队列，不是电视时间格；轮播草案用从 00:00:00 起算的相对时长，不要使用 06:00:00-23:59:59 的电视全天窗口。',
+        '已打开播单时，用户说“插入/排入/放入/放到队列开头/队列末尾/后面接着放”等正式节目动作，就是原子或复合操作；不要因为轮播草案为空而改成草案生成或整体编排门禁。',
+        '如果用户说“插入/排入/放入”但只给了内容描述或主题，没有给具体节目，也没有给明确位置，不要返回裸 atomic_command；返回 research_check，purpose:"candidate_precheck"，queries 写可检索关键词，并在 assistantReplyDraft 里说明还需要确认插入位置。',
+        '没有给具体节目，也没有给明确位置，不要返回裸 atomic_command。',
+        '不要擅自把缺少位置的轮播插入理解成“队列末尾”或“队列开头”。只有用户明确说了开头、末尾、某节目后、某相对位置，才把它作为目标位置。',
+        '精准原子命令不要激活 ReAct。例如“9点插入电视剧生命树第5集”已经有目标时间和具体节目/剧集，应返回 atomic_command。',
+        '模糊原子命令可以激活 ReAct。例如“9点插入一个与近期观众特别关心内容相关联的视频内容”，应返回 mode:"react"，reactTask.nextActions 第一项为 research_check，并带 targetTime:"09:00:00"、purpose:"candidate_precheck" 和可检索 queries；查到候选后本地会进入插入候选选择，不会直接写播单。',
+      ]
+    }
+    if (playlistType === 'tv') {
+      return [
+        '当前工作区是电视播单。电视播单是时间格子，电视草案里的栏目/时段可帮助定位正式播单的编排位置。',
+        '如果用户说“填入/排入/插入/编排/放到播单里”，默认是正式播单动作，应返回 atomic_command；如果他说“在某栏目/某草案格子里填入期数最大的一期”，也应返回 atomic_command，并让本地借当前草案定位栏目或时段。',
+        '例如当前电视草案有“东方快报”时，用户说“在东方快报里，帮我找到期数最大的一期填入”，这是正式编排请求，应返回 atomic_command，并写出 intent:"insert"、targetTime:"06:00:00"（如果 currentDraft 能定位到该栏目开始时间）、targetProgramName:"东方快报"、programHint:"东方快报 期数最大"、searchAlternatives:["东方快报 期数最大","东方快报 最新一期","东方快报"]。不要返回 research_check，也不要说已更新草案。',
+        '如果用户是插入、删除、移动、替换、查询、校验等原子或复合操作，返回 atomic_command 或 validate，让本地原子能力继续处理。',
+      ]
+    }
+    return []
+  }
+
+  private buildDraftPlannerPolicy(input: { playlistType: PlaylistType; hasDraft: boolean }): string[] {
+    const base = [
+      '“草案查证/草案改写”和“正式填入节目”必须分清。只有用户明确说“更新草案/改草案/调整版面草案/写到草案”时，才把结果停留在 refine_layout_draft 或 draft_precheck。',
+      '用户给出第一小时/第二小时/每条10分钟/拆成N条/分三段等结构时，必须在 prepare_layout_draft 或 refine_layout_draft 中返回 segments。',
+      '如果用户要求“先看看/核验/找最火/最近三年/有没有素材/查一下成品库/这个草案块选什么”，返回 research_check。research_check 只负责让本地查草案和素材库，不会改草案，也不会写正式节目。',
+      'research_check 应由你给出 targetSegmentIndex 或 targetSegmentLabel、semanticLabel 和 queries；不要让本地猜策划内容。',
+    ]
+    if (!input.hasDraft) return base
+    return [
+      ...base,
+      '如果 currentDraft.exists=true，且用户说“第几个小时/第几段/某个内容块改成...”，这是草案微调，必须返回 refine_layout_draft；不要返回 atomic_command，除非用户明确说要写入正式播单或操作已有正式节目。',
+      '如果用户明确说“重写草案/重做草案/草案全部改成/这份草案重新整理为...”，仍然返回 refine_layout_draft，并用 segments 表达新草案；这只改草案，不写正式播单。',
+      '如果 currentDraft.exists=true，且用户说“参考草案编排/按草案编排/确认草案/就按这个草案/开始编排/进入正式编排”，必须返回 commit_layout_draft；不要只在 assistantReplyDraft 里说“正在编排”。',
+      input.playlistType === 'rotation'
+        ? '轮播草案里的“第一小时、第二小时、第三小时”指内容块的相对时长位置，不是电视播出时间，也不是正式节目单上的现有节目。'
+        : '',
+      '草案微调时，semanticLabel 必须来自用户最新句子里“改成/换成/调整为”后面的新内容，不要从 currentDraft.segments 复制旧内容标签。',
+      '如果用户按现有草案块名称来改，例如“亚洲队10介绍换成中国队介绍”，返回 refine_layout_draft，并带 targetSegmentLabel:"亚洲队10介绍"、semanticLabel:"中国队介绍"；如果 foregroundContext.layoutDraft.segments 能看出它是第 10 段，也带 targetSegmentIndex:10。不要把它当成重新生成整张草案。',
+    ].filter(Boolean)
+  }
+
+  private buildReactPlannerPolicy(input: { hasActiveReactTask: boolean }): string[] {
+    const lines = [
+      '如果用户目标需要先查证、再观察、再决定下一步，返回顶层 {"mode":"react","reactTask":{...}}，不要把长程任务塞成普通 action。',
+      'reactTask 必须写 objective、maxTurns、stopCondition，并把第一轮要做的可验证动作放进 nextActions。不要让本地猜第一步。',
+    ]
+    if (input.hasActiveReactTask) {
+      lines.push(
+        '如果 foregroundContext.activeReactTask 存在，说明前面已经有一个长程任务。不要把“继续”这类短词当成本地续接开关；必须结合用户本轮话、activeReactTask.objective、lastObservation、pendingSteps、recovery 判断是否仍在同一任务。',
+        'activeReactTask.status=failed 且 recovery.canRetry=true 时，只有用户明确要求“重试/再试一次/重新试”才应返回 mode:"react" 并给出修正后的 reactTask.nextActions；本地不会把“继续”当成隐藏续接开关，也不会回滚多步。',
+        'activeReactTask.lastObservation 已经显示素材足够但需要用户确认时，不要声称已更新草案或已写正式播单；应返回 refine_layout_draft、research_check 或 clarify 中最合适的下一步，让本地继续守门。',
+      )
+    }
+    return lines
+  }
+
+  private buildOutputPlannerPolicy(input: { playlistType: PlaylistType; hasDraft: boolean }): string[] {
+    const examples = [
+      'JSON 形状：{"mode":"single","actions":[{"type":"create_playlist","playlistType":"rotation","rotationStrategy":"content_match","rotationDurationSeconds":3600},{"type":"prepare_layout_draft","rotationDurationSeconds":3600,"semanticLabel":"世界杯亚洲球队介绍","segments":[{"start":"00:00:00","end":"00:15:00","semanticLabel":"中国队介绍","programTypeHint":"news_magazine"}]}],"assistantReplyDraft":"...","reasoning":"..."}',
+      '原子槽位示例：{"mode":"single","actions":[{"type":"atomic_command","intent":"insert","targetTime":"00:00:00","programHint":"上海市景点相关的宣传片","searchAlternatives":["上海景点宣传片","上海文旅宣传片","上海地标短片"]}],"assistantReplyDraft":"我会按轮播队列开头继续找上海景点相关宣传片候选。","reasoning":"用户补充了上一轮缺少的插入位置。"}',
+    ]
+    if (input.playlistType === 'tv') {
+      examples.push('电视草案定位示例：{"mode":"single","actions":[{"type":"atomic_command","intent":"insert","targetTime":"06:00:00","targetProgramName":"东方快报","programHint":"东方快报 期数最大","searchAlternatives":["东方快报 期数最大","东方快报 最新一期","东方快报"]}],"assistantReplyDraft":"我会按草案里的东方快报栏目定位时段，再按期数最大的要求去筛节目，确认可用后写入正式播单。","reasoning":"用户是在电视草案栏目里要求正式填入节目，不是修改草案。"}')
+    }
+    if (input.hasDraft) {
+      examples.push('草案块名称微调示例：{"mode":"single","actions":[{"type":"refine_layout_draft","targetSegmentIndex":10,"targetSegmentLabel":"亚洲队10介绍","semanticLabel":"中国队介绍"}],"assistantReplyDraft":"我会把第10段从亚洲队10介绍调整为中国队介绍，只更新草案，不写正式节目。","reasoning":"用户按草案块名称提出局部微调。"}')
+    }
+    if (input.playlistType !== 'tv') {
+      examples.push('ReAct 示例：{"mode":"react","actions":[],"reactTask":{"objective":"先核验金山区热门景点素材，再更新草案方向","maxTurns":3,"batchSize":5,"stopCondition":"素材方向明确后更新草案，不直接写正式播单","nextActions":[{"type":"research_check","purpose":"candidate_precheck","targetSegmentIndex":1,"semanticLabel":"金山区最近三年热门景点","programTypeHint":"documentary","queries":["金山区 近三年 热门景点 宣传片","金山 乐高乐园 景点 宣传片"]}]},"assistantReplyDraft":"我先核一下素材库，再把可用方向整理到草案里。正式播单不会被写入。","reasoning":"用户要求先查证再处理草案。"}')
+    }
+    return examples
+  }
+
+  private parsePlan(content: string): AgentPlan {
+    const jsonMatch = content.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) {
+      return {
+        actions: [{ type: 'clarify', question: '我还没能把这句话整理成可执行步骤，请换一种说法。' }],
+        assistantReplyDraft: '我还没能把这句话整理成可执行步骤，请换一种说法。',
+      }
+    }
+    try {
+      const parsed = JSON.parse(jsonMatch[0])
+      const rawActions = Array.isArray(parsed.actions) ? parsed.actions as unknown[] : []
+      const legacyReactTask = rawActions
+        .map((item) => isRecord(item) && item.type === 'react_task' ? normalizeReactTask(item) : undefined)
+        .find(Boolean)
+      const actions = rawActions
+        .filter((item) => !(isRecord(item) && item.type === 'react_task'))
+        .map(normalizeAction)
+        .filter((item): item is AgentPlannerAction => Boolean(item))
+      const reactTask = normalizeReactTask(parsed.reactTask) ?? legacyReactTask
+      const mode: AgentPlanMode = parsed.mode === 'react' || reactTask ? 'react' : 'single'
+      return {
+        mode,
+        actions,
+        reactTask,
+        assistantReplyDraft: typeof parsed.assistantReplyDraft === 'string' ? parsed.assistantReplyDraft.trim() : undefined,
+        reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning.trim() : undefined,
+      }
+    } catch {
+      return {
+        actions: [{ type: 'clarify', question: '我还没能把这句话整理成可执行步骤，请换一种说法。' }],
+        assistantReplyDraft: '我还没能把这句话整理成可执行步骤，请换一种说法。',
+      }
+    }
+  }
+}
+
+let globalAgentPlanner: AgentPlanner | null = null
+
+export function getAgentPlanner(llmClient: LLMClient): AgentPlanner {
+  if (!globalAgentPlanner) {
+    globalAgentPlanner = new AgentPlanner(llmClient)
+  }
+  return globalAgentPlanner
+}

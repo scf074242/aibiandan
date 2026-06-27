@@ -1,0 +1,141 @@
+[
+  {
+    "columnId": "115",
+    "columnName": "东方快报",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "news"
+  },
+  {
+    "columnId": "101",
+    "columnName": "看东方",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "news_magazine"
+  },
+  {
+    "columnId": "107",
+    "columnName": "潮童天下",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "kids"
+  },
+  {
+    "columnId": "112",
+    "columnName": "品质剧场",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "drama",
+    "isSequential": true
+  },
+  {
+    "columnId": "102",
+    "columnName": "午间30分",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "news"
+  },
+  {
+    "columnId": "104",
+    "columnName": "ShanghaiEye",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "news_magazine"
+  },
+  {
+    "columnId": "105",
+    "columnName": "名医话养生",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "health"
+  },
+  {
+    "columnId": "113",
+    "columnName": "经典剧场",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "drama",
+    "isSequential": true
+  },
+  {
+    "columnId": "106",
+    "columnName": "东方新娱乐",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "entertainment"
+  },
+  {
+    "columnId": "103",
+    "columnName": "东方新闻",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "news"
+  },
+  {
+    "columnId": "118",
+    "columnName": "新闻联播",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "news"
+  },
+  {
+    "columnId": "119",
+    "columnName": "东方剧场",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "drama",
+    "isSequential": true
+  },
+  {
+    "columnId": "120",
+    "columnName": "东方看大剧",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "drama",
+    "isSequential": true
+  },
+  {
+    "columnId": "121",
+    "columnName": "品质东方微短剧",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "drama",
+    "isSequential": true
+  },
+  {
+    "columnId": "122",
+    "columnName": "今晚",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "commentary"
+  },
+  {
+    "columnId": "109",
+    "columnName": "锵点",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "commentary"
+  },
+  {
+    "columnId": "123",
+    "columnName": "两说",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "commentary"
+  },
+  {
+    "columnId": "124",
+    "columnName": "梦想剧场",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "drama",
+    "isSequential": true
+  },
+  {
+    "columnId": "125",
+    "columnName": "东方纪实",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "documentary"
+  }
+]
