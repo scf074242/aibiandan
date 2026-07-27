@@ -1,14 +1,24 @@
-import type { ComputedRef, Ref } from 'vue'
+import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { useOrchestrator } from '@/composables/useOrchestrator'
 import type { ScheduleItem } from './scheduleData'
-import type { LayoutDraft, TaskMode } from '@/types/orchestration'
+import type { LayoutDraft } from '@/types/orchestration'
 import { useBroadcastPlanFocus } from './useBroadcastPlanFocus'
 import type { ValidationReport } from '@/types/orchestration'
 import { setRuntimeLayout } from '@/services/orchestration/runtimeLayoutRegistry'
 import type { ChatScheduleUpdateItem } from './broadcastPlanScheduleBridge'
 import { resolveFormalOrchestrationSearchKeywords } from '@/services/retrievalConstraintCompiler'
+import type { RuntimeOrchestrationRequest, RuntimeSubmitInput } from '@/services/runtime/schedulingAgentRuntimeFacade'
+import { buildFormalPlaylistSnapshot } from '@/services/runtime/formalPlaylistState'
+import { buildScheduleWorkspaceSummary, resolveForegroundWorkspaceKey } from '@/services/runtime/foregroundWorkspaceState'
+
+export interface BroadcastPlanReactApproval {
+  workspaceKey: string
+  playlistVersion: string
+  summary: string
+  checkpointCount: number
+}
 
 type UseBroadcastPlanOrchestrationOptions = {
   currentChannelId: ComputedRef<string>
@@ -24,9 +34,12 @@ type UseBroadcastPlanOrchestrationOptions = {
   activateScheduleWorkspace?: () => void
   focusRuntime: ReturnType<typeof useBroadcastPlanFocus>
   normalizeClockText: (value: string) => string
+  buildRuntimeSubmitInput: (userInput: string) => RuntimeSubmitInput
 }
 
 export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestrationOptions) => {
+  const reactApproval = ref<BroadcastPlanReactApproval | null>(null)
+  let reactApprovalUserInput: string | null = null
   const orchestratorRuntime = useOrchestrator({
     onGapStart: (gap) => {
       options.focusRuntime.startGap({
@@ -82,38 +95,6 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
     },
   })
 
-  const startOrchestrationRuntime = async (
-    mode: Extract<TaskMode, 'full_generate' | 'partial_generate'> = 'full_generate',
-    targetTimeRange?: { start: string; end: string },
-    searchKeywords?: string[],
-  ) => {
-    try {
-      options.focusRuntime.resetForRun()
-      options.syncPageItemsToAtomic()
-      if (mode === 'partial_generate') {
-        const partialTarget = {
-          ...(targetTimeRange ? { targetTimeRange } : {}),
-          ...(searchKeywords?.length ? { searchKeywords } : {}),
-        }
-        await orchestratorRuntime.startPartialGeneration(
-          options.currentChannelId.value,
-          options.scheduleDate.value,
-          Object.keys(partialTarget).length > 0 ? partialTarget : undefined,
-        )
-        return
-      }
-
-      await orchestratorRuntime.startFullGeneration(
-        options.currentChannelId.value,
-        options.scheduleDate.value,
-        targetTimeRange?.start ?? '06:00:00',
-        targetTimeRange?.end ?? '23:59:59',
-      )
-    } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : 'AI 编排失败')
-    }
-  }
-
   const handleChatCommandExecuted = (result: {
     success: boolean
     message: string
@@ -158,7 +139,7 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
   }
 
   const handleChatOrchestrateRequested = async (
-    payload: { userInput: string; mode: TaskMode; reasoning?: string; layoutDraft?: LayoutDraft; targetTimeRange?: { start: string; end: string }; searchKeywords?: string[] },
+    payload: RuntimeOrchestrationRequest,
   ) => {
     void payload.userInput
     void payload.reasoning
@@ -184,8 +165,102 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
     const searchKeywords = payload.searchKeywords?.length
       ? payload.searchKeywords
       : resolveFormalOrchestrationSearchKeywords(payload.userInput)
-    await startOrchestrationRuntime(payload.mode, effectiveTargetTimeRange, searchKeywords)
+    if (payload.reactTask) {
+      const runtimeInput = options.buildRuntimeSubmitInput(payload.userInput)
+      const workspaceKey = resolveForegroundWorkspaceKey(buildScheduleWorkspaceSummary(runtimeInput.scheduleState))
+      const playlistVersion = buildFormalPlaylistSnapshot(runtimeInput.currentSchedule, 'foreground').version
+      const outcome = await orchestratorRuntime.startReactOrchestration(
+        { ...payload, targetTimeRange: effectiveTargetTimeRange, searchKeywords },
+        runtimeInput,
+      )
+      if (outcome.status === 'waiting_user') {
+        if (outcome.scheduleItems) {
+          options.applyRuntimeScheduleItems(outcome.scheduleItems)
+          options.persistCurrentPlaylistDocument()
+        }
+        reactApprovalUserInput = payload.userInput
+        reactApproval.value = {
+          workspaceKey,
+          playlistVersion: outcome.scheduleItems
+            ? buildFormalPlaylistSnapshot(outcome.scheduleItems, 'foreground').version
+            : playlistVersion,
+          summary: (outcome.pendingTask as { summary?: string } | undefined)?.summary
+            || outcome.pendingTask?.originalInput
+            || '当前正式编排动作等待确认',
+          checkpointCount: outcome.checkpointCount ?? 0,
+        }
+        return
+      }
+      reactApproval.value = null
+      reactApprovalUserInput = null
+      if (outcome.scheduleItems) {
+        options.applyRuntimeScheduleItems(outcome.scheduleItems)
+        options.persistCurrentPlaylistDocument()
+      }
+      return
+    }
+    ElMessage.error('正式编排请求缺少 ReAct 动作计划，已停止且不会回退旧编排器。请重试。')
   }
+
+  const buildCurrentReactApprovalInput = (): RuntimeSubmitInput | null => {
+    if (!reactApproval.value || !reactApprovalUserInput) return null
+    return options.buildRuntimeSubmitInput(reactApprovalUserInput)
+  }
+
+  const reactApprovalIsCurrent = computed(() => {
+    const approval = reactApproval.value
+    const runtimeInput = buildCurrentReactApprovalInput()
+    if (!approval || !runtimeInput) return false
+    const workspaceKey = resolveForegroundWorkspaceKey(buildScheduleWorkspaceSummary(runtimeInput.scheduleState))
+    const playlistVersion = buildFormalPlaylistSnapshot(runtimeInput.currentSchedule, 'foreground').version
+    return workspaceKey === approval.workspaceKey && playlistVersion === approval.playlistVersion
+  })
+
+  const recoverReactApproval = async (action: 'confirm_pending' | 'cancel') => {
+    const approval = reactApproval.value
+    const runtimeInput = buildCurrentReactApprovalInput()
+    if (!approval || !runtimeInput) return
+    if (!reactApprovalIsCurrent.value) {
+      ElMessage.warning('当前播单或工作区已经变化，这条待确认操作已失效，请重新发起。')
+      return
+    }
+    const result = await orchestratorRuntime.recoverReactOrchestration({
+      action,
+      workspaceKey: approval.workspaceKey,
+      playlistVersion: buildFormalPlaylistSnapshot(runtimeInput.currentSchedule, 'foreground').version,
+      runtimeInput,
+    })
+    if (result.status === 'cancelled') {
+      reactApproval.value = null
+      reactApprovalUserInput = null
+      ElMessage.info('已取消待确认的正式编排动作，当前播单保持不变')
+      return
+    }
+    if (result.executionStatus === 'completed') {
+      if (result.scheduleItems) {
+        options.applyRuntimeScheduleItems(result.scheduleItems)
+        options.persistCurrentPlaylistDocument()
+      }
+      reactApproval.value = null
+      reactApprovalUserInput = null
+      ElMessage.success('已按确认继续完成正式编排')
+      return
+    }
+    if (result.executionStatus === 'waiting_user') {
+      const latestInput = options.buildRuntimeSubmitInput(reactApprovalUserInput ?? runtimeInput.userInput)
+      reactApproval.value = {
+        ...approval,
+        playlistVersion: buildFormalPlaylistSnapshot(latestInput.currentSchedule, 'foreground').version,
+      }
+      return
+    }
+    if (result.status !== 'ready') {
+      ElMessage.warning(result.envelope.humanSummary)
+    }
+  }
+
+  const confirmReactApproval = async () => recoverReactApproval('confirm_pending')
+  const cancelReactApproval = async () => recoverReactApproval('cancel')
 
   const handleCancelOrchestration = async () => {
     try {
@@ -206,10 +281,13 @@ export const useBroadcastPlanOrchestration = (options: UseBroadcastPlanOrchestra
 
   return {
     orchestratorRuntime,
-    startOrchestrationRuntime,
+    reactApproval,
+    reactApprovalIsCurrent,
     handleChatCommandExecuted,
     handleChatScheduleUpdated,
     handleChatOrchestrateRequested,
+    confirmReactApproval,
+    cancelReactApproval,
     handleCancelOrchestration,
   }
 }

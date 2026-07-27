@@ -24,7 +24,7 @@
     "programType": "drama"
   },
   {
-    "programId": "P112002",
+    "programId": "P112003",
     "programName": "边关烽火情",
     "columnId": "112",
     "programType": "drama"
@@ -87,7 +87,7 @@
     "programId": "P120001",
     "programName": "东方看大剧",
     "columnId": "120",
-    "programType": "drama"
+    "programType": "entertainment"
   },
   {
     "programId": "P121001",
@@ -230,54 +230,6 @@
   {
     "programId": "G101015",
     "programName": "直播花絮集锦",
-    "columnId": "101",
-    "programType": "news_magazine"
-  },
-  {
-    "programId": "G131001",
-    "programName": "现场导视",
-    "columnId": "101",
-    "programType": "news_magazine"
-  },
-  {
-    "programId": "G131002",
-    "programName": "静安寺外场导视",
-    "columnId": "101",
-    "programType": "news_magazine"
-  },
-  {
-    "programId": "G131003",
-    "programName": "户外直播服务提醒",
-    "columnId": "101",
-    "programType": "news_magazine"
-  },
-  {
-    "programId": "G131004",
-    "programName": "发布会预热导视",
-    "columnId": "101",
-    "programType": "news_magazine"
-  },
-  {
-    "programId": "G131005",
-    "programName": "会场直播开场导视",
-    "columnId": "101",
-    "programType": "news_magazine"
-  },
-  {
-    "programId": "G131006",
-    "programName": "城市活动暖场短片",
-    "columnId": "101",
-    "programType": "news_magazine"
-  },
-  {
-    "programId": "G131007",
-    "programName": "直播路线服务提示",
-    "columnId": "101",
-    "programType": "news_magazine"
-  },
-  {
-    "programId": "G131008",
-    "programName": "外场连线预告",
     "columnId": "101",
     "programType": "news_magazine"
   },
@@ -627,25 +579,25 @@
     "programId": "G120001",
     "programName": "东方看大剧",
     "columnId": "120",
-    "programType": "drama"
+    "programType": "entertainment"
   },
   {
     "programId": "G120002",
     "programName": "剧耀东方",
     "columnId": "120",
-    "programType": "drama"
+    "programType": "entertainment"
   },
   {
     "programId": "G120003",
     "programName": "剧集风云榜",
     "columnId": "120",
-    "programType": "drama"
+    "programType": "entertainment"
   },
   {
     "programId": "G120004",
     "programName": "幕后看大剧",
     "columnId": "120",
-    "programType": "drama"
+    "programType": "entertainment"
   },
   {
     "programId": "G121001",
@@ -808,5 +760,17 @@
     "programName": "海上非遗",
     "columnId": "125",
     "programType": "documentary"
+  },
+  {
+    "programId": "P112002",
+    "programName": "生命树",
+    "columnId": "112",
+    "programType": "drama"
+  },
+  {
+    "programId": "P126001",
+    "programName": "百姓大讲堂",
+    "columnId": "126",
+    "programType": "commentary"
   }
 ]

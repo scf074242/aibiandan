@@ -2,11 +2,17 @@ import type { ChatMessage } from '@/types/llm'
 
 import type { LayoutAnalysisPromptContext } from './layoutAnalysisService'
 
+/**
+ * layoutAnalysis prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本
+ */
+export const LAYOUT_ANALYSIS_PROMPT_VERSION = 'v1.0' as const
+
 const stringifySection = (value: unknown) => JSON.stringify(value, null, 2)
 
 export const buildLayoutAnalysisPrompt = (context: LayoutAnalysisPromptContext): ChatMessage[] => {
   const systemPrompt = [
-    '你是一名资深广电频道节目编辑与编排分析师。',
+    `[prompt ${LAYOUT_ANALYSIS_PROMPT_VERSION}] 你是一名资深广电频道节目编辑与编排分析师。`,
     '你的任务是基于用户提供的真实节目单、版面结构、栏目定义和校验结果，输出一份自然中文分析报告。',
     '请像业务人员写分析结论一样表达，不要输出 JSON，不要使用代码块。',
     '分析时优先关注：整体版面骨架、栏目定位是否贴合、全天时段节奏是否顺畅、内容层次是否均衡、当前风险和后续优化方向。',

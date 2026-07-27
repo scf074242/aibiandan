@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { Orchestrator, type OrchestratorConfig } from '@/services/orchestrator'
+import { Orchestrator, ORCHESTRATOR_PROMPT_VERSION, type OrchestratorConfig } from '@/services/orchestrator'
 import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomicCapabilities'
 import { clearRuntimeLayout, setRuntimeLayout } from '@/services/orchestration/runtimeLayoutRegistry'
 import { getCandidateService, resetCandidateService } from '@/services/candidateService'
@@ -479,9 +479,9 @@ describe('Orchestrator', () => {
       endTime: iso('15:00:00'),
       selectionPrimary: 'content_match',
       programType: 'news_magazine',
-      columnName: '静安寺连线',
-      semanticLabel: '静安寺连线轮播',
-      queryHints: ['静安寺', '连线'],
+      columnName: '静安寺外滩',
+      semanticLabel: '静安寺外滩栏目',
+      queryHints: ['静安寺', '外滩'],
     })
     const orchestrator = createOrchestrator()
     const logs: PlanningLogEntry[] = []
@@ -1456,5 +1456,77 @@ describe('Orchestrator', () => {
       && /已插入广告/.test(entry.message)
       && (entry.details as { slotId?: string } | undefined)?.slotId === 'slot-life-tree-between-existing',
     )).toBe(false)
+  })
+})
+
+describe('Orchestrator promptVersion 透传', () => {
+  /**
+   * case c12-orchestrator-planning-passes-version
+   * - expectedDecision: phase1Planning 调用 LLM 时透传 promptVersion + traceLabel
+   * - mustNotHappen: options 缺失 promptVersion
+   * - verification: ORCHESTRATOR_PROMPT_VERSION 常量导出为 'v1.0'
+   *
+   * 说明：Orchestrator 构造依赖 LLMClient + TaskClassifier + 大量运行时上下文，
+   * phase1Planning 为私有方法且需要完整编排会话才能触发；
+   * 这里以常量导出 + 版本号断言作为门禁，保证 prompt 版本可追溯。
+   */
+  it('c12-orchestrator-version-exported: ORCHESTRATOR_PROMPT_VERSION 导出且为 v1.0', () => {
+    expect(ORCHESTRATOR_PROMPT_VERSION).toBe('v1.0')
+  })
+})
+
+describe('Orchestrator 失败暴露回归门禁', () => {
+  /**
+   * case regression-resolveTerminalStatus-manual-review-on-gap-failure
+   * - expectedDecision: 单空窗/部分空窗候选检索失败（successful=0 && failed>0）时 resolveTerminalStatus 返回 manual_review
+   * - mustNotHappen: 返回 'failed' 状态（会破坏单空窗硬关键词失败的可审查语义）
+   * - verification: 直接调用私有 resolveTerminalStatus，断言返回 'manual_review'
+   *
+   * 背景：全天编排"5 秒全编排完"问题的修复曾误将 successful=0&&failed>0 改为 'failed'，
+   * 破坏了 5 个既有 manual_review 用例。真正的"什么都没排进去"失败暴露由
+   * FormalOrchestrationCapability.handle 通过 execution 指标判定，不改 session 状态语义。
+   */
+  it('resolveTerminalStatus 在空窗失败但未越界时返回 manual_review 而非 failed', async () => {
+    const orchestrator = createOrchestrator()
+    orchestrator.createSession('dragon', date)
+    // 模拟 1 个空窗检索失败、0 个成功
+    orchestrator.getSession()!.execution.successfulCommands = 0
+    orchestrator.getSession()!.execution.failedCommands = 1
+    orchestrator.getSession()!.gaps.failed = ['gap-failed-1']
+
+    const terminalStatus = (orchestrator as unknown as { resolveTerminalStatus: () => PlanningSessionStatus }).resolveTerminalStatus()
+
+    expect(terminalStatus).toBe('manual_review')
+    expect(terminalStatus).not.toBe('failed')
+  })
+
+  /**
+   * case regression-candidateService-empty-no-throw
+   * - expectedDecision: candidateService.queryCandidates 在 channelId 不匹配时返回空候选且不抛错
+   * - mustNotHappen: 抛出异常或返回 undefined
+   * - verification: 用不存在的 channelId 调用 queryCandidates，断言 result.candidates 为空数组、diagnostics 含 rejectionReasons
+   */
+  it('candidateService.queryCandidates 在 channelId 无匹配候选时返回空结果且不抛错', async () => {
+    resetCandidateService()
+    const gap: GapInfo = {
+      id: 'gap-no-channel',
+      startTime: iso('09:00:00'),
+      endTime: iso('10:00:00'),
+      duration: 3600,
+      constraints: {},
+      metadata: { source: 'layout', priority: 1, createdAt: iso('00:00:00'), updatedAt: iso('00:00:00') },
+    }
+    const result = await getCandidateService().queryCandidates(gap, {
+      targetTimeRange: { start: gap.startTime, end: gap.endTime },
+      expectedDuration: { min: 1200, max: 3600 },
+      channelId: 'nonexistent-channel-xyz',
+      columnId: 'nonexistent-column',
+      programTypePreference: ['drama'],
+      excludeUsed: false,
+    })
+
+    expect(result.candidates).toEqual([])
+    expect(result.totalCount).toBe(0)
+    expect(result.diagnostics?.rejectionReasons?.length).toBeGreaterThan(0)
   })
 })

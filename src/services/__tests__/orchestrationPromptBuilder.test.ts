@@ -260,4 +260,76 @@ describe('orchestrationPromptBuilder', () => {
     expect(prompt).toContain('不是绝对规则')
     expect(prompt).toContain('09:00:00 已有 品质剧场：纵有疾风起 第1集')
   })
+
+  /**
+   * Q1-1 顺播标准文案统一回归 case：
+   * 验证 buildGapCandidateSelectionPrompt 的 system message 包含顺播硬规则核心点 + prompt 版本标注
+   */
+  it('buildGapCandidateSelectionPrompt 包含顺播标准文案核心点与 prompt 版本标注', () => {
+    const messages = buildGapCandidateSelectionPrompt({
+      channelName: '东方卫视',
+      date,
+      gap,
+      candidates: [candidate],
+      existingItems: [],
+      planningThought: {
+        summary: '顺播测试',
+        targetProgramTypes: ['drama'],
+        targetSlotLabel: '品质剧场',
+        durationPreference: { min: 900, max: 3600 },
+        searchKeywords: ['品质剧场'],
+        allowFiller: false,
+        sequentialPreference: true,
+        selectionPolicy: {
+          primary: 'sequence',
+          fallback: ['rating'],
+        },
+      },
+    })
+
+    const prompt = messages.map((message) => message.content).join('\n')
+    // 顺播硬规则核心点（来自标准文案）
+    expect(prompt).toContain('顺播期数选择是候选决策最高优先级硬规则')
+    expect(prompt).toContain('有基线选期望下一集')
+    expect(prompt).toContain('无基线选最早一期')
+    expect(prompt).toContain('不能跳集、倒序、重复')
+    // prompt 版本标注
+    expect(prompt).toContain('[prompt v1.0]')
+    // sequence 策略文案补「无基线时选最早一期」
+    expect(prompt).toContain('无基线时选最早一期')
+  })
+
+  /**
+   * Q1-1 顺播标准文案统一回归 case：
+   * 验证 buildInsertCandidateSelectionPrompt 的 system message 包含顺播硬规则 + prompt 版本标注
+   */
+  it('buildInsertCandidateSelectionPrompt 包含顺播硬规则核心点与 prompt 版本标注', () => {
+    const messages = buildInsertCandidateSelectionPrompt(
+      {
+        scheduleState: {
+          channelName: '东方卫视',
+          date,
+        },
+        scheduleSummary: '当前播单：09:00 品质剧场 第1集',
+        nearbyScheduleSummary: '附近：08:00-10:00',
+        scheduleNameCandidates: '品质剧场',
+        currentSchedule: [existingItem],
+      } as never,
+      {
+        targetTime: '09:00:00',
+        programName: '品质剧场',
+      } as never,
+      [candidate],
+    )
+
+    const prompt = messages.map((message) => message.content).join('\n')
+    // 顺播硬规则核心点
+    expect(prompt).toContain('顺播期数选择是最高优先级硬规则')
+    expect(prompt).toContain('有基线选期望下一集')
+    expect(prompt).toContain('无基线选最早一期')
+    // prompt 版本标注
+    expect(prompt).toContain('[prompt v1.0]')
+    // 时长优先级声明
+    expect(prompt).toContain('顺播硬规则优先于时长考量')
+  })
 })

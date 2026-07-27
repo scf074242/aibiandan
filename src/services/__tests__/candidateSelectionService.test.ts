@@ -707,6 +707,66 @@ describe('CandidateSelectionService', () => {
     expect(result.reasoning).toContain('专业匹配证据不足')
   })
 
+  it('llm-selection-is-not-overridden-by-local-editorial-score: keeps an evidence-complete LLM choice', async () => {
+    const regressionCase = {
+      id: 'llm-selection-is-not-overridden-by-local-editorial-score',
+      userInput: '静安寺户外直播内容匹配优先',
+      expectedDecision: '候选命中明确内容条件时保留 LLM 的唯一候选决定',
+      mustNotHappen: '本地编辑评分低于固定数值就覆盖 LLM 并强制留空',
+      verification: '候选命中静安寺、户外、直播，即使本地 totalScore 为 60 仍返回 select',
+    } as const
+    const llmClient = {
+      chat: vi.fn(async () => ({
+        content: JSON.stringify({
+          decision: 'select',
+          selectedCandidateId: 'llm-evidence-complete',
+          confidence: 0.91,
+          reasoning: '候选完整命中静安寺户外直播主题，且是当前唯一符合内容条件的节目。',
+        }),
+      })),
+    } as unknown as LLMClient
+    const service = new CandidateSelectionService(llmClient)
+
+    const result = await service.selectForGap(
+      createGap(),
+      '东方卫视',
+      baseDate,
+      [createCandidate({
+        id: 'llm-evidence-complete',
+        programName: '静安寺户外直播',
+        instanceName: '静安寺户外直播',
+        programType: 'news_magazine',
+        contentTags: ['静安寺', '户外', '直播'],
+        editorialDecision: {
+          strategy: 'content_match',
+          totalScore: 60,
+          summary: '明确内容条件已经完整命中。',
+          strengths: ['内容条件完整'],
+          concerns: [],
+          dimensions: [],
+        },
+      })],
+      {
+        summary: regressionCase.userInput,
+        targetProgramTypes: ['news_magazine'],
+        durationPreference: { min: 60, max: 900 },
+        searchKeywords: ['静安寺', '户外直播'],
+        allowFiller: false,
+        sequentialPreference: false,
+        selectionPolicy: { primary: 'content_match', fallback: ['rating'] },
+      },
+    )
+
+    expect(result.decision).toBe('select')
+    expect(result.selectedCandidate?.id).toBe('llm-evidence-complete')
+    expect(result.riskFlags ?? []).not.toContain('editorial_auto_select_threshold_blocked')
+    expect(regressionCase).toMatchObject({
+      expectedDecision: expect.any(String),
+      mustNotHappen: expect.any(String),
+      verification: expect.any(String),
+    })
+  })
+
   it('keeps the gap empty when fallback candidates only weakly match a concrete content intent', async () => {
     const llmClient = {
       chat: vi.fn(async () => {
@@ -1350,5 +1410,101 @@ describe('CandidateSelectionService', () => {
     expect(prompt).toContain('品质剧场：纵有疾风起 第1集')
     expect(prompt).toContain('09:00:00')
     expect(prompt).toContain('不应回填 8 点第2集')
+  })
+})
+
+describe('CandidateSelectionService promptVersion 透传', () => {
+  /**
+   * case c3-gap-selection-passes-version
+   * - expectedDecision: selectForGap 调用 LLM 时透传 promptVersion + traceLabel
+   * - mustNotHappen: options 缺失 promptVersion 或 traceLabel
+   * - verification: chat.mock.calls[0][1] 含 promptVersion: 'v1.0' + traceLabel: 'gap_candidate_selection'
+   */
+  it('c3-gap-selection-passes-version: selectForGap 透传 promptVersion 与 traceLabel', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        decision: 'select',
+        selectedCandidateId: 'candidate-1',
+        confidence: 0.9,
+        reasoning: '唯一匹配候选。',
+      }),
+    }))
+    const llmClient = { chat } as unknown as LLMClient
+    const service = new CandidateSelectionService(llmClient)
+
+    await service.selectForGap(
+      createGap(),
+      '东方卫视',
+      baseDate,
+      [
+        createCandidate(),
+        createCandidate({ id: 'candidate-2', programCode: '002601120001' }),
+      ],
+      {
+        summary: '12:45-13:00 编排',
+        targetProgramTypes: ['drama'],
+        durationPreference: { min: 60, max: 900 },
+        searchKeywords: [],
+        allowFiller: false,
+        sequentialPreference: false,
+      },
+    )
+
+    expect(chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        promptVersion: 'v1.0',
+        traceLabel: 'gap_candidate_selection',
+      }),
+    )
+  })
+
+  /**
+   * case c3-insert-selection-passes-version
+   * - expectedDecision: selectForInsert 调用 LLM 时透传 promptVersion + traceLabel
+   * - mustNotHappen: options 缺失 promptVersion 或 traceLabel
+   * - verification: chat.mock.calls[0][1] 含 promptVersion: 'v1.0' + traceLabel: 'insert_candidate_selection'
+   */
+  it('c3-insert-selection-passes-version: selectForInsert 透传 promptVersion 与 traceLabel', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        decision: 'select',
+        selectedCandidateId: 'candidate-1',
+        confidence: 0.9,
+        reasoning: '候选匹配。',
+      }),
+    }))
+    const llmClient = { chat } as unknown as LLMClient
+    const service = new CandidateSelectionService(llmClient)
+
+    await service.selectForInsert(
+      {
+        scheduleState: {
+          channelId: 'dragon',
+          channelName: '东方卫视',
+          date: baseDate,
+        },
+        scheduleSummary: '当前播单空',
+        nearbyScheduleSummary: '无附近节目',
+        scheduleNameCandidates: '',
+        currentSchedule: [],
+      } as never,
+      {
+        targetTime: '12:00:00',
+        programName: '看东方',
+      } as never,
+      [
+        createCandidate(),
+        createCandidate({ id: 'candidate-2', programCode: '002601120001' }),
+      ],
+    )
+
+    expect(chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        promptVersion: 'v1.0',
+        traceLabel: 'insert_candidate_selection',
+      }),
+    )
   })
 })

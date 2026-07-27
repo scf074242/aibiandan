@@ -5,6 +5,11 @@ import type {
   AtomicCommandIntent,
   QueryCommandPlan,
 } from './types'
+import type { AgentDeadline } from './agentDeadline'
+
+export interface AgentLlmEvaluationOptions {
+  createDeadline?: () => AgentDeadline
+}
 
 export interface AgentLlmIntentEvaluationCase {
   id: string
@@ -47,15 +52,25 @@ export interface AgentLlmIntentEvaluationReport {
 export const evaluateAgentLlmIntentCases = async (
   interpreter: AgentIntentInterpreter,
   cases: AgentLlmIntentEvaluationCase[],
+  options: AgentLlmEvaluationOptions = {},
 ): Promise<AgentLlmIntentEvaluationReport> => {
   const results: AgentLlmIntentEvaluationCaseResult[] = []
 
   for (const testCase of cases) {
-    const interpretation = await interpreter.interpret({
-      ...testCase.input,
-      userInput: testCase.userInput,
-    })
+    let interpretation: AgentIntentInterpretation | null = null
+    let interpretationError: string | null = null
+    try {
+      interpretation = await interpreter.interpret({
+        ...testCase.input,
+        userInput: testCase.userInput,
+      }, options.createDeadline?.())
+    } catch (error) {
+      interpretationError = error instanceof Error ? error.message : 'Unknown interpretation error'
+    }
     const failures = evaluateInterpretation(testCase, interpretation)
+    if (interpretationError) {
+      failures.splice(0, failures.length, `interpretation error: ${interpretationError}`)
+    }
     results.push({
       id: testCase.id,
       tags: testCase.tags ?? [],

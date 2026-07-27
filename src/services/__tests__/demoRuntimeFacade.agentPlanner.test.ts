@@ -207,7 +207,9 @@ const mockPlanner = (plan: unknown) => {
 
 describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
+    llmClientChatMock.mockReset()
+    taskClassifierClassifyMock.mockReset()
+    layoutIntentRecognizeMock.mockReset()
     taskClassifierClassifyMock.mockImplementation(async () => {
       throw new Error('local task classifier should not handle foreground natural language')
     })
@@ -353,7 +355,7 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     expect(result.kind).toBe('message')
     if (result.kind !== 'message') throw new Error('expected recommendation advisory')
     expect(result.statusHint).toBe('needs_clarification')
-    expect(result.feedback.content).toContain('你选一个后我再写入')
+    expect(result.feedback.content).toContain('等信息足够明确后，我再帮你排入')
     expect(result.feedback.content).toContain('目标位置是 09:00:00')
     expect(result.feedback.details?.recommendedCandidateCount).toBeGreaterThan(0)
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
@@ -363,7 +365,7 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     llmClientChatMock
       .mockResolvedValueOnce({
         content: JSON.stringify({
-          mode: 'react',
+          mode: 'single',
           actions: [
             {
               type: 'research_check',
@@ -410,11 +412,16 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     expect(result.kind).toBe('message')
     if (result.kind !== 'message') throw new Error('expected clarification message')
     expect(result.statusHint).toBe('needs_clarification')
+    expect(result.feedback.details).toMatchObject({
+      noMutation: true,
+      purpose: 'candidate_precheck',
+      candidateCount: 1,
+    })
     expect(result.feedback.content).toContain('插入到轮播队列的哪个位置')
     expect(result.feedback.content).toContain('队列末尾')
     expect(result.feedback.content).not.toContain('更新草案')
     expect(result.feedback.content).not.toContain('当前还没有可更新的草案')
-    expect(llmClientChatMock).toHaveBeenCalledTimes(1)
+    expect(llmClientChatMock).toHaveBeenCalled()
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
   })
 
@@ -439,7 +446,7 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
 
     expect(result.kind).toBe('message')
     if (result.kind !== 'message') throw new Error('expected message')
-    expect(llmClientChatMock).toHaveBeenCalledTimes(1)
+    expect(llmClientChatMock).toHaveBeenCalled()
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
     expect(result.feedback.details?.playlistState).toMatchObject({
       playlistType: 'tv',
@@ -447,7 +454,12 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     expect(result.feedback.details?.layoutDraftStatus).toBe('loaded')
   })
 
-  it('keeps quick-action bare playlist creation as a fast workspace button action', async () => {
+  it('routes quick-action bare playlist creation through the same LLM planner', async () => {
+    mockPlanner({
+      actions: [{ type: 'create_playlist', playlistType: 'rotation', rotationStrategy: 'content_match' }],
+      assistantReplyDraft: '我先新建一张轮播单。',
+      reasoning: '用户通过快捷入口要求创建轮播工作区。',
+    })
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'none' }),
       userInput: '新建轮播单',
@@ -460,19 +472,133 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
 
     expect(result.kind).toBe('message')
     if (result.kind !== 'message') throw new Error('expected message')
-    expect(llmClientChatMock).not.toHaveBeenCalled()
+    expect(llmClientChatMock).toHaveBeenCalledTimes(1)
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
     expect(result.feedback.details?.playlistState).toMatchObject({
       playlistType: 'rotation',
     })
-    expect(result.feedback.details?.layoutDraftStatus).toBe('missing')
+    expect(result.feedback.details?.layoutDraftStatus).toBe('empty')
+  })
+
+  it('preserves every ordered planner action when a multi-command request enters ReAct', async () => {
+    const testCase = {
+      id: 'planner-react-preserves-ordered-multi-command-actions',
+      userInput: '新建一张轮播单，然后把生命树放到队列开头',
+      expectedDecision: '先完成建单，并把后续原子动作完整保留给 observation 后的下一轮 decide',
+      mustNotHappen: '过滤 create_playlist、重复注入动作，或在同一轮盲目执行后续写入',
+      verification: 'reactTaskRun 只完成首步观察，步骤中两个 action 各保留一次且正式播单仍为空',
+    }
+    mockPlanner({
+      mode: 'react',
+      actions: [
+        { type: 'create_playlist', playlistType: 'rotation', rotationStrategy: 'content_match' },
+        { type: 'atomic_command', intent: 'insert', targetTime: '00:00:00', programHint: '生命树' },
+      ],
+      reactTask: {
+        objective: '新建轮播单后把生命树插入队列开头',
+        maxTurns: 3,
+        batchSize: 2,
+        stopCondition: '插入完成并校验播单',
+        nextActions: [
+          { type: 'create_playlist', playlistType: 'rotation', rotationStrategy: 'content_match' },
+          { type: 'atomic_command', intent: 'insert', targetTime: '00:00:00', programHint: '生命树' },
+        ],
+      },
+      assistantReplyDraft: '我先新建轮播单，再基于建单结果继续处理插入。',
+      reasoning: '两个动作存在工作区依赖，需要逐步观察后执行。',
+    })
+
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({ playlistType: 'none' }),
+      userInput: testCase.userInput,
+      currentSchedule: [],
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(testCase.expectedDecision).toContain('下一轮 decide')
+    expect(testCase.mustNotHappen).toContain('重复注入')
+    expect(testCase.verification).toContain('两个 action 各保留一次')
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected playlist-created message')
+    expect(result.feedback.details?.playlistState).toMatchObject({ playlistType: 'rotation' })
+    expect(result.feedback.details?.reactTaskRun).toMatchObject({
+      objective: '新建轮播单后把生命树插入队列开头',
+      status: 'observing',
+      loopCount: 1,
+    })
+    const steps = (result.feedback.details?.reactTaskRun as { steps?: Array<{ action: { type: string } }> })?.steps ?? []
+    expect(steps.map((step) => step.action.type)).toEqual(['create_playlist', 'atomic_command'])
+    expect(result.feedback.details?.reactTaskBoundary).toMatchObject({
+      mode: 'react',
+      nextDecisionRequiresObservation: true,
+    })
+    expect(llmClientChatMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('executes playlist creation before a formal orchestration action in an ordered ReAct plan', async () => {
+    const testCase = {
+      id: 'planner-react-creates-tv-playlist-before-formal-orchestration',
+      userInput: '新建电视播单，然后按当前版面开始全天编排',
+      expectedDecision: '首轮真实创建电视播单，正式编排留到 observation 后由下一轮 decide',
+      mustNotHappen: '只展示 LLM 命令序列、返回 react_plan_invalid，或在没有工作区时跳过建单直接编排',
+      verification: '返回 playlistState.playlistType=tv 且 ReAct 两个有序步骤均保留、首轮 loopCount=1',
+    }
+    mockPlanner({
+      mode: 'react',
+      actions: [
+        { type: 'create_playlist', playlistType: 'tv' },
+        { type: 'formal_orchestration', mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: true },
+      ],
+      reactTask: {
+        objective: '创建电视播单后按当前版面完成全天编排',
+        maxTurns: 4,
+        batchSize: 4,
+        stopCondition: '全天编排完成或暴露不可恢复问题',
+        nextActions: [
+          { type: 'create_playlist', playlistType: 'tv' },
+          { type: 'formal_orchestration', mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: true },
+        ],
+      },
+      assistantReplyDraft: '我先创建电视播单，再根据创建后的版面现场开始编排。',
+      reasoning: '正式编排依赖新播单工作区，需要逐轮观察。',
+    })
+
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({ playlistType: 'none' }),
+      userInput: testCase.userInput,
+      currentSchedule: [],
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected playlist-created message')
+    expect(result.statusHint).not.toBe('failed')
+    expect(result.feedback.details?.playlistState).toMatchObject({ playlistType: 'tv' })
+    expect(result.feedback.details?.reactTaskRun).toMatchObject({
+      status: 'observing',
+      loopCount: 1,
+    })
+    const steps = (result.feedback.details?.reactTaskRun as { steps?: Array<{ action: { type: string } }> })?.steps ?? []
+    expect(steps.map((step) => step.action.type)).toEqual(['create_playlist', 'formal_orchestration'])
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
   })
 
   it('lets the planner understand whole rotation orchestration, then blocks without a draft locally', async () => {
     mockPlanner({
+      mode: 'react',
       actions: [
-        { type: 'formal_orchestration', mode: 'full_generate', useLayoutDraft: true },
+        { type: 'formal_orchestration', mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: true },
       ],
+      reactTask: {
+        objective: '按轮播草案完成整体编排',
+        nextActions: [{ type: 'research_check', purpose: 'candidate_precheck', queries: ['当前轮播草案'] }],
+      },
       assistantReplyDraft: '我会先检查这张轮播单能不能按草案整体编排。',
       reasoning: '用户要把当前轮播单整体排完整。',
     })
@@ -506,9 +632,14 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
 
   it('lets the LLM planner commit an explicit draft-backed orchestration request', async () => {
     mockPlanner({
+      mode: 'react',
       actions: [
         { type: 'commit_layout_draft', mode: 'full_generate', useLayoutDraft: true },
       ],
+      reactTask: {
+        objective: '按当前草案进入正式编排',
+        nextActions: [{ type: 'research_check', purpose: 'candidate_precheck', queries: ['当前轮播草案'] }],
+      },
       assistantReplyDraft: '我会按当前草案进入正式编排。',
       reasoning: '用户明确要求参考草案编排。',
     })
@@ -536,13 +667,76 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
   })
 
+  /**
+   * case formal-facade-missing-react-plan-fails-closed
+   * - id: formal-facade-missing-react-plan-fails-closed
+   * - userInput: 参考草案编排
+   * - expectedDecision: planner 漏掉 reactTask 时返回 react_plan_invalid 可恢复失败
+   * - mustNotHappen: 产出 layout_commit/orchestration 请求或回退旧编排器
+   * - verification: message status=failed、noMutation=true、保留原输入用于重试
+   */
+  it('exposes a recoverable failure when a formal planner action omits reactTask', async () => {
+    mockPlanner({
+      actions: [{ type: 'commit_layout_draft', mode: 'full_generate', useLayoutDraft: true }],
+      assistantReplyDraft: '我会按当前草案进入正式编排。',
+      reasoning: '用户明确要求参考草案编排。',
+    })
+
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'rotation-playlist',
+        playlistType: 'rotation',
+        channelId: 'rotation',
+        channelName: '轮播单',
+        rotationStrategy: 'content_match',
+        rotationDurationSeconds: 2 * 60 * 60,
+      }),
+      userInput: '参考草案编排',
+      currentSchedule: [],
+      currentLayoutDraft: createRotationDraft(),
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected recoverable message')
+    expect(result.statusHint).toBe('failed')
+    expect(result.feedback.details).toMatchObject({
+      noMutation: true,
+      recoverableUserInput: '参考草案编排',
+      recoverableFailureEnvelope: {
+        kind: 'react_plan_invalid',
+        noMutation: true,
+      },
+    })
+  })
+
   it('requires confirmation before a draft-backed full rebuild overwrites an existing formal playlist', async () => {
     mockPlanner({
+      mode: 'react',
       actions: [
         { type: 'commit_layout_draft', mode: 'full_generate', useLayoutDraft: true },
       ],
+      reactTask: {
+        objective: '核验当前草案并准备重新编排',
+        nextActions: [{ type: 'research_check', purpose: 'candidate_precheck', queries: ['当前轮播草案'] }],
+      },
       assistantReplyDraft: '我会按当前草案重新编排正式播单。',
       reasoning: '用户要求按草案重新编排已有轮播单。',
+    })
+    mockPlanner({
+      mode: 'react',
+      actions: [
+        { type: 'commit_layout_draft', mode: 'full_generate', useLayoutDraft: true },
+      ],
+      reactTask: {
+        objective: '按确认后的草案重新编排正式播单',
+        nextActions: [{ type: 'research_check', purpose: 'candidate_precheck', queries: ['当前轮播草案'] }],
+      },
+      assistantReplyDraft: '已收到确认，我会按当前草案进入正式编排。',
+      reasoning: '用户明确确认当前正式重编 pending。',
     })
 
     const currentSchedule = createExistingRotationSchedule()
@@ -603,6 +797,14 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     })
 
     expect(confirmed.kind).toBe('layout_commit')
+    if (confirmed.kind !== 'layout_commit') throw new Error('expected confirmed layout commit')
+    expect(confirmed.orchestrationRequest.authorizationRequest).toMatchObject({
+      sourcePendingId: result.pendingAtomicContext.pendingId,
+      workspaceKey: 'rotation:rotation-playlist',
+      mode: 'full_generate',
+      existingItemCount: 1,
+    })
+    expect(confirmed.orchestrationRequest.authorizationGrantId).toBeUndefined()
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
   })
 
@@ -747,6 +949,67 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     expect(result.feedback.details?.noMutation).toBe(true)
     expect(llmClientChatMock).toHaveBeenCalledTimes(1)
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
+  })
+
+  it('planner-create-claim-without-action: rejects a false playlist creation reply', async () => {
+    const testCase = {
+      id: 'planner-create-claim-without-action',
+      userInput: '新建电视播单',
+      expectedDecision: '模型未返回有效 create_playlist action 时暴露未创建状态并允许重试',
+      mustNotHappen: '仅凭 assistantReplyDraft 声称已经创建播单，导致对话与工作区事实不一致',
+      verification: '返回 needs_clarification + noMutation，且不携带 playlistState',
+    }
+    mockPlanner({
+      actions: [
+        { type: 'create_playlist', playlistType: 'television' },
+      ],
+      assistantReplyDraft: '我先整理版面草案，再创建电视播单。',
+      reasoning: '模型理解了创建目标，但返回了不合规的 playlistType。',
+    })
+
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({ playlistType: 'none' }),
+      userInput: testCase.userInput,
+      currentSchedule: [],
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(testCase.expectedDecision).toContain('暴露未创建状态')
+    expect(testCase.mustNotHappen).toContain('工作区事实不一致')
+    expect(testCase.verification).toContain('noMutation')
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected message')
+    expect(result.statusHint).toBe('needs_clarification')
+    expect(result.feedback.content).toContain('还没有创建播单')
+    expect(result.feedback.details?.noMutation).toBe(true)
+    expect(result.feedback.details?.playlistState).toBeUndefined()
+  })
+
+  it('planner-no-action-draft-prose: exposes terminal clarification instead of freezing progress', async () => {
+    mockPlanner({
+      actions: [],
+      assistantReplyDraft: '我先整理版面草案，再创建电视播单。',
+      reasoning: '版面草案需要先确认，但模型没有返回合法 action。',
+    })
+
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({ playlistType: 'none' }),
+      userInput: '请先整理版面草案再新建电视播单',
+      currentSchedule: [],
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected message')
+    expect(result.statusHint).toBe('needs_clarification')
+    expect(result.feedback.content).toContain('还没有创建播单')
+    expect(result.feedback.details?.noMutation).toBe(true)
   })
 
   it('lets the LLM planner create a rotation workspace and attach a one-hour draft', async () => {
@@ -951,14 +1214,21 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     expect(plannerUserMessage).toContain('02:00:00')
   })
 
-  it('lets the planner check assets and update the draft without confirmation', async () => {
+  it('research-candidate-precheck-with-draft-segment: updates the draft instead of opening insert clarification', async () => {
+    const testCase = {
+      id: 'research-candidate-precheck-with-draft-segment',
+      userInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
+      expectedDecision: '有明确草案段时 candidate_precheck 直接更新草案',
+      mustNotHappen: '把草案素材核验误分流为正式插入并追问队列位置',
+      verification: '返回 layout_draft，且 noFormalPlaylistWrite=true',
+    }
     llmClientChatMock
       .mockResolvedValueOnce({
         content: JSON.stringify({
           actions: [
             {
               type: 'research_check',
-              purpose: 'draft_precheck',
+              purpose: 'candidate_precheck',
               targetSegmentIndex: 1,
               semanticLabel: '金山区最近三年热门景点',
               programTypeHint: '宣传片',
@@ -1000,7 +1270,7 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
         rotationStrategy: 'content_match',
         rotationDurationSeconds: 2 * 60 * 60,
       }),
-      userInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
+      userInput: testCase.userInput,
       currentSchedule: [],
       currentLayoutDraft: currentDraft,
       history: [],
@@ -1010,6 +1280,7 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     })
 
     expect(result.kind).toBe('layout_draft')
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
     if (result.kind !== 'layout_draft') throw new Error('expected direct layout draft update')
     expect(result.feedback.processTypeLabel).toBe('版面草案')
     expect(result.feedback.content).toContain('已把“金山区最近三年热门景点”更新到左侧草案')
@@ -1068,6 +1339,7 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
         {
           type: 'refine_layout_draft',
           rotationDurationSeconds: 2 * 60 * 60,
+          targetSegmentIndex: 2,
           semanticLabel: '电视剧生命树',
           programTypeHint: 'drama',
         },
@@ -1210,5 +1482,248 @@ describe('DemoRuntimeFacade LLM-only agent planner foreground path', () => {
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
     expect(result.layoutDraft).toBeUndefined()
     expect(result.feedback.details?.noMutation).toBe(true)
+  })
+
+  /**
+   * case regression-agentPlanner-plan-passes-deadline-signal
+   * - expectedDecision: agentPlanner.plan 通过 submitInstruction 调用时，llmClient.chat options 携带 signal（AbortSignal）
+   * - mustNotHappen: options 缺失 signal（会导致 LLM 超时后底层 fetch 仍在执行，前台 5s 后无法中断）
+   * - verification: 检查 llmClientChatMock 第二参数（options）含 signal 字段且为 AbortSignal 实例
+   *
+   * 背景：轮播单"主题+时长"生成失败返回"模型没有及时返回"，根因是 agentPlanner.plan 用固定 12s timeout
+   * 且未接入 AgentDeadline，无法联动 abort。修复后 plan 接收 deadline 并透传 signal 到 llmClient.chat。
+   */
+  it('agentPlanner.plan 通过 submitInstruction 调用时透传 deadline signal 到 llmClient.chat', async () => {
+    mockPlanner({
+      actions: [{ type: 'clarify', question: '请补充信息' }],
+      assistantReplyDraft: '请补充信息',
+      reasoning: 'clarify for test',
+    })
+
+    await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'tv-playlist',
+        playlistType: 'tv',
+        channelId: 'dragon',
+        channelName: '东方卫视',
+      }),
+      userInput: '帮我全天编排',
+      currentSchedule: [],
+      currentLayoutDraft: createTvDraft(),
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(llmClientChatMock).toHaveBeenCalled()
+    const callArgs = llmClientChatMock.mock.calls[0]
+    const options = callArgs?.[1] as Record<string, unknown> | undefined
+    expect(options).toBeTruthy()
+    expect(options?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  /**
+   * case regression-rotation-failure-envelope-recognized-slots
+   * - expectedDecision: 轮播单主题+时长生成失败时，recoverableFailureEnvelope.recognizedSlots 包含 playlistType 与 target
+   * - mustNotHappen: recognizedSlots 为空（前台无法提示用户已识别的播单类型与时长）
+   * - verification: LLM 超时后 result.feedback.details.recoverableFailureEnvelope.recognizedSlots 含 playlistType=rotation 与 target=3600
+   *
+   * 背景：轮播单失败返回固定文案"模型没有及时返回"，缺少结构化 recognizedSlots，
+   * 前台无法据此生成 quick replies。修复后 buildRecoverableLlmFailureDecision 从 scheduleState 提取已识别槽位。
+   */
+  it('轮播单主题+时长生成失败时 envelope 携带 recognizedSlots', async () => {
+    // LLM 超时失败
+    llmClientChatMock.mockRejectedValueOnce(Object.assign(new Error('LLM timeout'), { code: 'ETIMEDOUT' }))
+
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'rotation-playlist',
+        playlistType: 'rotation',
+        channelId: 'rotation',
+        channelName: '轮播频道',
+        rotationDurationSeconds: 3600,
+      }),
+      userInput: '生成一个关于世界杯亚洲队集锦的轮播单，时长1小时',
+      currentSchedule: [],
+      currentLayoutDraft: null,
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected message')
+    expect(result.statusHint).toBe('failed')
+    const envelope = result.feedback.details?.recoverableFailureEnvelope as
+      | { recognizedSlots?: Array<{ name: string; value: unknown; source: string }> }
+      | undefined
+    expect(envelope).toBeTruthy()
+    expect(envelope?.recognizedSlots).toBeTruthy()
+    const slotNames = envelope!.recognizedSlots!.map((slot) => slot.name)
+    expect(slotNames).toContain('playlistType')
+    expect(slotNames).toContain('target')
+    const playlistTypeSlot = envelope!.recognizedSlots!.find((slot) => slot.name === 'playlistType')
+    expect(playlistTypeSlot?.value).toBe('rotation')
+    expect(playlistTypeSlot?.source).toBe('context')
+  })
+
+  it('formal-pending-switches-to-draft-owner: starts a draft task without continuing the formal pending command', async () => {
+    const testCase = {
+      id: 'formal-pending-switches-to-draft-owner',
+      userInput: '先不确认刚才的正式删除，把草案第二段改成城市文旅',
+      expectedDecision: '结束正式 pending，只更新草案第二段',
+      mustNotHappen: '执行上一轮删除或写入正式播单',
+      verification: 'decision.kind=layout_draft，第二段变为城市文旅',
+    }
+    mockPlanner({
+      pendingAction: 'start_new_task',
+      actions: [{
+        type: 'refine_layout_draft',
+        targetSegmentIndex: 2,
+        targetSegmentLabel: '电视剧',
+        semanticLabel: '城市文旅',
+        segments: [{ start: '01:00:00', end: '02:00:00', semanticLabel: '城市文旅', programTypeHint: 'documentary' }],
+      }],
+      assistantReplyDraft: '我会结束刚才的正式删除确认，只修改草案第二段。',
+      reasoning: '用户明确从 formal_playlist 切换到 layout_draft。',
+    })
+
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'rotation-playlist', playlistType: 'rotation', channelId: 'rotation', channelName: '轮播单',
+        rotationStrategy: 'content_match', rotationDurationSeconds: 7200,
+      }),
+      userInput: testCase.userInput,
+      currentSchedule: createExistingRotationSchedule(),
+      currentLayoutDraft: createRotationDraft(),
+      pendingAtomicContext: {
+        pendingId: 'pending-formal-delete', action: 'delete', phase: 'clarifying', summary: '待补充正式删除目标',
+        reasoning: '正式播单删除尚未确认。', originalUserInput: '删除正式播单第二条', collectedUserInput: '删除正式播单第二条',
+        slots: {}, missingFields: ['target_time'], followUpQuestion: '要删除哪条正式节目？', attemptCount: 0,
+        createdAt: '2026-07-22T00:00:00.000Z', updatedAt: '2026-07-22T00:00:00.000Z',
+      },
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+    expect(result.kind).toBe('layout_draft')
+    if (result.kind !== 'layout_draft') throw new Error('expected layout_draft')
+    expect(result.draft.columns.map((column) => column.semanticLabel)).toContain('城市文旅')
+    expect(result.feedback.content).toContain('草案')
+  })
+
+  it('draft-pending-switches-to-formal-owner: keeps the formal delete confirmation gate without mutating the draft', async () => {
+    const testCase = {
+      id: 'draft-pending-switches-to-formal-owner',
+      userInput: '先不更新草案，删除正式播单里9点的看东方',
+      expectedDecision: '结束草案 pending，进入正式删除确认',
+      mustNotHappen: '更新草案或直接删除正式节目',
+      verification: 'agent result=needs_confirmation 且 pending intent=delete',
+    }
+    mockPlanner({
+      actions: [{ type: 'atomic_command', intent: 'delete', pendingAction: 'start_new_task', targetTime: '09:00:00', targetProgramName: '看东方' }],
+      assistantReplyDraft: '我会停止草案更新，先核对正式播单里的9点节目并等待删除确认。',
+      reasoning: '用户明确从 layout_draft 切换到 formal_playlist。',
+    })
+    const draft = createTvDraft()
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'tv-playlist', playlistType: 'tv', isEmpty: false, itemCount: 1, gapCount: 0,
+      }),
+      userInput: testCase.userInput,
+      currentSchedule: [{
+        id: 'formal-kan-dongfang', programCode: 'KDF-0900', programName: '看东方',
+        startTime: '2026-03-25T09:00:00+08:00', endTime: '2026-03-25T10:00:00+08:00', duration: 3600, programType: 'news',
+      }],
+      currentLayoutDraft: draft,
+      pendingAtomicContext: {
+        pendingId: 'pending-draft-update', action: null, phase: 'draft_research_confirmation', summary: '待更新草案第二段',
+        reasoning: '只更新草案。', originalUserInput: '查草案第二段', collectedUserInput: '查草案第二段',
+        slots: { semanticLabel: '城市文旅' }, missingFields: ['selection'], followUpQuestion: '是否更新草案？',
+        layoutDraftSuggestion: {
+          purpose: 'draft_precheck', targetSegmentIndex: 1, semanticLabel: '城市文旅', queries: ['城市文旅'],
+          candidateCount: 1, topCandidates: [], userInput: '查草案第二段',
+        },
+        attemptCount: 0, createdAt: '2026-07-22T00:00:00.000Z', updatedAt: '2026-07-22T00:00:00.000Z',
+      },
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+    expect(result.kind).toBe('pending_atomic_context')
+    if (result.kind !== 'pending_atomic_context') throw new Error('expected pending_atomic_context')
+    expect(result.pendingAtomicContext.agentPendingTask?.phase).toBe('needs_confirmation')
+    expect(result.pendingAtomicContext.agentPendingTask?.intent).toBe('delete')
+    expect(draft.columns[0]?.semanticLabel).toBe('东方快报')
+  })
+
+  it('tv-atomic-insert-with-incomplete-draft: keeps a complete insert on the formal atomic path', async () => {
+    const testCase = {
+      id: 'tv-atomic-insert-with-incomplete-draft',
+      userInput: '草案还没做完，9点插入看东方',
+      expectedDecision: 'formal_playlist atomic_command 进入执行/候选链',
+      mustNotHappen: '因草案不完整进入 layout_draft、layout_commit 或 orchestration',
+      verification: 'result.kind 不属于草案或长流程控制结果，且保留 planner atomic trace',
+    }
+    mockPlanner({
+      actions: [{ type: 'atomic_command', intent: 'insert', targetTime: '09:00:00', programHint: '看东方' }],
+      assistantReplyDraft: '我会按正式电视播单的9点位置处理插入。',
+      reasoning: '用户明确要求把节目插入正式播单，草案仅作为参考。',
+    })
+
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'tv-playlist', playlistType: 'tv', isEmpty: true, itemCount: 0, gapCount: 1,
+      }),
+      userInput: testCase.userInput,
+      currentSchedule: [],
+      currentLayoutDraft: createTvDraft(),
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+    expect(['layout_draft', 'layout_commit', 'orchestration']).not.toContain(result.kind)
+    expect(result.feedback.content).toBeTruthy()
+  })
+
+  it('tv-atomic-insert-ambiguous-with-incomplete-draft: asks for atomic slots without starting orchestration', async () => {
+    const testCase = {
+      id: 'tv-atomic-insert-ambiguous-with-incomplete-draft',
+      userInput: '草案还没做完，插入一个节目',
+      expectedDecision: 'formal_playlist atomic_command 进入补参澄清',
+      mustNotHappen: '生成草案、拒绝原子动作或启动全天/整体补排',
+      verification: '结果不是 layout_draft/layout_commit/orchestration，且无正式写入',
+    }
+    mockPlanner({
+      actions: [{ type: 'atomic_command', intent: 'insert' }],
+      assistantReplyDraft: '请补充节目名称和插入时间。',
+      reasoning: '用户目标是正式播单插入，但原子槽位不足。',
+    })
+
+    const result = await new DemoRuntimeFacade().submitInstruction({
+      scheduleState: createScheduleState({
+        playlistId: 'tv-playlist', playlistType: 'tv', isEmpty: true, itemCount: 0, gapCount: 1,
+      }),
+      userInput: testCase.userInput,
+      currentSchedule: [],
+      currentLayoutDraft: createTvDraft(),
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+    expect(['layout_draft', 'layout_commit', 'orchestration']).not.toContain(result.kind)
+    expect(result.feedback.content).toBeTruthy()
   })
 })

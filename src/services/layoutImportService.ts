@@ -257,7 +257,7 @@ function normalizeLayoutCellText(value: unknown) {
 
 function stripLayoutDecorators(value: string) {
   return value
-    .replace(/[（(【\[].*?[）)】\]]/g, '')
+    .replace(/[（(【[].*?[）)】\]]/g, '')
     .replace(/^(重播|录播|首播|复播|直播)\s*/g, '')
     .replace(/\s*(重播|录播|首播|复播|直播)$/g, '')
     .trim()

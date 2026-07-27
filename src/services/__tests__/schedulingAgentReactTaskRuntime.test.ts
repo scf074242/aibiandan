@@ -59,6 +59,7 @@ vi.mock('@/services/layoutDraftFeasibilityService', () => ({
 }))
 
 import { SchedulingAgentRuntimeFacade } from '@/services/runtime/schedulingAgentRuntimeFacade'
+import { getSchedulingReactTaskRuntime } from '@/services/runtime/reactTaskRuntime'
 
 const createScheduleState = (overrides: Partial<ScheduleState> = {}): ScheduleState => ({
   channelId: 'rotation',
@@ -157,6 +158,54 @@ describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
       confidence: 0.1,
       reasoning: 'layout recognizer should not run before planner',
     })
+  })
+
+  it('replaces stale foreground steps after observation when the editor changes the target', () => {
+    const testCase = {
+      id: 'react-observation-replaces-stale-pending-step',
+      userInput: '确认，但把生命树换成上海宣传片',
+      expectedDecision: '新 LLM 决策替换尚未执行的旧插入步骤',
+      mustNotHappen: '继续执行旧的生命树步骤，或把新动作追加到旧 pending 后面',
+      verification: '旧步骤为 blocked，新步骤唯一 pending，且旧步骤仍保留在 trace',
+    }
+    const runtime = getSchedulingReactTaskRuntime()
+    const initial = runtime.startTask({
+      originalUserInput: '新建轮播单后插入生命树',
+      plannerTask: {
+        objective: '建单后插入节目',
+        maxTurns: 3,
+        batchSize: 2,
+        nextActions: [
+          { type: 'create_playlist', playlistType: 'rotation' },
+          { type: 'atomic_command', intent: 'insert', programHint: '生命树' },
+        ],
+      },
+    })
+    const observed = runtime.recordObservation({
+      run: initial,
+      type: 'user_feedback',
+      summary: '轮播单已创建，用户改换节目关键词。',
+    })
+    const replaced = runtime.replacePendingActions({
+      run: observed,
+      nextActions: [{ type: 'atomic_command', intent: 'insert', programHint: '上海宣传片' }],
+      reason: 'LLM 根据最新用户输入替换未执行动作',
+    })
+
+    expect(testCase.expectedDecision).toContain('替换')
+    expect(testCase.mustNotHappen).toContain('旧的生命树')
+    expect(testCase.verification).toContain('唯一 pending')
+    expect(replaced.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: 'blocked',
+        action: expect.objectContaining({ type: 'atomic_command', programHint: '生命树' }),
+      }),
+      expect.objectContaining({
+        status: 'pending',
+        action: expect.objectContaining({ type: 'atomic_command', programHint: '上海宣传片' }),
+      }),
+    ]))
+    expect(replaced.steps.filter((step) => step.status === 'pending')).toHaveLength(1)
   })
 
   it('runs a top-level ReAct research task through the formal foreground runtime without mutating the formal schedule', async () => {

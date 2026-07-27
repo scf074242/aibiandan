@@ -5,6 +5,8 @@ import type {
   AgentServerSessionState,
 } from './agentServerSessionStore'
 import type { FormalPlaylistSnapshot } from './formalPlaylistState'
+import type { FormalOrchestrationCheckpoint } from './formalOrchestrationRuntime'
+import type { AgentPlannerAction } from '@/services/llm/agentPlanner'
 
 export interface AgentSessionReplayPackage {
   schemaVersion: 1
@@ -31,6 +33,28 @@ export interface AgentSessionReplayPackage {
   }
   formalPlaylist?: Pick<FormalPlaylistSnapshot, 'version' | 'itemCount' | 'updatedAt' | 'source'>
   activeExecutionCheckpoint?: AgentExecutionCheckpoint | null
+  formalOrchestration?: {
+    workspaceKey?: string | null
+    playlistVersion?: string | number | null
+    request?: {
+      userInput: string
+      mode: 'full_generate' | 'partial_generate'
+      reasoning: string
+      targetTimeRange?: { start: string; end: string }
+      searchKeywords?: string[]
+      authorizationGrantId?: string
+    }
+    grant?: {
+      grantId: string
+      sourcePendingId: string
+      workspaceKey: string
+      initialPlaylistVersion: string
+      currentPlaylistVersion: string
+      draftFingerprint: string | null
+      status: 'active' | 'consumed' | 'revoked'
+    }
+    checkpoints: FormalOrchestrationCheckpoint<AgentPlannerAction>[]
+  }
   materialEvidence: AgentMaterialEvidenceRecord[]
   eventSummary: {
     totalEvents: number
@@ -89,6 +113,34 @@ export const buildAgentSessionReplayPackage = (
         }
       : undefined,
     activeExecutionCheckpoint: session.activeExecutionCheckpoint ?? null,
+    formalOrchestration: session.formalOrchestrationCheckpoints?.length
+      ? {
+          workspaceKey: session.formalOrchestrationWorkspaceKey ?? null,
+          playlistVersion: session.formalOrchestrationPlaylistVersion ?? null,
+          request: session.formalOrchestrationRequest
+            ? {
+                userInput: session.formalOrchestrationRequest.userInput,
+                mode: session.formalOrchestrationRequest.mode,
+                reasoning: session.formalOrchestrationRequest.reasoning,
+                targetTimeRange: session.formalOrchestrationRequest.targetTimeRange,
+                searchKeywords: session.formalOrchestrationRequest.searchKeywords,
+                authorizationGrantId: session.formalOrchestrationRequest.authorizationGrantId,
+              }
+            : undefined,
+          grant: session.formalOrchestrationGrant
+            ? {
+                grantId: session.formalOrchestrationGrant.grantId,
+                sourcePendingId: session.formalOrchestrationGrant.sourcePendingId,
+                workspaceKey: session.formalOrchestrationGrant.workspaceKey,
+                initialPlaylistVersion: session.formalOrchestrationGrant.initialPlaylistVersion,
+                currentPlaylistVersion: session.formalOrchestrationGrant.currentPlaylistVersion,
+                draftFingerprint: session.formalOrchestrationGrant.draftFingerprint,
+                status: session.formalOrchestrationGrant.status,
+              }
+            : undefined,
+          checkpoints: [...session.formalOrchestrationCheckpoints],
+        }
+      : undefined,
     materialEvidence: session.materialEvidence ? [...session.materialEvidence] : [],
     eventSummary: {
       totalEvents: session.eventLog.length,

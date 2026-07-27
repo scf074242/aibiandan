@@ -20,7 +20,7 @@ export interface FormalPlaylistPatch {
   itemCount: number
   changedItemIds: string[]
   affectedTimeRanges?: { start: string; end: string }[]
-  source: 'agent-server-write-boundary'
+  source: 'formal-playlist-write-boundary'
 }
 
 export interface FormalPlaylistWriteArtifacts {
@@ -55,13 +55,18 @@ const hashText = (value: string): string => {
   return (hash >>> 0).toString(36)
 }
 
+const normalizeVersionTime = (value: string): string => {
+  const match = /(?:T|^)(\d{2}:\d{2})(?::(\d{2}))?/.exec(value.trim())
+  return match ? `${match[1]}:${match[2] ?? '00'}` : value.trim()
+}
+
 export const buildFormalPlaylistVersion = (items: RuntimeScheduleItem[]): string => {
   const stablePayload = normalizeItems(items).map((item) => [
     item.id,
     item.programCode ?? '',
     item.programName ?? '',
-    item.startTime,
-    item.endTime,
+    normalizeVersionTime(item.startTime),
+    normalizeVersionTime(item.endTime),
     String(item.duration ?? ''),
     item.programType ?? '',
   ].join('|')).join('\n')
@@ -217,7 +222,7 @@ export const buildFormalPlaylistWriteArtifacts = (
       itemCount: snapshot.itemCount,
       changedItemIds,
       affectedTimeRanges: result.affectedTimeRanges,
-      source: 'agent-server-write-boundary',
+      source: 'formal-playlist-write-boundary',
     },
   }
 }

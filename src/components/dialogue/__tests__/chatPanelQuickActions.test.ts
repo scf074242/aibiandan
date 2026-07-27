@@ -8,8 +8,40 @@ const currentDir = dirname(fileURLToPath(import.meta.url))
 const chatPanelSource = readFileSync(resolve(currentDir, '../ChatPanel.vue'), 'utf-8')
 const broadcastPlanSource = readFileSync(resolve(currentDir, '../../../views/broadcast-plan/create.vue'), 'utf-8')
 const orchestrationHookSource = readFileSync(resolve(currentDir, '../../../views/broadcast-plan/useBroadcastPlanOrchestration.ts'), 'utf-8')
+const formalApprovalSource = readFileSync(resolve(currentDir, '../../../views/broadcast-plan/components/FormalOrchestrationApprovalBar.vue'), 'utf-8')
 
 describe('ChatPanel quick actions', () => {
+  /**
+   * case formal-react-foreground-approval-controls
+   * - id: formal-react-foreground-approval-controls
+   * - userInput: 确认或取消长流程中等待审批的正式写入
+   * - expectedDecision: 页面提供结构化确认和取消按钮，失效现场不可点击
+   * - mustNotHappen: 依赖自然语言“确认/取消”重新解释，或跨工作区继续写入
+   * - verification: 独立审批组件绑定 confirm/cancel 且 current=false 时禁用
+   */
+  it('renders explicit guarded controls for a waiting formal ReAct action', () => {
+    expect(formalApprovalSource).toContain('@click="$emit(\'confirm\')"')
+    expect(formalApprovalSource).toContain('@click="$emit(\'cancel\')"')
+    expect(formalApprovalSource).toContain(':disabled="!current || busy"')
+    expect(orchestrationHookSource).toContain("recoverReactApproval('confirm_pending')")
+    expect(orchestrationHookSource).toContain("recoverReactApproval('cancel')")
+    expect(broadcastPlanSource).toContain(':current="reactApprovalIsCurrent"')
+  })
+  /**
+   * case agent-stream-foreground-single-bubble
+   * - userInput: 真实 Agent 在 intent/candidate 阶段连续发送流式进度
+   * - expectedDecision: 相同 streamId 更新同一条处理中气泡，并只展示安全文案
+   * - mustNotHappen: 每个 token 新增气泡；把半截 JSON 暴露给用户
+   * - verification: ChatPanel 使用 streamId map 原地更新，且不渲染原始 token
+   */
+  it('keeps streamed progress in one safe foreground bubble', () => {
+    expect(chatPanelSource).toContain('const runtimeStreamMessages = new Map<string, Message>()')
+    expect(chatPanelSource).toContain('const streamMessage = streamId ? runtimeStreamMessages.get(streamId) : undefined')
+    expect(chatPanelSource).toContain('streamMessage.content = progressContent')
+    expect(chatPanelSource).toContain('runtimeStreamMessages.set(streamId, nextMessage)')
+    expect(chatPanelSource).toContain("streamId = typeof event.details?.streamId === 'string'")
+  })
+
   it('exposes long-flow scheduling as explicit non-atomic quick actions', () => {
     const quickActionsBlock = chatPanelSource.match(/const quickActions[\s\S]*?= \[[\s\S]*?\n\]/)?.[0] ?? ''
 
@@ -60,6 +92,8 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('details?.playlistState')
     expect(chatPanelSource).toContain('playlistId: playlistState.playlistId ?? props.playlistId')
     expect(chatPanelSource).toContain('const feedbackWorkspaceKey = resolveRuntimeFeedbackWorkspaceKey(details)')
+    expect(chatPanelSource).toContain("if (currentWorkspaceKey === 'none' && feedbackWorkspaceKey && feedbackWorkspaceKey !== 'none')")
+    expect(chatPanelSource).toContain('rebindUnscopedConversationToWorkspace(messages.value, feedbackWorkspaceKey)')
     expect(chatPanelSource).toContain('bindLatestUserMessageToWorkspace(feedbackWorkspaceKey)')
     expect(chatPanelSource).toContain('workspaceKey: feedbackWorkspaceKey ?? undefined')
     expect(chatPanelSource).toContain('playlistId: playlistState.playlistId')
@@ -67,6 +101,9 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('date: activePlaylistType.value === \'tv\' ? playlistState.date : undefined')
     expect(chatPanelSource).toContain('activePlaylistType.value = playlistState.playlistType')
     expect(chatPanelSource).toContain("emit('playlistStateChanged'")
+    expect(broadcastPlanSource).toContain('currentPlaylistId.value = payload.playlistId ?? null')
+    expect(broadcastPlanSource).toContain('scheduleItems.value = []')
+    expect(broadcastPlanSource).toContain('persistCurrentPlaylistDocument()')
     expect(chatPanelSource).toContain("rotationStrategy: activePlaylistType.value === 'rotation' ? activeRotationStrategy.value : undefined")
     expect(chatPanelSource).toContain('playlistType: activePlaylistType.value')
     expect(chatPanelSource).toContain("rotationStrategy: activePlaylistType.value === 'rotation' ? activeRotationStrategy.value : undefined")
@@ -129,14 +166,18 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('const hiddenFromThread = input.hiddenFromThread')
     expect(chatPanelSource).toContain('&& containsForegroundDraftPayload(input)')
     expect(chatPanelSource).toContain('&& !shouldKeepDraftBlockingInputVisible(input)')
+    expect(chatPanelSource).toContain('const shouldKeepPlaylistStateFeedbackVisible')
+    expect(chatPanelSource).toContain('&& !shouldKeepPlaylistStateFeedbackVisible(input)')
+    expect(chatPanelSource).toContain('if (details?.playlistState) return false')
     expect(chatPanelSource).toContain('&& !shouldKeepReadOnlyAnalysisInputVisible(input)')
     expect(chatPanelSource).toContain('messages.value.filter((message) => (')
-    expect(chatPanelSource).toContain('&& isForegroundWorkspaceMessageVisible(message, resolveCurrentPendingWorkspaceKey())')
+    expect(chatPanelSource).toContain('&& isForegroundConversationMessageVisible(message, resolveCurrentPendingWorkspaceKey())')
     expect(chatPanelSource).toContain('const sanitizeForegroundDraftText')
     expect(chatPanelSource).toContain('const sanitizeForegroundDraftPayload')
     expect(chatPanelSource).toContain('const sanitizeAssistantMessageInput')
     expect(chatPanelSource).toContain('const isForegroundDraftPayloadKey')
-    expect(chatPanelSource).toContain('value.includes(\'编排参考\')')
+    expect(chatPanelSource).toContain("if (typeof value === 'string') return false")
+    expect(chatPanelSource).not.toContain("value.includes('编排参考')")
     expect(chatPanelSource).toContain('isForegroundDraftPayloadKey(key)')
     expect(chatPanelSource).toContain('sanitizeForegroundDraftPayload(input.explanation)')
     expect(chatPanelSource).toContain('const getVisibleMessageDetails')
@@ -150,7 +191,10 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('formatStructuredDetails(sanitizeForegroundDraftPayload(details), formatDisplayTime)')
     expect(chatPanelSource).toContain('const isForegroundLongFlowDetails')
     expect(chatPanelSource).toContain('isOrchestrationOverviewDetails(details)')
-    expect(chatPanelSource).toContain('containsForegroundDraftPayload(message.explanation?.explanation)')
+    expect(chatPanelSource).toContain("if (typeof value === 'string') return false")
+    expect(chatPanelSource).not.toContain('containsForegroundDraftPayload(message.explanation?.explanation)')
+    expect(chatPanelSource).not.toContain("value.includes('版面草案')")
+    expect(chatPanelSource).not.toContain("value.includes('编排参考')")
     expect(chatPanelSource).toContain("if (message.role === 'user') return false")
     expect(chatPanelSource).not.toContain("if (foregroundLayoutDraftEnabled || message.role === 'user') return false")
     expect(chatPanelSource).not.toContain('当前版面参考</span>')
@@ -249,13 +293,13 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('runtimeClient.resolvePendingInsertRecommendation')
     expect(chatPanelSource).not.toContain('openClawBridge.submitInstruction')
     expect(chatPanelSource).not.toContain('getOpenClawBridge')
-    expect(orchestrationHookSource).toContain('targetTimeRange?: { start: string; end: string }')
-    expect(orchestrationHookSource).toContain('searchKeywords?: string[]')
     expect(orchestrationHookSource).toContain("import { resolveFormalOrchestrationSearchKeywords } from '@/services/retrievalConstraintCompiler'")
     expect(orchestrationHookSource).toContain('resolveFormalOrchestrationSearchKeywords(payload.userInput)')
-    expect(orchestrationHookSource).toContain('...(searchKeywords?.length ? { searchKeywords } : {})')
     expect(orchestrationHookSource).toContain('const effectiveTargetTimeRange = payload.targetTimeRange ?? payload.layoutDraft?.coverage')
-    expect(orchestrationHookSource).toContain('targetTimeRange?.start ??')
+    expect(orchestrationHookSource).toContain('if (payload.reactTask)')
+    expect(orchestrationHookSource).toContain('orchestratorRuntime.startReactOrchestration(')
+    expect(orchestrationHookSource).not.toContain('orchestratorRuntime.startFullGeneration(')
+    expect(orchestrationHookSource).not.toContain('orchestratorRuntime.startPartialGeneration(')
   })
 
   it('switches back to the schedule workspace when formal orchestration starts', () => {
@@ -264,7 +308,7 @@ describe('ChatPanel quick actions', () => {
     expect(orchestrationHookSource).toContain('activateScheduleWorkspace?: () => void')
     expect(orchestrationHookSource).toContain('options.activateScheduleWorkspace?.()')
     expect(orchestrationHookSource.indexOf('options.activateScheduleWorkspace?.()')).toBeLessThan(
-      orchestrationHookSource.indexOf('await startOrchestrationRuntime('),
+      orchestrationHookSource.indexOf('await orchestratorRuntime.startReactOrchestration('),
     )
   })
 
@@ -423,7 +467,7 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain("import { buildPendingLlmContext } from '@/services/agent/agentSession'")
     expect(chatPanelSource).toContain('const getPendingAtomicContextDetailItems')
     expect(chatPanelSource).toContain('agentPendingLlmContext: buildPendingLlmContext(agentPendingTask')
-    expect(chatPanelSource).toContain('pending-agent-context-list')
+    expect(chatPanelSource).toContain(':detail-items="getPendingAtomicContextDetailItems()"')
     expect(chatPanelSource).toContain('{{ item.label }}')
     expect(chatPanelSource).toContain('{{ item.value }}')
   })
@@ -439,12 +483,11 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).not.toContain('history: messages.value.slice(-6).map((message) => message.content)')
   })
 
-  it('expires write review state before routing an unrelated foreground message without dropping normal LLM context', () => {
+  it('keeps same-workspace write review context for explicit LLM disposition', () => {
     expect(chatPanelSource).toContain('resolvePendingReviewLifecycle')
     expect(chatPanelSource).toContain('const currentWorkspaceKey = resolveCurrentPendingWorkspaceKey()')
     expect(chatPanelSource).toContain('const pendingReviewLifecycle = resolvePendingReviewLifecycle')
     expect(chatPanelSource).toContain('pendingWorkspaceKey: pendingReviewWorkspaceKey.value')
-    expect(chatPanelSource).toContain('const hasWriteReview = Boolean(pendingCommand.value) || isAtomicContextWriteReview(pendingAtomicContext.value)')
     expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.hasPendingReview')
     expect(chatPanelSource).toContain('? (pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null)')
     expect(chatPanelSource).toContain(': pendingAtomicContext.value')
@@ -463,17 +506,15 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('preferLayoutDraftRefine: false')
   })
 
-  it('interrupts stale pending review state before sending a new foreground message to runtime', () => {
+  it('does not locally classify a new foreground message to interrupt pending review', () => {
     const sendMessageBlock = chatPanelSource.match(/const sendMessage = async \(\) => \{[\s\S]*?\n\}/)?.[0] ?? ''
-    const interruptIndex = sendMessageBlock.indexOf('interruptPendingReviewForNewInput(content)')
     const userMessageIndex = sendMessageBlock.indexOf('messages.value.push(buildUserMessage(content))')
     const processIndex = sendMessageBlock.indexOf('await processMessage(content)')
 
-    expect(sendMessageBlock).toContain('interruptPendingReviewForNewInput(content)')
-    expect(interruptIndex).toBeGreaterThanOrEqual(0)
-    expect(userMessageIndex).toBeGreaterThan(interruptIndex)
+    expect(sendMessageBlock).not.toContain('interruptPendingReviewForNewInput(content)')
+    expect(chatPanelSource).not.toContain("pendingReviewInterruptedNotice.value = resolvePendingReviewExpiredNotice('next_non_answer')")
+    expect(userMessageIndex).toBeGreaterThanOrEqual(0)
     expect(processIndex).toBeGreaterThan(userMessageIndex)
-    expect(chatPanelSource).toContain("pendingReviewInterruptedNotice.value = resolvePendingReviewExpiredNotice('next_non_answer')")
     expect(chatPanelSource).toContain('const pendingReviewExpiredNotice = interruptedPendingReviewNotice ?? (pendingReviewLifecycle.shouldExpire')
     expect(chatPanelSource).toContain('await applyRuntimeDecision(decision, pendingReviewExpiredNotice)')
   })
@@ -498,8 +539,9 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('const terminalOrchestrationStatuses = new Set')
     expect(chatPanelSource).toContain('const isForegroundOrchestrationRunning = computed')
     expect(chatPanelSource).toContain("&& !isTerminalOrchestrationStatus(props.orchestrationSession?.status)")
-    expect(chatPanelSource).toContain(":class=\"{ 'is-stop': isForegroundOrchestrationRunning }\"")
-    expect(chatPanelSource).toContain("v-if=\"isForegroundOrchestrationRunning\"")
+    expect(chatPanelSource).toContain(":class=\"{ 'is-stop': isPrimaryStopAction }\"")
+    expect(chatPanelSource).toContain("v-if=\"isPrimaryStopAction\"")
+    expect(chatPanelSource).toContain('isForegroundOrchestrationRunning.value || shortRequestController.canStop.value')
     expect(primaryActionBlock).toContain('if (isForegroundOrchestrationRunning.value)')
     expect(primaryActionBlock).toContain('const content = inputMessage.value.trim()')
     expect(primaryActionBlock).toContain('interruptedCommandAfterCancel.value = content')
@@ -574,7 +616,7 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).not.toContain('class="pending-command-panel clarifying-panel"')
     expect(chatPanelSource).toContain('class="pending-command-panel agent-confirmation-panel"')
     expect(chatPanelSource).toContain('class="playlist-file-card"')
-    expect(chatPanelSource).toContain('class="pending-command-panel insert-recommendation-panel"')
+    expect(chatPanelSource).toContain('mode="insert_recommendation"')
     expect(chatPanelSource).toContain('showTargetSelectionAtomicPanel')
     expect(chatPanelSource).toContain('const getPendingAtomicClarificationSuggestions')
     expect(chatPanelSource).toContain("{ label: '9点', prompt: '9点' }")
@@ -590,14 +632,14 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).not.toContain('缺少：{{ formatAtomicMissingFieldLabel')
     expect(chatPanelSource).toContain('已定位：${targetPart}')
     expect(chatPanelSource).toContain('确认后删除，取消则不改动播单')
-    expect(chatPanelSource).toContain(':disabled="loading || !pendingAtomicTargetSelectedItemId"')
-    expect(chatPanelSource).toContain(':disabled="loading || !pendingAtomicInsertSelectedCandidateId"')
+    expect(chatPanelSource).toContain(':selected-id="pendingAtomicTargetSelectedItemId"')
+    expect(chatPanelSource).toContain(':selected-id="pendingAtomicInsertSelectedCandidateId"')
   })
 
   it('keeps pending task and recommendation panels in editor-facing language', () => {
     expect(chatPanelSource).toContain('formatCompositeTaskSummary(context.compositeTaskRun)')
     expect(chatPanelSource).toContain('const formatCompositeTaskConfirmationNote')
-    expect(chatPanelSource).toContain('formatRecommendationStrengthLabel(index)')
+    expect(chatPanelSource).toContain(':format-meta="formatInsertRecommendationMetaForPanel"')
     expect(chatPanelSource).toContain('我按节目线索和当前播单排好了候选')
     expect(chatPanelSource).toContain('选好后我会先预演插入，确认没有问题再写入。')
     expect(chatPanelSource).not.toContain('置信度 {{ Math.round(candidate.confidence * 100) }}%')
@@ -627,22 +669,37 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('transition.changed')
   })
 
-  it('treats write confirmation review like a one-turn UI gate while keeping other LLM context alive', () => {
+  /**
+   * case planner-no-action-draft-word-remains-visible
+   * - id: planner-no-action-draft-word-remains-visible
+   * - userInput: 新建电视播单
+   * - expectedDecision: 模型只返回提及版面草案的说明但没有 create_playlist action 时，终态澄清仍对编排员可见
+   * - mustNotHappen: 根据消息正文包含“版面草案”就隐藏终态，只留下冻结的流式进度
+   * - verification: 草案消息过滤仅接受结构化标签或 payload key，不读取 content / reasoning / explanation 猜消息类型
+   */
+  it('keeps terminal feedback visible when prose mentions a layout draft without a valid action', () => {
+    expect(chatPanelSource).not.toContain("return message.content.includes('版面草案')")
+    expect(chatPanelSource).toContain("message.processTypeLabel?.includes('版面草案') === true")
+    expect(chatPanelSource).not.toContain('containsForegroundDraftPayload(message.explanation?.explanation)')
+    expect(chatPanelSource).toContain('isForegroundLongFlowDetails(details)')
+  })
+
+  it('keeps write confirmation review until explicit disposition while preserving workspace protection', () => {
     expect(chatPanelSource).toContain('const pendingReviewLifecycle = resolvePendingReviewLifecycle')
     expect(chatPanelSource).toContain('const usablePendingCommand = pendingReviewLifecycle.canUsePendingReview ? pendingCommand.value : null')
-    expect(chatPanelSource).toContain('const hasWriteReview = Boolean(pendingCommand.value) || isAtomicContextWriteReview(pendingAtomicContext.value)')
     expect(chatPanelSource).toContain('const usablePendingAtomicContext = pendingReviewLifecycle.hasPendingReview')
     expect(chatPanelSource).toContain('? (pendingReviewLifecycle.canUsePendingReview ? pendingAtomicContext.value : null)')
     expect(chatPanelSource).toContain(': pendingAtomicContext.value')
-    expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewCancelText(content))')
-    expect(chatPanelSource).toContain('if (usablePendingCommand && isPendingReviewConfirmText(content))')
+    expect(chatPanelSource).not.toContain('if (usablePendingCommand && isPendingReviewCancelText(content))')
+    expect(chatPanelSource).not.toContain('if (usablePendingCommand && isPendingReviewConfirmText(content))')
+    expect(chatPanelSource).toContain('const decision = await runtimeClient.submitInstruction')
     expect(chatPanelSource).toContain('const buildPendingExecuteInput = (pendingCommand: RuntimePendingCommand) =>')
     expect(chatPanelSource).toContain('expectedPlaylistVersion: formalPlaylistVersion')
     expect(chatPanelSource).toContain('currentSchedule: props.currentSchedule')
-    expect(chatPanelSource).toContain('runtimeClient.executePendingCommand(buildPendingExecuteInput(usablePendingCommand))')
+    expect(chatPanelSource).toContain('runtimeClient.executePendingCommand(buildPendingExecuteInput(pending))')
     expect(chatPanelSource).toContain('const pendingReviewInterruptedNotice = ref<string | null>(null)')
-    expect(chatPanelSource).toContain('const interruptPendingReviewForNewInput = (content: string): boolean =>')
-    expect(chatPanelSource).toContain('interruptPendingReviewForNewInput(content)')
+    expect(chatPanelSource).not.toContain('const interruptPendingReviewForNewInput = (content: string): boolean =>')
+    expect(chatPanelSource).not.toContain('interruptPendingReviewForNewInput(content)')
     expect(chatPanelSource).toContain('const interruptedPendingReviewNotice = pendingReviewInterruptedNotice.value')
     expect(chatPanelSource).toContain('const pendingReviewExpiredNotice = interruptedPendingReviewNotice ?? (pendingReviewLifecycle.shouldExpire')
     expect(chatPanelSource).toContain('resolvePendingReviewExpiredNotice(pendingReviewLifecycle.expireReason)')
@@ -671,13 +728,12 @@ describe('ChatPanel quick actions', () => {
   })
 
   it('keeps visible chat messages scoped to the active playlist workspace', () => {
-    expect(chatPanelSource).toContain('isForegroundWorkspaceMessageVisible')
-    expect(chatPanelSource).toContain('&& isForegroundWorkspaceMessageVisible(message, resolveCurrentPendingWorkspaceKey())')
+    expect(chatPanelSource).toContain('isForegroundConversationMessageVisible')
+    expect(chatPanelSource).toContain('&& isForegroundConversationMessageVisible(message, resolveCurrentPendingWorkspaceKey())')
     expect(chatPanelSource).toContain('v-if="visibleMessages.length === 0 && !loading"')
   })
 
   it('lets HTTP server runtime own LLM readiness while preserving local fallback checks', () => {
-    const confirmIndex = chatPanelSource.indexOf('if (usablePendingCommand && isPendingReviewConfirmText(content))')
     const readinessIndex = chatPanelSource.indexOf('const llmReadiness = resolveForegroundLlmReadiness()')
     const submitIndex = chatPanelSource.indexOf('runtimeClient.submitInstruction')
 
@@ -688,8 +744,8 @@ describe('ChatPanel quick actions', () => {
     expect(chatPanelSource).toContain('return resolveLLMReadiness({')
     expect(chatPanelSource).toContain('allowBrowserMock: import.meta.env.DEV')
     expect(chatPanelSource).toContain('pushLlmNotReadyMessage(llmReadiness.message, llmReadiness.errors, stepProgress.finish())')
-    expect(confirmIndex).toBeGreaterThanOrEqual(0)
-    expect(readinessIndex).toBeGreaterThan(confirmIndex)
+    expect(chatPanelSource).toContain('const confirmPendingCommand = async () =>')
+    expect(chatPanelSource).toContain('runtimeClient.executePendingCommand(buildPendingExecuteInput(pending))')
     expect(submitIndex).toBeGreaterThan(readinessIndex)
   })
 })

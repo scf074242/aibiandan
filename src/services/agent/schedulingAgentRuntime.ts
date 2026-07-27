@@ -1,9 +1,11 @@
 import { DefaultAgentTraceRecorder } from './agentTrace'
 import { AtomicCommandCapability } from './atomicCommandCapability'
+import { FormalOrchestrationCapability } from './formalOrchestrationCapability'
 import { buildAgentAuditSummary } from './agentAuditSummary'
 import { auditSchedulingAgentOperationalReadiness, auditSchedulingAgentV1Readiness } from './agentReadinessAudit'
 import { buildPendingLlmContext } from './agentSession'
 import { LlmAgentCandidateJudge } from './candidateJudge'
+import type { AgentDeadline } from './agentDeadline'
 import type { LLMClient } from '@/services/llm/llmClient'
 import { getLLMClient } from '@/services/llm/llmClient'
 import { CapabilityRegistry } from './capabilityRegistry'
@@ -74,7 +76,7 @@ export class SchedulingAgentRuntime {
       ?? new LlmAgentCandidateJudge({ llmClient: options.llmClient ?? getLLMClient() })
     this.intentInterpreter = options.intentInterpreter
     this.onTraceStep = options.onTraceStep
-    const capabilities = options.capabilities ?? [new AtomicCommandCapability()]
+    const capabilities = options.capabilities ?? [new AtomicCommandCapability(), new FormalOrchestrationCapability()]
     capabilities.forEach((capability) => this.registry.register(capability))
   }
 
@@ -226,7 +228,17 @@ export class SchedulingAgentRuntime {
     return auditSchedulingAgentOperationalReadiness(this.describeCapabilities(), context)
   }
 
-  async submit(input: AgentSubmitInput): Promise<AgentResult> {
+  /**
+   * 执行 agent 提交指令的全链路：意图解析 → 能力路由 → capability 执行。
+   *
+   * D1 接入：新增可选 deadline 参数，透传给 intentInterpreter.interpret 和
+   * AgentCapabilityRuntime，让下游 LLM 调用使用 stageTimeoutMs 推导的 timeout。
+   * 未传时下游沿用默认 timeout（向后兼容，现有测试和 llmRuntimeEvaluation 不受影响）。
+   *
+   * @param input - agent 提交输入
+   * @param deadline - 可选的统一 deadline 管理器（per-submit）
+   */
+  async submit(input: AgentSubmitInput, deadline?: AgentDeadline): Promise<AgentResult> {
     const trace = new DefaultAgentTraceRecorder(this.onTraceStep)
     trace.record('idle', '接收 agent 指令', {
       channelId: input.channelId,
@@ -234,11 +246,15 @@ export class SchedulingAgentRuntime {
       playlistId: input.playlistId,
     })
 
-    const effectiveInput = await this.buildEffectiveInput(input, trace)
-    if (this.intentInterpreter && !effectiveInput.interpretation) {
+    const effectiveInput = await this.buildEffectiveInput(input, trace, deadline)
+    if (this.intentInterpreter && (!effectiveInput.interpretation || !effectiveInput.interpretation.intent)) {
+      // 优先使用 LLM 返回的分类引导话术（如"你想插到几点？"），
+      // 让用户知道缺什么、下一步该补什么；LLM 未返回话术时走硬编码兜底。
+      const llmFeedback = effectiveInput.interpretation?.assistantFeedback
       trace.record('failed', 'LLM interpretation did not produce a structured command; capability fallback is disabled.', {
         userInput: effectiveInput.userInput,
         pendingIntent: effectiveInput.pendingTask?.intent,
+        hasAssistantFeedback: Boolean(llmFeedback),
       })
       return {
         status: 'failed',
@@ -253,7 +269,7 @@ export class SchedulingAgentRuntime {
             }],
           },
         },
-        explanation: '这次模型没有正常理解这条指令，我没有改动播单。你可以直接说“重试”，或者把时间、节目名再说一遍。',
+        explanation: llmFeedback || '这次模型没有正常理解这条指令，我没有改动播单。你可以直接说“重试”，或者把时间、节目名再说一遍。',
         trace: trace.getTrace(),
       }
     }
@@ -334,6 +350,8 @@ export class SchedulingAgentRuntime {
       dataGateway: auditingDataGateway,
       candidateJudge: this.candidateJudge,
       trace,
+      deadline,
+      capabilityRegistry: this.registry,
     })
     const result: AgentResult = {
       ...capabilityResult,
@@ -353,9 +371,20 @@ export class SchedulingAgentRuntime {
     }
   }
 
+  /**
+   * 构造 effective input，含 LLM 意图解析。
+   *
+   * D1 接入：透传 deadline 给 intentInterpreter.interpret，让 LLM 调用使用
+   * stageTimeoutMs 推导的 timeout。
+   *
+   * @param input - 原始提交输入
+   * @param trace - trace 记录器
+   * @param deadline - 可选的统一 deadline 管理器
+   */
   private async buildEffectiveInput(
     input: AgentSubmitInput,
     trace: DefaultAgentTraceRecorder,
+    deadline?: AgentDeadline,
   ): Promise<AgentSubmitInput> {
     if (input.interpretation || !this.intentInterpreter) {
       return input
@@ -382,8 +411,27 @@ export class SchedulingAgentRuntime {
         ...buildLlmCallTrace('attempted'),
       })
       const interpreterInput = await this.buildInterpreterInput(input, trace)
-      const interpretation = await this.intentInterpreter.interpret(interpreterInput)
+      // D1 接入：透传 deadline 给 interpret，让 LLM 调用使用 stageTimeoutMs 推导的 timeout。
+      // 使用条件 spread 避免在 deadline 为 undefined 时传入第二个参数，
+      // 保持与现有测试 toHaveBeenCalledWith(objectContaining(...)) 断言兼容（单参数调用）。
+      const interpretation = await this.intentInterpreter.interpret(
+        interpreterInput,
+        ...(deadline ? [deadline] : []),
+      )
       if (!interpretation?.intent) {
+        // 失败但带可读 assistantFeedback：LLM 表达"无法理解"并给出分类引导话术时，
+        // 透传 interpretation 让上层 submit 能把 assistantFeedback 作为 explanation 返回给用户，
+        // 而不是静默丢弃后走硬编码兜底话术。本地不做语义分类，仅做结构透传（LLM-only）。
+        if (interpretation?.assistantFeedback && interpretation.source === 'llm') {
+          trace.record('understanding', 'Agent intent interpreter 未返回可执行意图，但带可读分类引导话术，透传给用户', {
+            interpretation,
+            ...buildLlmCallTrace('rejected', 'no_structured_intent_with_feedback'),
+          })
+          return {
+            ...interpreterInput,
+            interpretation,
+          }
+        }
         trace.record('understanding', 'Agent intent interpreter 未返回可执行意图，本轮停止，不走本地关键词兜底', {
           interpretation,
           ...buildLlmCallTrace('rejected', 'no_structured_intent'),

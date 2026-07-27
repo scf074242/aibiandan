@@ -48,6 +48,17 @@ export interface LLMRequestTrace {
   success: boolean
   error?: string
   startedAt: string
+  /** 能力域 prompt 版本号（如 'v1.0'），用于 trace 审计与回归归因 */
+  promptVersion?: string
+  /** 流式请求从发起到首个有效 token 的延迟。 */
+  firstTokenLatencyMs?: number
+}
+
+export interface ChatTokenMeta {
+  index: number
+  receivedChars: number
+  elapsedMs: number
+  firstTokenLatencyMs: number
 }
 
 // 聊天选项
@@ -57,6 +68,14 @@ export interface ChatOptions {
   timeout?: number
   maxRetries?: number
   traceLabel?: string
+  /** 能力域 prompt 版本号，透传到 trace 便于审计 */
+  promptVersion?: string
+  /** 请求兼容 OpenAI 的 JSON object 输出约束；调用方仍须执行本地结构校验。 */
+  responseFormat?: 'json_object'
+  /** 可选 AbortSignal，用于联动 AgentDeadline 中止底层 fetch / openai 调用 */
+  signal?: AbortSignal
+  /** 仅用于展示增量进度；完整内容仍需聚合并通过结构校验后才能执行。 */
+  onToken?: (delta: string, meta: ChatTokenMeta) => void
 }
 
 // Command 类型

@@ -7,8 +7,10 @@ import { resolveForegroundLayoutDraft } from '@/services/runtime/foregroundLayou
 import { clearRuntimeLayout } from '@/services/orchestration/runtimeLayoutRegistry'
 import { loadLLMConfig, saveLLMConfig } from '@/services/llm/llmConfig'
 
+const mockLlmChat = vi.hoisted(() => vi.fn())
+
 vi.mock('@/services/llm/llmClient', () => ({
-  getLLMClient: () => ({}),
+  getLLMClient: () => ({ chat: mockLlmChat }),
 }))
 
 vi.mock('@/services/llm/taskClassifier', () => ({
@@ -195,9 +197,47 @@ const createCompleteLayoutDraft = (): LayoutDraft => ({
   ],
 })
 
+const mockFormalPlanner = (input: {
+  action: 'commit_layout_draft' | 'formal_orchestration'
+  mode: 'full_generate' | 'partial_generate'
+  taskKind: 'full_day' | 'overall_refill' | 'local_refill'
+  useLayoutDraft: boolean
+  targetTimeRange?: { start: string; end: string }
+  searchKeywords?: string[]
+}) => {
+  mockLlmChat.mockResolvedValueOnce({
+    content: JSON.stringify({
+      mode: 'react',
+      actions: [input.action === 'commit_layout_draft'
+        ? { type: input.action, mode: input.mode, useLayoutDraft: input.useLayoutDraft }
+        : {
+            type: input.action,
+            mode: input.mode,
+            taskKind: input.taskKind,
+            useLayoutDraft: input.useLayoutDraft,
+            targetTimeRange: input.targetTimeRange,
+            searchKeywords: input.searchKeywords,
+          }],
+      reactTask: {
+        objective: '按用户要求完成正式编排',
+        maxTurns: 5,
+        batchSize: 3,
+        nextActions: [{
+          type: 'research_check',
+          purpose: 'candidate_precheck',
+          queries: input.searchKeywords?.length ? input.searchKeywords : ['当前播单编排需求'],
+        }],
+      },
+      assistantReplyDraft: '我会先检查节目库与当前播单，再逐批处理。',
+      reasoning: 'LLM planner 已明确正式编排动作。',
+    }),
+  })
+}
+
 describe('foreground agent goal contracts', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockLlmChat.mockReset()
     storage.clear()
     cookieValue = ''
     installBrowserStorageMocks()
@@ -205,6 +245,7 @@ describe('foreground agent goal contracts', () => {
   })
 
   it('keeps a normal fill-gaps request on the formal playlist path even when a draft exists', async () => {
+    mockFormalPlanner({ action: 'formal_orchestration', mode: 'partial_generate', taskKind: 'overall_refill', useLayoutDraft: false })
     const facade = new DemoRuntimeFacade()
     const draft = createCompleteLayoutDraft()
 
@@ -215,6 +256,8 @@ describe('foreground agent goal contracts', () => {
       currentLayoutDraft: draft,
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     expect(decision.kind).toBe('orchestration')
@@ -227,6 +270,14 @@ describe('foreground agent goal contracts', () => {
   })
 
   it('treats normal time-range scheduling as formal playlist orchestration, not draft mutation', async () => {
+    mockFormalPlanner({
+      action: 'formal_orchestration',
+      mode: 'partial_generate',
+      taskKind: 'local_refill',
+      useLayoutDraft: false,
+      targetTimeRange: { start: '09:00:00', end: '12:00:00' },
+      searchKeywords: ['东方剧场'],
+    })
     const facade = new DemoRuntimeFacade()
     const draft = createCompleteLayoutDraft()
 
@@ -237,6 +288,8 @@ describe('foreground agent goal contracts', () => {
       currentLayoutDraft: draft,
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     expect(decision.kind).toBe('orchestration')
@@ -250,6 +303,14 @@ describe('foreground agent goal contracts', () => {
   })
 
   it('treats normal daypart scheduling as formal partial orchestration unless the draft is explicit', async () => {
+    mockFormalPlanner({
+      action: 'formal_orchestration',
+      mode: 'partial_generate',
+      taskKind: 'local_refill',
+      useLayoutDraft: false,
+      targetTimeRange: { start: '13:00:00', end: '18:00:00' },
+      searchKeywords: ['栏目=新闻'],
+    })
     const facade = new DemoRuntimeFacade()
     const draft = createLayoutDraft()
 
@@ -260,6 +321,8 @@ describe('foreground agent goal contracts', () => {
       currentLayoutDraft: draft,
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     expect(decision.kind).toBe('orchestration')
@@ -272,6 +335,15 @@ describe('foreground agent goal contracts', () => {
   })
 
   it('keeps formal scheduling on the playlist path even after the draft workspace was active', async () => {
+    mockFormalPlanner({ action: 'formal_orchestration', mode: 'partial_generate', taskKind: 'overall_refill', useLayoutDraft: false })
+    mockFormalPlanner({
+      action: 'formal_orchestration',
+      mode: 'partial_generate',
+      taskKind: 'local_refill',
+      useLayoutDraft: false,
+      targetTimeRange: { start: '13:00:00', end: '18:00:00' },
+      searchKeywords: ['栏目=新闻'],
+    })
     const facade = new DemoRuntimeFacade()
     const draft = createLayoutDraft()
 
@@ -283,6 +355,8 @@ describe('foreground agent goal contracts', () => {
       history: [],
       layoutDraftEnabled: true,
       preferLayoutDraftRefine: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
     const daypartDecision = await facade.submitInstruction({
       scheduleState: createScheduleState({ isEmpty: false, itemCount: 2, gapCount: 1 }),
@@ -292,6 +366,8 @@ describe('foreground agent goal contracts', () => {
       history: [],
       layoutDraftEnabled: true,
       preferLayoutDraftRefine: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     expect(fillDecision.kind).toBe('orchestration')
@@ -307,6 +383,7 @@ describe('foreground agent goal contracts', () => {
   })
 
   it('uses the draft only when the user explicitly references the draft for formal scheduling', async () => {
+    mockFormalPlanner({ action: 'commit_layout_draft', mode: 'partial_generate', taskKind: 'overall_refill', useLayoutDraft: true })
     const facade = new DemoRuntimeFacade()
     const draft = createLayoutDraft()
 
@@ -317,6 +394,8 @@ describe('foreground agent goal contracts', () => {
       currentLayoutDraft: draft,
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     expect(decision.kind).toBe('layout_commit')
@@ -326,7 +405,7 @@ describe('foreground agent goal contracts', () => {
     expect(decision.feedback.details?.layoutSource).toBe('channel_default')
   })
 
-  it('injects layout segments into the LLM context only for explicit draft-reference tasks', () => {
+  it('keeps draft facts neutral across different user wording without inferring draft usage', () => {
     const draft = createLayoutDraft()
 
     const atomicContext = buildForegroundAgentContextPackage({
@@ -344,9 +423,12 @@ describe('foreground agent goal contracts', () => {
 
     expect(atomicContext.workspace.workspaceKey).toBe('tv:playlist-tv-1')
     expect(atomicContext.layoutDraft.available).toBe(true)
-    expect(atomicContext.layoutDraft.segments).toBeUndefined()
-    expect(atomicContext.injectionProfile.includeLayoutSegments).toBe(false)
-    expect(draftContext.layoutDraft.referencedByCurrentTask).toBe(true)
+    expect(atomicContext.scenario).toBe('layout_reference')
+    expect(atomicContext.layoutDraft.referencedByCurrentTask).toBe(false)
+    expect(atomicContext.layoutDraft.segments).toHaveLength(1)
+    expect(atomicContext.injectionProfile.includeLayoutSegments).toBe(true)
+    expect(draftContext.scenario).toBe(atomicContext.scenario)
+    expect(draftContext.layoutDraft.referencedByCurrentTask).toBe(false)
     expect(draftContext.layoutDraft.segments).toEqual([
       {
         id: 'slot-news',
@@ -366,7 +448,7 @@ describe('foreground agent goal contracts', () => {
     ['move', '把9点的节目向后移动1小时'],
     ['query', '查询9点的节目'],
     ['validate', '执行校验'],
-  ])('keeps old atomic %s wording out of layout-draft routing', (_action, userInput) => {
+  ])('does not locally classify atomic %s wording', (_action, userInput) => {
     const context = buildForegroundAgentContextPackage({
       latestUserInput: userInput,
       scheduleState: createScheduleState({ playlistId: 'playlist-tv-atomic' }),
@@ -374,14 +456,15 @@ describe('foreground agent goal contracts', () => {
       currentLayoutDraft: createLayoutDraft(),
     })
 
-    expect(context.scenario).toBe('atomic')
+    expect(context.scenario).toBe('layout_reference')
+    expect(context.latestUserInput).toBe(userInput)
     expect(context.layoutDraft.available).toBe(true)
-    expect(context.layoutDraft.segments).toBeUndefined()
-    expect(context.injectionProfile.includeLayoutSegments).toBe(false)
+    expect(context.layoutDraft.segments).toHaveLength(1)
+    expect(context.injectionProfile.includeLayoutSegments).toBe(true)
     expect(context.allowedActions).toEqual(expect.arrayContaining(['insert', 'delete', 'move', 'replace', 'query', 'validate']))
   })
 
-  it('expires a pending review when the user starts a different foreground task', () => {
+  it('keeps a pending review available for explicit LLM disposition on a different same-workspace task', () => {
     const pendingCommand: RuntimePendingCommand = {
       command: {
         action: 'delete',
@@ -408,18 +491,19 @@ describe('foreground agent goal contracts', () => {
     expect(confirmContext.scenario).toBe('review')
     expect(confirmContext.review).toMatchObject({
       action: 'delete',
-      expiresOnNextNonAnswer: true,
+      expiresOnNextNonAnswer: false,
       allowedResponses: ['confirm', 'cancel'],
     })
-    expect(unrelatedContext.scenario).toBe('atomic')
+    expect(unrelatedContext.scenario).toBe('review')
     expect(unrelatedContext.review).toMatchObject({
       action: 'delete',
-      expiresOnNextNonAnswer: true,
+      expiresOnNextNonAnswer: false,
     })
-    expect(unrelatedContext.allowedActions).toContain('query')
+    expect(unrelatedContext.allowedActions).toContain('start_new_task')
+    expect(unrelatedContext.allowedActions).not.toContain('query')
   })
 
-  it('keeps full-day and local refill as formal-generation scenarios rather than draft edits', () => {
+  it('does not infer full-day or local-refill task kinds from user text', () => {
     const draft = createCompleteLayoutDraft()
     const fullContext = buildForegroundAgentContextPackage({
       latestUserInput: '帮我全天编排',
@@ -434,17 +518,18 @@ describe('foreground agent goal contracts', () => {
       currentLayoutDraft: draft,
     })
 
-    expect(fullContext.scenario).toBe('full_generate')
-    expect(fullContext.allowedActions).toEqual(['full_generate', 'cancel'])
+    expect(fullContext.scenario).toBe('layout_reference')
+    expect(fullContext.allowedActions).toContain('full_generate')
+    expect(fullContext.allowedActions).toContain('partial_generate')
     expect(fullContext.layoutDraft.available).toBe(true)
     expect(fullContext.layoutDraft.referencedByCurrentTask).toBe(false)
     expect(fullContext.layoutDraft.completeness.status).toBe('complete')
     expect(fullContext.layoutDraft.segments?.length).toBeGreaterThan(0)
     expect(fullContext.injectionProfile.includeLayoutSegments).toBe(true)
-    expect(partialContext.scenario).toBe('partial_generate')
-    expect(partialContext.allowedActions).toEqual(['partial_generate', 'cancel'])
-    expect(partialContext.layoutDraft.segments).toBeUndefined()
-    expect(partialContext.injectionProfile.includeLayoutSegments).toBe(false)
+    expect(partialContext.scenario).toBe(fullContext.scenario)
+    expect(partialContext.allowedActions).toEqual(fullContext.allowedActions)
+    expect(partialContext.layoutDraft.segments).toEqual(fullContext.layoutDraft.segments)
+    expect(partialContext.injectionProfile.includeLayoutSegments).toBe(true)
   })
 
   it('auto-loads TV drafts but does not invent a rotation draft before upload', () => {

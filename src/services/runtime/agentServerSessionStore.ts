@@ -1,8 +1,11 @@
-import type { RuntimeDecision, RuntimePendingCommand } from './schedulingAgentRuntimeFacade'
+import type { RuntimeDecision, RuntimeOrchestrationRequest, RuntimePendingCommand } from './schedulingAgentRuntimeFacade'
 import type { RuntimePendingAtomicContext } from './pendingAtomicContext'
 import type { ForegroundAgentContextPackage } from './foregroundAgentContextPackage'
 import type { ReactTaskRun } from './reactTaskTypes'
 import type { FormalPlaylistSnapshot } from './formalPlaylistState'
+import type { FormalOrchestrationCheckpoint } from './formalOrchestrationRuntime'
+import type { FormalOrchestrationGrant } from './formalOrchestrationGrant'
+import type { AgentPlannerAction } from '@/services/llm/agentPlanner'
 
 export interface AgentMaterialEvidenceRecord {
   id: string
@@ -46,13 +49,18 @@ export interface AgentServerSessionState {
   formalPlaylistSnapshot?: FormalPlaylistSnapshot | null
   formalPlaylistWorkspaceKey?: string | null
   activeExecutionCheckpoint?: AgentExecutionCheckpoint | null
+  formalOrchestrationCheckpoints?: FormalOrchestrationCheckpoint<AgentPlannerAction>[]
+  formalOrchestrationWorkspaceKey?: string | null
+  formalOrchestrationPlaylistVersion?: string | number | null
+  formalOrchestrationRequest?: RuntimeOrchestrationRequest | null
+  formalOrchestrationGrant?: FormalOrchestrationGrant | null
   materialEvidence?: AgentMaterialEvidenceRecord[]
   eventLog: AgentServerSessionEvent[]
 }
 
 export interface AgentServerSessionEvent {
   id: string
-  type: 'session' | 'context' | 'decision' | 'pending' | 'react_task' | 'execution' | 'formal_write' | 'material_evidence' | 'task_progress' | 'execution_checkpoint' | 'error'
+  type: 'session' | 'context' | 'decision' | 'pending' | 'react_task' | 'react_checkpoint' | 'react_recovery' | 'execution' | 'formal_write' | 'material_evidence' | 'task_progress' | 'execution_checkpoint' | 'error' | 'progress'
   summary: string
   createdAt: string
   data?: Record<string, unknown>
@@ -74,6 +82,7 @@ export class AgentServerSessionStore {
         ...session,
         eventLog: [...session.eventLog],
         materialEvidence: session.materialEvidence ? [...session.materialEvidence] : undefined,
+        formalOrchestrationCheckpoints: session.formalOrchestrationCheckpoints ? [...session.formalOrchestrationCheckpoints] : undefined,
       })
     })
   }
@@ -196,6 +205,7 @@ export class AgentServerSessionStore {
       ...session,
       eventLog: [...session.eventLog],
       materialEvidence: session.materialEvidence ? [...session.materialEvidence] : undefined,
+      formalOrchestrationCheckpoints: session.formalOrchestrationCheckpoints ? [...session.formalOrchestrationCheckpoints] : undefined,
     }))
   }
 }

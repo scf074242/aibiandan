@@ -1,6 +1,20 @@
-import type { ScheduleItemSnapshot } from '@/types/orchestration'
+import type { CandidateQueryCriteria, GapInfo, ProgramCandidate, ScheduleItemSnapshot } from '@/types/orchestration'
 import { parseAtomicClockExpression } from '@/services/atomicTimeParser'
 import { continuePendingTask, createPendingTask } from './agentSession'
+import {
+  buildCandidateRetryKeywordsPure,
+  buildCandidateSearchAttemptPure,
+  buildCandidateSearchRetryPlanPure,
+  getCandidateSearchRetryService,
+  DEFAULT_TV_RETRY_CONFIG,
+  resolveCandidatePoolPure,
+  resolveInsertCandidatesPure,
+  type CandidateKeywordStrategy,
+  type CandidatePoolResolution,
+  type CandidateSearchAttempt,
+  type CandidateSearchRetryConfig,
+  type CandidateSearchRetryPlan,
+} from './candidateSearchRetryService'
 import { AgentConstraintEngine } from './constraintEngine'
 import {
   buildAgentPendingContextFingerprint,
@@ -92,19 +106,6 @@ type CandidateSelectionResult = {
 type CandidateJudgePool = {
   candidates: AgentProgramCandidate[]
   assessments: Record<string, AgentCandidateProfessionalAssessment>
-}
-
-type CandidateSearchAttempt = {
-  keyword: string
-  source: 'primary' | 'llm_alternative'
-  candidateCount: number
-  candidateIds: string[]
-}
-
-type CandidatePoolResolution = {
-  candidates: AgentProgramCandidate[]
-  attempts: CandidateSearchAttempt[]
-  matchedBy: 'primary' | 'llm_alternatives' | 'none'
 }
 
 type RecommendationBuildOptions = {
@@ -721,7 +722,7 @@ export class AtomicCommandCapability implements AgentCapability {
     })
     const context = await runtime.dataGateway.loadContext(input)
     const command = this.buildQueryCommand(input)
-    const queryResult = this.executeQueryCommand(command, input, context, runtime)
+    const queryResult = await this.executeQueryCommand(command, input, context, runtime)
     const sourceIssues = this.buildQuerySourceEvidenceIssues(command, context)
 
     runtime.trace.record('planning', 'Build query atomic command plan.', {
@@ -2232,10 +2233,11 @@ export class AtomicCommandCapability implements AgentCapability {
       playlistType: context.playlistType,
       noMutation: true,
     })
-    const candidatePool = this.resolveCandidatePool(
+    const candidatePool = await this.resolveCandidatePool(
       context.programCandidates,
       effectiveReplaceSlots.replacementHint,
       input,
+      context,
       runtime,
     )
     const explicitCandidate = effectiveReplaceSlots.selectedCandidateId
@@ -2246,7 +2248,9 @@ export class AtomicCommandCapability implements AgentCapability {
       : candidatePool.candidates
 
     if (effectiveCandidates.length === 0) {
-      const searchRetryPlan = this.buildCandidateSearchRetryPlan(input, context, replaceSlots.replacementHint, candidatePool.attempts)
+      const searchRetryPlan = candidatePool.searchRetryPlan
+        ? this.enrichSearchRetryPlan(candidatePool.searchRetryPlan, context, replaceSlots.replacementHint)
+        : this.buildCandidateSearchRetryPlan(input, context, replaceSlots.replacementHint, candidatePool.attempts)
       return {
         status: 'needs_clarification',
         input,
@@ -2260,7 +2264,7 @@ export class AtomicCommandCapability implements AgentCapability {
               code: 'program_not_found',
               severity: 'critical',
               message: '我查了当前候选库，暂时没有找到可用于替换的节目或素材。',
-              detail: searchRetryPlan,
+              detail: searchRetryPlan as unknown as Record<string, unknown>,
             }],
           },
         },
@@ -2420,7 +2424,7 @@ export class AtomicCommandCapability implements AgentCapability {
         originalInput: previousPendingTask?.originalInput || input.userInput,
         collectedInput: this.mergeCollectedInput(previousPendingTask?.collectedInput, input.userInput),
         collectedSlots: {
-          ...(previousPendingTask?.collectedSlots ?? {}),
+          ...previousPendingTask?.collectedSlots,
           targetTime: {
             value: targetTime,
             source: replaceSlots.source === 'initial' ? 'user_initial' : 'user_followup',
@@ -2871,10 +2875,11 @@ export class AtomicCommandCapability implements AgentCapability {
       playlistType: context.playlistType,
       noMutation: true,
     })
-    const candidatePool = this.resolveCandidatePool(
+    const candidatePool = await this.resolveCandidatePool(
       context.programCandidates,
       insertSlots.programHint,
       input,
+      context,
       runtime,
     )
     const explicitCandidate = insertSlots.selectedCandidateId
@@ -2886,14 +2891,16 @@ export class AtomicCommandCapability implements AgentCapability {
 
     if (effectiveCandidates.length === 0) {
       const previousPendingTask = insertSlots.pendingTask
-      const searchRetryPlan = this.buildCandidateSearchRetryPlan(input, context, insertSlots.programHint, candidatePool.attempts)
+      const searchRetryPlan = candidatePool.searchRetryPlan
+        ? this.enrichSearchRetryPlan(candidatePool.searchRetryPlan, context, insertSlots.programHint)
+        : this.buildCandidateSearchRetryPlan(input, context, insertSlots.programHint, candidatePool.attempts)
       const pendingTask = createPendingTask({
         intent: 'insert',
         phase: 'needs_clarification',
         originalInput: previousPendingTask?.originalInput || input.userInput,
         collectedInput: this.mergeCollectedInput(previousPendingTask?.collectedInput, input.userInput),
         collectedSlots: {
-          ...(previousPendingTask?.collectedSlots ?? {}),
+          ...previousPendingTask?.collectedSlots,
           targetTime: {
             value: effectiveInsertSlots.targetTime,
             source: insertSlots.source === 'initial' ? 'user_initial' : 'user_followup',
@@ -2925,7 +2932,7 @@ export class AtomicCommandCapability implements AgentCapability {
               code: 'program_not_found',
               severity: 'critical',
               message: '我查了当前候选库，暂时没有找到可插入的节目或素材。',
-              detail: searchRetryPlan,
+              detail: searchRetryPlan as unknown as Record<string, unknown>,
             }],
           },
         },
@@ -3074,7 +3081,7 @@ export class AtomicCommandCapability implements AgentCapability {
         originalInput: previousPendingTask?.originalInput || input.userInput,
         collectedInput: this.mergeCollectedInput(previousPendingTask?.collectedInput, input.userInput),
         collectedSlots: {
-          ...(previousPendingTask?.collectedSlots ?? {}),
+          ...previousPendingTask?.collectedSlots,
           targetTime: {
             value: effectiveInsertSlots.targetTime,
             source: insertSlots.source === 'initial' ? 'user_initial' : 'user_followup',
@@ -3268,7 +3275,7 @@ export class AtomicCommandCapability implements AgentCapability {
         intent: 'query',
         queryKind: interpreted.queryKind,
         targetTime: interpreted.slots?.targetTime ? normalizeDateTime(input.date, interpreted.slots.targetTime) : undefined,
-        keyword: interpreted.keyword ?? interpreted.slots?.programHint,
+        keyword: interpreted.keyword ?? interpreted.slots?.programHint ?? interpreted.slots?.targetProgramName,
       }
     }
     return {
@@ -3277,12 +3284,12 @@ export class AtomicCommandCapability implements AgentCapability {
     }
   }
 
-  private executeQueryCommand(
+  private async executeQueryCommand(
     command: QueryCommandPlan,
     input: AgentSubmitInput,
     context: SchedulingContext,
     runtime: AgentCapabilityRuntime,
-  ): AgentQueryResult {
+  ): Promise<AgentQueryResult> {
     if (command.queryKind === 'candidate_lookup') {
       runtime.trace.record('planning', '调用节目查询服务查找候选', {
         intent: 'query',
@@ -3293,7 +3300,7 @@ export class AtomicCommandCapability implements AgentCapability {
         noMutation: true,
       })
       const candidatePool = command.keyword
-        ? this.resolveCandidatePool(context.programCandidates, command.keyword, input, runtime)
+        ? await this.resolveCandidatePool(context.programCandidates, command.keyword, input, context, runtime)
         : {
             candidates: context.programCandidates,
             attempts: [],
@@ -4141,46 +4148,186 @@ export class AtomicCommandCapability implements AgentCapability {
     return titleMatches.length > 0 ? titleMatches : matched
   }
 
-  private resolveCandidatePool(
+  /**
+   * 解析候选池（阶段 4 改造：主链路接入 executeRetryLoop + SSE 流式进度）。
+   *
+   * 设计约束（AGENTS.md LLM-first / 本地只保护 / SSE 一条条流式展示）：
+   * - keywordStrategies 全部来自 LLM 在意图解析阶段一次性生成（本地不改写、不扩展）
+   * - 无 keywordStrategies 时退化为 resolveCandidatePoolPure（向后兼容，不进入重试循环）
+   * - 有 keywordStrategies 时调 executeRetryLoop 按策略优先级本地轮询 context.programCandidates
+   * - queryFn 闭包过滤 context.programCandidates（与 resolveCandidatePoolPure 行为一致）
+   * - onAttemptStart / onAttempt 触发 trace.record，经 DefaultAgentTraceRecorder.onRecord → onTraceStep → onProgress 形成实时 SSE 事件
+   * - 首轮（round=0）的"查节目库"开始气泡已由调用方 trace（"调用节目查询服务查找候选"）覆盖，onAttemptStart 跳过首轮
+   * - 0 候选终止时推送"候选检索终止"trace（暴露失败，不本地兜底）
+   * - 顺播硬约束不在本层处理，由后续 selectCandidate → candidateJudge 保护
+   *
+   * SSE 一条条信息流式展示硬约束（方案 6.3.1）：
+   * - 每轮检索的"开始气泡"（onAttemptStart）与"完成气泡"（onAttempt）之间有真实检索等待时间（await queryFn）
+   * - 每个气泡是独立 trace.record → 独立 SSE 事件，不可合并
+   *
+   * @param candidates 内存候选池（context.programCandidates）
+   * @param primaryHint 首轮原词（用户原词或 LLM programHint）
+   * @param input Agent 提交输入（含意图解析结果，取 keywordStrategies）
+   * @param context 调度上下文（用于 enrichSearchRetryPlan 填充候选源状态）
+   * @param runtime Agent 能力运行时（含 trace 用于 SSE 上报）
+   * @returns 候选池解析结果（含 candidates / attempts / matchedBy / searchRetryPlan）
+   */
+  private async resolveCandidatePool(
     candidates: AgentProgramCandidate[],
     primaryHint: string,
     input: AgentSubmitInput,
+    context: SchedulingContext,
     runtime: AgentCapabilityRuntime,
-  ): CandidatePoolResolution {
-    const primaryCandidates = this.resolveInsertCandidates(candidates, primaryHint)
-    const attempts: CandidateSearchAttempt[] = [
-      this.buildCandidateSearchAttempt(primaryHint, 'primary', primaryCandidates),
-    ]
-    if (primaryCandidates.length > 0) {
-      return {
-        candidates: primaryCandidates,
-        attempts,
-        matchedBy: 'primary',
+  ): Promise<CandidatePoolResolution> {
+    // 从 LLM 意图解析结果提取并校验 keywordStrategies（本地只做结构校验与去重）
+    const retryService = getCandidateSearchRetryService()
+    const keywordStrategies = retryService.generateKeywordStrategies(
+      input.interpretation ?? undefined,
+      primaryHint,
+    )
+
+    // 无可用策略或退化为仅 original（无其它策略）时退化为原 resolveCandidatePoolPure
+    // （向后兼容：保留 searchAlternatives 重试路径与 rewrite_keywords_and_retry 失败语义，不进入重试循环）
+    const hasRetryStrategy = keywordStrategies.some((item) => item.strategy !== 'original')
+    if (keywordStrategies.length === 0 || !hasRetryStrategy) {
+      const resolution = resolveCandidatePoolPure(
+        candidates,
+        primaryHint,
+        input,
+        (value) => this.normalizeSearchText(value),
+        (hint) => this.buildInsertSearchFacets(hint),
+      )
+      if (resolution.matchedBy !== 'primary') {
+        runtime.trace.record('planning', 'Candidate search retried with LLM-provided alternatives.', {
+          originalKeyword: primaryHint,
+          matchedBy: resolution.matchedBy,
+          attempts: resolution.attempts,
+        })
       }
+      return resolution
     }
 
-    const retryKeywords = this.buildCandidateRetryKeywords(primaryHint, input)
-    const merged = new Map<string, AgentProgramCandidate>()
-    retryKeywords.forEach(({ keyword, source }) => {
-      const retryCandidates = this.resolveInsertCandidates(candidates, keyword)
-      attempts.push(this.buildCandidateSearchAttempt(keyword, source, retryCandidates))
-      retryCandidates.forEach((candidate) => {
-        const key = candidate.id || candidate.programCode || candidate.programId || candidate.programName
-        if (!merged.has(key)) merged.set(key, candidate)
-      })
-    })
+    // 构造 queryFn：对 context.programCandidates 做本地关键词过滤（与 resolveCandidatePoolPure 行为一致）
+    // 闭包捕获 candidates，忽略 gap 参数（本地过滤不需要时段信息）
+    const normalizeFn = (value: string) => this.normalizeSearchText(value)
+    const facetsFn = (hint: string) => this.buildInsertSearchFacets(hint)
+    const queryFn = async (_gap: GapInfo, criteria: CandidateQueryCriteria): Promise<ProgramCandidate[]> => {
+      const keyword = criteria.searchKeywords?.[0] ?? primaryHint
+      return resolveInsertCandidatesPure(candidates, keyword, normalizeFn, facetsFn)
+    }
 
-    const resolved = Array.from(merged.values())
-    runtime.trace.record('planning', 'Candidate search retried with LLM-provided alternatives.', {
-      originalKeyword: primaryHint,
-      matchedBy: resolved.length > 0 ? 'llm_alternatives' : 'none',
-      attempts,
-    })
+    // SSE 一条条信息流式展示硬约束（方案 6.3.1）：
+    // - onAttemptStart 在每轮检索"开始前"触发，推送"查节目库-重试N（策略标签）"开始气泡
+    //   首轮（round=0）的"查节目库"开始气泡已由调用方 trace（"调用节目查询服务查找候选"）覆盖，跳过
+    // - onAttempt 在每轮检索"完成后"触发，推送"候选查询完成"完成气泡（0 候选不推）
+    // - 开始气泡与完成气泡之间有真实检索等待时间（executeRetryLoop 内部 await queryFn）
+    const onAttemptStart = (attempt: CandidateSearchAttempt) => {
+      // 首轮已由调用方 trace（"调用节目查询服务查找候选"）覆盖，不重复推送
+      if (attempt.round === 0) return
+      runtime.trace.record('planning', '查节目库-重试', {
+        keyword: attempt.keyword,
+        strategyLabel: attempt.strategyLabel,
+        strategyReason: attempt.strategyReason,
+        round: attempt.round,
+        candidateCount: 0,
+        noMutation: true,
+      })
+    }
+    const onAttempt = (attempt: CandidateSearchAttempt) => {
+      // 0 候选不推完成气泡，由后续拒绝/终止流程处理
+      if (attempt.candidateCount === 0) return
+      runtime.trace.record('planning', '候选查询完成', {
+        keyword: attempt.keyword,
+        strategyLabel: attempt.strategyLabel,
+        candidateCount: attempt.candidateCount,
+        candidateIds: attempt.candidateIds,
+        round: attempt.round,
+        noMutation: true,
+      })
+    }
+
+    // 构造 gap / criteria（executeRetryLoop 需要，但 queryFn 闭包过滤 candidates，不实际使用 gap）
+    const nowIso = new Date().toISOString()
+    const gap: GapInfo = {
+      id: 'retry-gap',
+      startTime: nowIso,
+      endTime: nowIso,
+      duration: 0,
+      constraints: {},
+      metadata: { source: 'generated', priority: 1, createdAt: nowIso, updatedAt: nowIso },
+    }
+    const criteria = {
+      searchKeywords: [primaryHint],
+    } as CandidateQueryCriteria
+
+    // 重试配置（playlistType 不影响 executeRetryLoop 逻辑，仅用于 LLM 策略偏好，已在意图解析阶段处理）
+    const retryConfig: CandidateSearchRetryConfig = {
+      ...DEFAULT_TV_RETRY_CONFIG,
+    }
+
+    // 执行多轮关键词组合重试循环
+    const { candidates: retryCandidates, searchRetryPlan } = await retryService.executeRetryLoop(
+      gap,
+      criteria,
+      keywordStrategies,
+      retryConfig,
+      queryFn,
+      onAttempt,
+      onAttemptStart,
+    )
+
+    // 0 候选终止时推送"候选检索终止"trace（暴露失败，不本地兜底硬排）
+    if (retryCandidates.length === 0) {
+      runtime.trace.record('planning', '候选检索终止', {
+        terminationReason: searchRetryPlan.terminationReason,
+        nextAction: searchRetryPlan.nextAction,
+        keywordStrategies: searchRetryPlan.keywordStrategies,
+        searchAttemptCount: searchRetryPlan.searchAttempts.length,
+        noMutation: true,
+      })
+    }
+
+    // 判断 matchedBy：首次命中的轮次策略标签决定来源
+    const firstHitAttempt = searchRetryPlan.searchAttempts.find((attempt) => attempt.candidateCount > 0)
+    const matchedBy: CandidatePoolResolution['matchedBy'] = retryCandidates.length === 0
+      ? 'none'
+      : (firstHitAttempt?.strategyLabel === 'original' || firstHitAttempt?.strategyLabel === 'primary'
+        ? 'primary'
+        : 'llm_alternatives')
 
     return {
-      candidates: resolved,
-      attempts,
-      matchedBy: resolved.length > 0 ? 'llm_alternatives' : 'none',
+      candidates: retryCandidates,
+      attempts: searchRetryPlan.searchAttempts,
+      matchedBy,
+      searchRetryPlan,
+    }
+  }
+
+  /**
+   * 用调度上下文信息补充 searchRetryPlan 的候选源状态字段（searchedKeyword / searchedFacets / candidateSourceStatus / candidateRecordCount）。
+   *
+   * executeRetryLoop 返回的 searchRetryPlan 这几个字段为空（它不持有 context），由本方法从 context.bundle.sources.candidates 填充。
+   *
+   * @param plan executeRetryLoop 返回的重试计划
+   * @param context 调度上下文（含候选源状态）
+   * @param keyword 首轮原词（用于回退构造 searchedFacets）
+   * @returns 补充候选源状态后的重试计划
+   */
+  private enrichSearchRetryPlan(
+    plan: CandidateSearchRetryPlan,
+    context: SchedulingContext,
+    keyword: string,
+  ): CandidateSearchRetryPlan {
+    const query = context.bundle.sources.candidates.query
+    const searchedFacets = query?.facets?.length
+      ? query.facets
+      : this.buildInsertSearchFacets(keyword)
+    return {
+      ...plan,
+      searchedKeyword: query?.keyword ?? keyword,
+      searchedFacets,
+      candidateSourceStatus: context.bundle.sources.candidates.status ?? '',
+      candidateRecordCount: context.bundle.sources.candidates.recordCount,
     }
   }
 
@@ -4188,20 +4335,7 @@ export class AtomicCommandCapability implements AgentCapability {
     primaryHint: string,
     input: AgentSubmitInput,
   ): Array<{ keyword: string; source: 'llm_alternative' }> {
-    const normalizedPrimary = this.normalizeSearchText(primaryHint)
-    const keywords = [
-      ...(input.interpretation?.searchAlternatives ?? []).map((keyword) => ({ keyword, source: 'llm_alternative' as const })),
-    ]
-    const seen = new Set<string>([normalizedPrimary])
-    const result: Array<{ keyword: string; source: 'llm_alternative' }> = []
-    keywords.forEach((item) => {
-      const keyword = item.keyword.trim()
-      const normalized = this.normalizeSearchText(keyword)
-      if (!keyword || normalized.length < 2 || seen.has(normalized)) return
-      seen.add(normalized)
-      result.push({ keyword, source: item.source })
-    })
-    return result.slice(0, 8)
+    return buildCandidateRetryKeywordsPure(primaryHint, input.interpretation ?? undefined, (value) => this.normalizeSearchText(value))
   }
 
   private buildCandidateSearchAttempt(
@@ -4209,12 +4343,7 @@ export class AtomicCommandCapability implements AgentCapability {
     source: CandidateSearchAttempt['source'],
     candidates: AgentProgramCandidate[],
   ): CandidateSearchAttempt {
-    return {
-      keyword,
-      source,
-      candidateCount: candidates.length,
-      candidateIds: candidates.slice(0, 8).map((candidate) => candidate.id),
-    }
+    return buildCandidateSearchAttemptPure(keyword, source, candidates)
   }
 
   private buildInsertSearchFacets(programHint: string): string[] {
@@ -4228,26 +4357,15 @@ export class AtomicCommandCapability implements AgentCapability {
     context: SchedulingContext,
     keyword: string,
     attempts: CandidateSearchAttempt[] = [],
-  ): Record<string, unknown> {
-    const query = context.bundle.sources.candidates.query
-    const searchedFacets = query?.facets?.length
-      ? query.facets
-      : this.buildInsertSearchFacets(keyword)
-    const llmAlternatives = input.interpretation?.searchAlternatives ?? []
-    const suggestedKeywords = Array.from(new Set([
-      ...llmAlternatives,
-      ...searchedFacets,
-    ].map((item) => item.trim()).filter((item) => item.length >= 2))).slice(0, 5)
-
-    return {
-      searchedKeyword: query?.keyword ?? keyword,
-      searchedFacets,
-      candidateSourceStatus: context.bundle.sources.candidates.status,
-      candidateRecordCount: context.bundle.sources.candidates.recordCount,
-      searchAttempts: attempts,
-      suggestedKeywords,
-      nextAction: 'rewrite_keywords_and_retry',
-    }
+  ): CandidateSearchRetryPlan {
+    return buildCandidateSearchRetryPlanPure(
+      input,
+      context,
+      keyword,
+      attempts,
+      (value) => this.normalizeSearchText(value),
+      (hint) => this.buildInsertSearchFacets(hint),
+    )
   }
 
   private buildValidationSourceEvidenceIssues(context: SchedulingContext): AgentConstraintIssue[] {
@@ -4595,6 +4713,8 @@ export class AtomicCommandCapability implements AgentCapability {
       targetTime,
       noMutation: true,
     })
+    // D1 接入：透传 runtime.deadline 给 candidateJudge，让 LLM 调用使用 stageTimeoutMs 推导的 timeout。
+    // 未传时 candidateJudge 沿用默认 timeout（向后兼容）。
     const decision = await runtime.candidateJudge.selectBestCandidate({
       userInput: input.userInput,
       playlistType: context.playlistType,
@@ -4603,7 +4723,7 @@ export class AtomicCommandCapability implements AgentCapability {
       context,
       professionalAssessments: judgePool.assessments,
       tvSequenceEvidence,
-    })
+    }, runtime.deadline)
     // LLM 决策结果记录 + 分流（auto_select / needs_clarification / unable_to_decide）
     const selectedName = decision.candidate?.programName
       ?? decision.candidate?.instanceName
@@ -5119,7 +5239,7 @@ export class AtomicCommandCapability implements AgentCapability {
       severity: 'critical',
       message: blockingSignal?.reason ?? '候选节目未通过专业编排约束，不能写入播单。',
       detail: {
-        ...(blockingSignal.detail ?? {}),
+        ...blockingSignal.detail,
         selectedCandidateId: diagnostics.selectedCandidateId,
         selectedProgramCode: diagnostics.selectedProgramCode,
         hardBlockCodes: assessment.hardBlockCodes,

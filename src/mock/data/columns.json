@@ -91,7 +91,7 @@
     "columnName": "东方看大剧",
     "channelId": "dragon",
     "draftConstraintKind": "column",
-    "defaultProgramType": "drama",
+    "defaultProgramType": "entertainment",
     "isSequential": true
   },
   {
@@ -137,5 +137,12 @@
     "channelId": "dragon",
     "draftConstraintKind": "column",
     "defaultProgramType": "documentary"
+  },
+  {
+    "columnId": "126",
+    "columnName": "百姓大讲堂",
+    "channelId": "dragon",
+    "draftConstraintKind": "column",
+    "defaultProgramType": "commentary"
   }
 ]

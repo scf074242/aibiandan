@@ -9,6 +9,7 @@ import {
 } from './reactTaskTypes'
 
 export interface StartReactTaskRunInput<ActionDraft = AgentPlannerAction> {
+  workspaceKey: string
   originalUserInput: string
   plannerTask: ReactTaskPlannerDraft<ActionDraft>
   now?: string
@@ -16,6 +17,13 @@ export interface StartReactTaskRunInput<ActionDraft = AgentPlannerAction> {
 
 export interface ReactTaskObservationInput<ActionDraft = AgentPlannerAction> {
   run: ReactTaskRun<ActionDraft>
+  type?: ReactTaskObservationType
+  summary: string
+  data?: Record<string, unknown>
+  risk?: string
+}
+
+export interface ReactTaskObservationDraft {
   type?: ReactTaskObservationType
   summary: string
   data?: Record<string, unknown>
@@ -53,6 +61,7 @@ export class SchedulingReactTaskRuntime<ActionDraft = AgentPlannerAction> {
 
     return {
       id: createId('react_task'),
+      workspaceKey: input.workspaceKey,
       objective: input.plannerTask.objective,
       originalUserInput: input.originalUserInput,
       status: steps.length ? 'acting' : 'waiting_user',
@@ -84,25 +93,44 @@ export class SchedulingReactTaskRuntime<ActionDraft = AgentPlannerAction> {
   }
 
   recordObservation(input: ReactTaskObservationInput<ActionDraft>): ReactTaskRun<ActionDraft> {
+    return this.recordObservationBatch({
+      run: input.run,
+      observations: [{
+        type: input.type,
+        summary: input.summary,
+        data: input.data,
+        risk: input.risk,
+      }],
+    })
+  }
+
+  recordObservationBatch(input: {
+    run: ReactTaskRun<ActionDraft>
+    observations: ReactTaskObservationDraft[]
+  }): ReactTaskRun<ActionDraft> {
     const now = new Date().toISOString()
     const turn = input.run.loopCount + 1
-    const observedStepIndex = input.run.steps.findIndex((step) => step.status === 'pending' || step.status === 'running')
+    let remainingObservedSteps = input.observations.length
     return {
       ...input.run,
       status: 'observing',
       loopCount: turn,
-      steps: input.run.steps.map((step, index) => index === observedStepIndex ? { ...step, status: 'observed' } : step),
+      steps: input.run.steps.map((step) => {
+        if (remainingObservedSteps <= 0 || (step.status !== 'pending' && step.status !== 'running')) return step
+        remainingObservedSteps--
+        return { ...step, status: 'observed' }
+      }),
       observations: [
         ...input.run.observations,
-        {
+        ...input.observations.map((observation) => ({
           id: createId('react_observation'),
           turn,
-          type: input.type ?? 'asset_search',
-          summary: input.summary,
-          data: input.data,
-          risk: input.risk,
+          type: observation.type ?? 'asset_search',
+          summary: observation.summary,
+          data: observation.data,
+          risk: observation.risk,
           createdAt: now,
-        },
+        })),
       ],
       updatedAt: now,
     }
@@ -140,10 +168,70 @@ export class SchedulingReactTaskRuntime<ActionDraft = AgentPlannerAction> {
     }
   }
 
+  /**
+   * 前台短请求在 observation 后收到新的 LLM decide 时，替换尚未执行的
+   * 旧步骤。旧步骤保留为 blocked 以便审计，不能让它们抢在新决定前执行。
+   * 正式长流程仍使用 continueWithActions，保留其批次追加语义。
+   */
+  replacePendingActions(input: ContinueReactTaskInput<ActionDraft>): ReactTaskRun<ActionDraft> {
+    const now = input.now ?? new Date().toISOString()
+    if (input.run.loopCount >= input.run.limits.maxTurns) {
+      return this.markFailed(input.run, `已达到最多 ${input.run.limits.maxTurns} 轮处理上限。`, now)
+    }
+    const nextTurn = input.run.loopCount + 1
+    const nextActions = input.nextActions.slice(0, input.run.limits.batchSize)
+    const supersededSteps = input.run.steps.map((step) => (
+      step.status === 'pending' || step.status === 'running'
+        ? { ...step, status: 'blocked' as const, reason: '已被 observation 后的新 LLM 决策替换' }
+        : step
+    ))
+    if (!nextActions.length) {
+      return {
+        ...input.run,
+        status: 'waiting_user',
+        steps: supersededSteps,
+        updatedAt: now,
+      }
+    }
+    const steps: ReactTaskStep<ActionDraft>[] = nextActions.map((action, index) => ({
+      id: createId(`react_step_${nextTurn}_${index + 1}`),
+      turn: nextTurn,
+      status: 'pending',
+      action,
+      reason: input.reason,
+    }))
+    return {
+      ...input.run,
+      status: 'acting',
+      steps: [...supersededSteps, ...steps],
+      updatedAt: now,
+    }
+  }
+
   markCompleted(run: ReactTaskRun<ActionDraft>, now: string = new Date().toISOString()): ReactTaskRun<ActionDraft> {
     return {
       ...run,
       status: 'completed',
+      recovery: {
+        ...(run.recovery ?? { canRetry: false, retryCount: 0 }),
+        canRetry: false,
+      },
+      updatedAt: now,
+    }
+  }
+
+  markWaitingConfirm(run: ReactTaskRun<ActionDraft>, now: string = new Date().toISOString()): ReactTaskRun<ActionDraft> {
+    return {
+      ...run,
+      status: 'waiting_confirm',
+      updatedAt: now,
+    }
+  }
+
+  markCancelled(run: ReactTaskRun<ActionDraft>, now: string = new Date().toISOString()): ReactTaskRun<ActionDraft> {
+    return {
+      ...run,
+      status: 'cancelled',
       recovery: {
         ...(run.recovery ?? { canRetry: false, retryCount: 0 }),
         canRetry: false,

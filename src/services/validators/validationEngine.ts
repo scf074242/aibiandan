@@ -574,7 +574,7 @@ export class ValidationEngine {
       .replace(/^[^：:]+[：:]/u, '')
       .replace(/第\s*[0-9零〇一二两三四五六七八九十百]+\s*[集期]/gu, '')
       .replace(/[上中下][集期]/gu, '')
-      .replace(/[《》“”"'（）()【】\[\]·•.。；;，,、_\-—]/g, '')
+      .replace(/[《》“”"'（）()【】[\]·•.。；;，,、_\-—]/g, '')
   }
 
   private extractSequenceNo(item: ScheduleItemSnapshot): number | null {

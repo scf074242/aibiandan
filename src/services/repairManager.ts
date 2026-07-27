@@ -25,6 +25,12 @@ import type { ValidationEngine } from './validators/validationEngine'
 import type { LLMClient } from './llm/llmClient'
 import type { ChatMessage } from '@/types/llm'
 
+/**
+ * repairManager prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本
+ */
+export const REPAIR_MANAGER_PROMPT_VERSION = 'v1.0' as const
+
 /** 修补管理器 */
 export class RepairManager {
   private config: RepairConfig
@@ -178,6 +184,8 @@ export class RepairManager {
       const response = await this.llmClient.chat(messages, {
         temperature: 0.4,
         maxTokens: 800,
+        traceLabel: 'repair_strategy',
+        promptVersion: REPAIR_MANAGER_PROMPT_VERSION,
       })
 
       return this.parseRepairCommand(response.content)
@@ -197,7 +205,7 @@ export class RepairManager {
       candidates: ProgramCandidate[]
     },
   ): ChatMessage[] {
-    const systemPrompt = `你是一位电视节目编排修复专家。
+    const systemPrompt = `[prompt ${REPAIR_MANAGER_PROMPT_VERSION}] 你是一位电视节目编排修复专家。
 当校验发现问题时，请选择合适的修复策略。
 
 可选修复策略：

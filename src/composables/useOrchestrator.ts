@@ -8,9 +8,15 @@ import type {
   ScheduleItemSnapshot,
   TaskClassification,
 } from '@/types/orchestration'
-import { getLLMClient } from '@/services/llm/llmClient'
 import { getTaskClassifier } from '@/services/llm/taskClassifier'
-import { getOrchestrator, Orchestrator } from '@/services/orchestrator'
+import {
+  getSchedulingAgentRuntimeFacade,
+  SchedulingAgentRuntimeFacade,
+} from '@/services/runtime/schedulingAgentRuntimeFacade'
+import type { RuntimeOrchestrationRequest, RuntimeReactOrchestrationOutcome, RuntimeSubmitInput } from '@/services/runtime/schedulingAgentRuntimeFacade'
+import { getAgentRuntimeClient } from '@/services/runtime/agentRuntimeClient'
+import type { AgentServerReactRecoveryInput, AgentServerReactRecoveryResult } from '@/services/runtime/agentServerRuntime'
+import { buildScheduleWorkspaceSummary, resolveForegroundWorkspaceKey } from '@/services/runtime/foregroundWorkspaceState'
 
 export interface UseOrchestratorOptions {
   onProgress?: (progress: OrchestrationProgress) => void
@@ -23,15 +29,6 @@ export interface UseOrchestratorOptions {
   onStatusChange?: (status: PlanningSessionStatus, previousStatus: PlanningSessionStatus) => void
 }
 
-export interface PartialGenerationTarget {
-  targetGapIds?: string[]
-  targetTimeRange?: {
-    start: string
-    end: string
-  }
-  searchKeywords?: string[]
-}
-
 export function useOrchestrator(options: UseOrchestratorOptions = {}) {
   const isRunning = ref(false)
   const session = shallowRef<PlanningSession | null>(null)
@@ -39,67 +36,71 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
   const logs = ref<PlanningLogEntry[]>([])
   const MAX_LOG_ENTRIES = 200
 
-  let orchestrator: Orchestrator | null = null
+  let facade: SchedulingAgentRuntimeFacade | null = null
+  let activeReactWorkspaceKey: string | null = null
 
   const initialize = () => {
-    if (orchestrator) {
-      orchestrator.removeAllListeners()
+    if (facade) {
+      facade.orchestrationEventEmitter.removeAllListeners()
     }
-    const llmClient = getLLMClient()
-    const taskClassifier = getTaskClassifier(llmClient)
-    orchestrator = getOrchestrator(llmClient, taskClassifier)
+    facade = getSchedulingAgentRuntimeFacade()
 
-    orchestrator.on('status-change', ({ status, previousStatus }) => {
-      session.value = orchestrator!.getSession()
+    facade.orchestrationEventEmitter.on('status-change', ({ status, previousStatus }) => {
+      session.value = facade?.getOrchestrationSession() ?? null
       if (['completed', 'manual_review', 'failed', 'cancelled'].includes(status)) {
         isRunning.value = false
         currentGap.value = null
       }
       options.onStatusChange?.(status, previousStatus)
-      options.onProgress?.(orchestrator!.getProgress()!)
+      const progress = facade?.getOrchestrationProgress()
+      if (progress) options.onProgress?.(progress)
     })
 
-    orchestrator.on('gap-start', ({ gap }) => {
+    facade.orchestrationEventEmitter.on('gap-start', ({ gap }) => {
       currentGap.value = gap
       options.onGapStart?.(gap)
-      if (orchestrator?.getProgress()) options.onProgress?.(orchestrator.getProgress()!)
+      const progress = facade?.getOrchestrationProgress()
+      if (progress) options.onProgress?.(progress)
     })
 
-    orchestrator.on('gap-complete', ({ gap, item }) => {
+    facade.orchestrationEventEmitter.on('gap-complete', ({ gap, item }) => {
       currentGap.value = null
       options.onGapComplete?.(gap, item)
-      if (orchestrator?.getProgress()) options.onProgress?.(orchestrator.getProgress()!)
+      const progress = facade?.getOrchestrationProgress()
+      if (progress) options.onProgress?.(progress)
     })
 
-    orchestrator.on('gap-failed', ({ gap, error }) => {
+    facade.orchestrationEventEmitter.on('gap-failed', ({ gap, error }) => {
       currentGap.value = null
       options.onGapFailed?.(gap, error)
-      if (orchestrator?.getProgress()) options.onProgress?.(orchestrator.getProgress()!)
+      const progress = facade?.getOrchestrationProgress()
+      if (progress) options.onProgress?.(progress)
     })
 
-    orchestrator.on('log', ({ entry }) => {
-      session.value = orchestrator!.getSession()
+    facade.orchestrationEventEmitter.on('log', ({ entry }) => {
+      session.value = facade?.getOrchestrationSession() ?? null
       logs.value.push(entry)
       if (logs.value.length > MAX_LOG_ENTRIES) {
         logs.value.splice(0, logs.value.length - MAX_LOG_ENTRIES)
       }
       options.onLog?.(entry)
-      if (orchestrator?.getProgress()) options.onProgress?.(orchestrator.getProgress()!)
+      const progress = facade?.getOrchestrationProgress()
+      if (progress) options.onProgress?.(progress)
     })
 
-    orchestrator.on('complete', ({ session: value }) => {
+    facade.orchestrationEventEmitter.on('complete', ({ session: value }) => {
       session.value = value
       isRunning.value = false
       options.onComplete?.(value)
     })
 
-    orchestrator.on('error', ({ error }) => {
+    facade.orchestrationEventEmitter.on('error', ({ error }) => {
       isRunning.value = false
       options.onError?.(error)
     })
   }
 
-  const progress = computed<OrchestrationProgress | null>(() => orchestrator?.getProgress() ?? null)
+  const progress = computed<OrchestrationProgress | null>(() => facade?.getOrchestrationProgress() ?? null)
   const status = computed<PlanningSessionStatus>(() => session.value?.status ?? 'initializing')
   const canCancel = computed(() => isRunning.value)
   const recentLogs = computed(() => logs.value.slice(-20))
@@ -126,38 +127,60 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
     },
     userInput: string,
   ): Promise<TaskClassification> => {
-    if (!orchestrator) initialize()
+    if (!facade) initialize()
     return getTaskClassifier().classify({ scheduleState, userInput })
   }
 
-  const startFullGeneration = async (
-    channelId: string,
-    date: string,
-    dayStartTime: string,
-    dayEndTime: string,
-  ) => {
-    if (!orchestrator) initialize()
+  const startReactOrchestration = async (
+    request: RuntimeOrchestrationRequest,
+    runtimeInput: RuntimeSubmitInput,
+  ): Promise<RuntimeReactOrchestrationOutcome> => {
+    if (!facade) initialize()
     isRunning.value = true
     currentGap.value = null
     logs.value = []
-    await orchestrator!.startFullGeneration(channelId, date, dayStartTime, dayEndTime)
-    session.value = orchestrator!.getSession()
+    activeReactWorkspaceKey = resolveForegroundWorkspaceKey(buildScheduleWorkspaceSummary(runtimeInput.scheduleState))
+    try {
+      const outcome = await getAgentRuntimeClient().startReactOrchestration(request, runtimeInput)
+      isRunning.value = false
+      return outcome
+    } catch (error) {
+      isRunning.value = false
+      throw error
+    } finally {
+      activeReactWorkspaceKey = null
+    }
   }
 
-  const startPartialGeneration = async (channelId: string, date: string, target?: string[] | PartialGenerationTarget) => {
-    if (!orchestrator) initialize()
-    isRunning.value = true
-    currentGap.value = null
-    logs.value = []
-    await orchestrator!.startPartialGeneration(channelId, date, target)
-    session.value = orchestrator!.getSession()
+  const recoverReactOrchestration = async (
+    input: AgentServerReactRecoveryInput,
+  ): Promise<AgentServerReactRecoveryResult> => {
+    const client = getAgentRuntimeClient()
+    if (!client.recoverReactOrchestration) {
+      throw new Error('当前 Agent runtime 不支持 ReAct checkpoint 恢复。')
+    }
+    isRunning.value = input.action === 'confirm_pending'
+    activeReactWorkspaceKey = input.workspaceKey
+    try {
+      return await client.recoverReactOrchestration(input)
+    } finally {
+      isRunning.value = false
+      activeReactWorkspaceKey = null
+    }
   }
 
-  const cancel = () => orchestrator?.cancel()
+  const cancel = () => {
+    if (activeReactWorkspaceKey) {
+      void getAgentRuntimeClient().cancelActiveInstruction?.(activeReactWorkspaceKey)
+      return
+    }
+    facade?.cancelOrchestration()
+  }
 
   const reset = () => {
-    orchestrator?.removeAllListeners()
-    orchestrator = null
+    facade?.orchestrationEventEmitter.removeAllListeners()
+    facade?.cancelOrchestration()
+    facade = null
     isRunning.value = false
     session.value = null
     currentGap.value = null
@@ -181,8 +204,8 @@ export function useOrchestrator(options: UseOrchestratorOptions = {}) {
     gapStats,
     initialize,
     classifyTask,
-    startFullGeneration,
-    startPartialGeneration,
+    startReactOrchestration,
+    recoverReactOrchestration,
     cancel,
     reset,
   }

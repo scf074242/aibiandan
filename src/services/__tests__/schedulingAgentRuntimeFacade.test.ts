@@ -10,6 +10,111 @@ import { getSchedulingReactTaskRuntime } from '@/services/runtime/reactTaskRunti
 import type { ReactTaskRun } from '@/services/runtime/reactTaskTypes'
 
 describe('SchedulingAgentRuntimeFacade formal agent boundary', () => {
+  it('scheduling-runtime-react-failure-returns-outcome: exposes a failed ReAct result without throwing', async () => {
+    const testCase = {
+      id: 'scheduling-runtime-react-failure-returns-outcome',
+      userInput: '按当前草案重新编排正式播单',
+      expectedDecision: 'facade 返回 status=failed、失败原因和已保存 checkpoint 数量',
+      mustNotHappen: '抛出 HTTP 500、映射为 completed、自动回滚或回退旧 Orchestrator',
+      verification: '以缺少显式查询条件的只读动作触发可恢复失败，并检查 structured outcome',
+    }
+    const facade = new SchedulingAgentRuntimeFacade()
+
+    const outcome = await facade.startReactOrchestration(
+      {
+        userInput: testCase.userInput,
+        mode: 'full_generate',
+        reasoning: '用户已确认正式重编',
+        reactTask: {
+          objective: '按当前草案重新编排正式播单',
+          maxTurns: 2,
+          batchSize: 1,
+          nextActions: [{ type: 'research_check', purpose: 'candidate_precheck', queries: [] }],
+        },
+      },
+      {
+        userInput: testCase.userInput,
+        scheduleState: {
+          playlistId: 'playlist-react-failure',
+          playlistType: 'tv',
+          channelId: 'dragon',
+          channelName: '东方卫视',
+          date: '2026-07-20',
+          isEmpty: false,
+          itemCount: 1,
+          gapCount: 1,
+          hasSelectedTimeRange: false,
+        },
+        currentSchedule: [],
+      },
+    )
+
+    expect(testCase).toMatchObject({
+      id: expect.any(String),
+      userInput: expect.any(String),
+      expectedDecision: expect.any(String),
+      mustNotHappen: expect.any(String),
+      verification: expect.any(String),
+    })
+    expect(outcome).toMatchObject({
+      status: 'failed',
+      failure: {
+        message: expect.stringContaining('research_check requires explicit LLM-provided queries or labels'),
+        checkpointCount: 1,
+      },
+    })
+  })
+
+  /**
+   * case scheduling-runtime-react-pending-returns-waiting-user
+   * - userInput: 删除 item-1，先等我确认
+   * - expectedDecision: facade 返回 waiting_user，并保留 checkpoint，不把待确认动作报成完成
+   * - mustNotHappen: 返回 completed；执行删除；调用 LLM 替用户确认
+   * - verification: outcome.status=waiting_user、checkpointCount=1、当前播单项目未变化
+   */
+  it('scheduling-runtime-react-pending-returns-waiting-user: keeps approval pending visible', async () => {
+    const facade = new SchedulingAgentRuntimeFacade()
+    const currentSchedule = [{
+      id: 'item-1', programId: 'p0', programCode: 'NEWS000', programName: '早间新闻',
+      startTime: '2026-07-20T09:00:00', endTime: '2026-07-20T09:30:00', durationSeconds: 1800,
+      programType: 'news', sequence: 1,
+    }]
+
+    const outcome = await facade.startReactOrchestration(
+      {
+        userInput: '删除 item-1，先等我确认',
+        mode: 'partial_generate',
+        reasoning: '用户要求先确认敏感删除',
+        reactTask: {
+          objective: '删除 item-1 前等待用户确认',
+          maxTurns: 2,
+          batchSize: 2,
+          nextActions: [
+            { type: 'atomic_command', intent: 'delete', targetItemId: 'item-1', mutationPolicy: 'pending_only' },
+            { type: 'validate' },
+          ],
+        },
+      },
+      {
+        userInput: '删除 item-1，先等我确认',
+        scheduleState: {
+          playlistId: 'playlist-react-pending', playlistType: 'tv', channelId: 'dragon', channelName: '东方卫视',
+          date: '2026-07-20', isEmpty: false, itemCount: 1, gapCount: 0, hasSelectedTimeRange: false,
+        },
+        currentSchedule,
+      },
+    )
+
+    expect(outcome).toMatchObject({ status: 'waiting_user' })
+    expect(facade.getReactCheckpoints().map((checkpoint) => ({
+      id: checkpoint.id,
+      turn: checkpoint.turn,
+      decision: checkpoint.decision.kind,
+    }))).toEqual([expect.objectContaining({ turn: 1, decision: 'waiting_user' })])
+    expect(outcome.checkpointCount).toBe(facade.getReactCheckpoints().length)
+    expect(currentSchedule).toHaveLength(1)
+  })
+
   it('keeps the real ChatPanel path on the runtime client boundary and records the server migration boundary', () => {
     const chatPanelSource = readFileSync(resolve(process.cwd(), 'src/components/dialogue/ChatPanel.vue'), 'utf8')
     const runtimeClientSource = readFileSync(resolve(process.cwd(), 'src/services/runtime/agentRuntimeClient.ts'), 'utf8')
@@ -367,5 +472,27 @@ describe('SchedulingAgentRuntimeFacade formal agent boundary', () => {
         lastFailure: '已达到最多 2 轮处理上限。',
       },
     })
+  })
+})
+
+
+describe('SchedulingAgentRuntimeFacade orchestration entry convergence (D23)', () => {
+  it('exposes orchestration-specific methods on top of DemoRuntimeFacade', () => {
+    const facade = getSchedulingAgentRuntimeFacade()
+
+    expect(typeof facade.startReactOrchestration).toBe('function')
+    expect('startFullGeneration' in facade).toBe(false)
+    expect('startPartialGeneration' in facade).toBe(false)
+    expect(typeof facade.cancelOrchestration).toBe('function')
+    expect(typeof facade.getOrchestrationSession).toBe('function')
+    expect(typeof facade.getOrchestrationProgress).toBe('function')
+    expect(facade.orchestrationEventEmitter).toBeDefined()
+  })
+
+  it('returns null session/progress when no orchestration is active', () => {
+    const facade = getSchedulingAgentRuntimeFacade()
+
+    expect(facade.getOrchestrationSession()).toBeNull()
+    expect(facade.getOrchestrationProgress()).toBeNull()
   })
 })

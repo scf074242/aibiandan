@@ -122,7 +122,9 @@ describe('DemoRuntimeFacade atomic fallback', () => {
     })
 
     expect(result.kind).toBe('message')
-    expect(result.feedback.content).toContain('请补充明确')
+    // A9 修复后：buildClarifyFeedback 不再本地猜测"更像是在调整具体节目"，
+    // 改为中性暴露失败"我还没稳定理解"，引导用户重试或补充
+    expect(result.feedback.content).toContain('我还没稳定理解')
   })
 
   // 这些旧 case 验证的是本地原子兜底和 pendingAtomicContext 续接链路。

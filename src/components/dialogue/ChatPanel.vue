@@ -255,122 +255,43 @@
       </div>
     </div>
 
-    <div v-if="showTargetSelectionAtomicPanel && pendingAtomicContext" class="pending-command-panel">
-      <div class="pending-command-header">
-        <div>
-          <div class="pending-command-title">{{ getAtomicPhaseLabel(pendingAtomicPhase ?? 'selecting_target') }}</div>
-          <div class="pending-command-summary">{{ formatPendingAtomicSummary(pendingAtomicContext) }}</div>
-        </div>
-        <el-tag type="info" effect="light">需选择</el-tag>
-      </div>
+    <CandidateRecommendationPanel
+      v-if="showTargetSelectionAtomicPanel && pendingAtomicContext"
+      mode="target_selection"
+      :candidates="pendingAtomicTargetCandidates"
+      :selected-id="pendingAtomicTargetSelectedItemId"
+      :loading="loading"
+      :title="getAtomicPhaseLabel(pendingAtomicPhase ?? 'selecting_target')"
+      :summary="formatPendingAtomicSummary(pendingAtomicContext)"
+      :reasoning="formatPendingAtomicReasoning(pendingAtomicContext)"
+      :detail-items="getPendingAtomicContextDetailItems()"
+      list-aria-label="目标节目列表"
+      confirm-label="确认目标"
+      :format-time-range="formatDisplayTimeRange"
+      @update:selected-id="pendingAtomicTargetSelectedItemId = $event"
+      @confirm="confirmPendingTargetSelection"
+      @cancel="cancelPendingTargetSelection"
+    />
 
-      <div class="pending-command-body">
-        <div class="pending-command-reasoning">{{ formatPendingAtomicReasoning(pendingAtomicContext) }}</div>
-        <div v-if="getPendingAtomicContextDetailItems().length > 0" class="details-summary-list is-panel pending-agent-context-list">
-          <div
-            v-for="item in getPendingAtomicContextDetailItems()"
-            :key="`${item.label}-${item.value}`"
-            class="detail-summary-item"
-          >
-            <span class="detail-summary-label">{{ item.label }}</span>
-            <span class="detail-summary-value">{{ item.value }}</span>
-          </div>
-        </div>
-        <el-radio-group v-model="pendingAtomicTargetSelectedItemId" class="target-selection-list">
-          <el-radio
-            v-for="candidate in pendingAtomicTargetCandidates"
-            :key="candidate.id"
-            :value="candidate.id"
-            class="target-selection-option"
-          >
-            {{ formatDisplayTimeRange(candidate.startTime, candidate.endTime) }} {{ candidate.programName || candidate.programCode || candidate.id }}
-          </el-radio>
-        </el-radio-group>
-      </div>
-
-      <div class="pending-command-actions">
-        <el-button type="primary" size="small" :disabled="loading || !pendingAtomicTargetSelectedItemId" @click="confirmPendingTargetSelection">
-          确认目标
-        </el-button>
-        <el-button size="small" :disabled="loading" @click="cancelPendingTargetSelection">取消</el-button>
-      </div>
-    </div>
-
-    <div v-if="showInsertRecommendationAtomicPanel && pendingAtomicContext" class="pending-command-panel insert-recommendation-panel">
-      <div class="pending-command-header">
-        <div>
-          <div class="pending-command-title">{{ getAtomicRecommendationTitle() }}</div>
-          <div class="pending-command-summary">{{ formatPendingAtomicSummary(pendingAtomicContext) }}</div>
-        </div>
-        <el-tag type="info" effect="light">需选择</el-tag>
-      </div>
-
-      <div class="pending-command-body">
-        <div class="pending-command-reasoning">{{ formatPendingAtomicReasoning(pendingAtomicContext) }}</div>
-        <div v-if="getPendingAtomicContextDetailItems().length > 0" class="details-summary-list is-panel pending-agent-context-list">
-          <div
-            v-for="item in getPendingAtomicContextDetailItems()"
-            :key="`${item.label}-${item.value}`"
-            class="detail-summary-item"
-          >
-            <span class="detail-summary-label">{{ item.label }}</span>
-            <span class="detail-summary-value">{{ item.value }}</span>
-          </div>
-        </div>
-        <div class="target-selection-list insert-recommendation-list" role="radiogroup" :aria-label="getAtomicRecommendationAriaLabel()">
-          <button
-            v-for="(candidate, index) in pendingAtomicInsertRecommendations"
-            :key="candidate.candidateId"
-            type="button"
-            class="insert-recommendation-option"
-            :class="{ 'is-selected': pendingAtomicInsertSelectedCandidateId === candidate.candidateId }"
-            role="radio"
-            :aria-checked="pendingAtomicInsertSelectedCandidateId === candidate.candidateId"
-            @click="pendingAtomicInsertSelectedCandidateId = candidate.candidateId"
-          >
-            <span class="insert-recommendation-selector" aria-hidden="true">
-              <span class="insert-recommendation-selector-dot" />
-            </span>
-            <span class="insert-recommendation-card">
-              <span class="insert-recommendation-head">
-                <span class="insert-recommendation-name-line">
-                  <span class="insert-recommendation-name">{{ candidate.programName }}</span>
-                  <span class="insert-recommendation-chip">
-                    {{ getInsertRecommendationBadgeLabel(index) }}
-                  </span>
-                </span>
-                <span class="insert-recommendation-confidence">
-                  {{ formatRecommendationStrengthLabel(index) }}
-                </span>
-              </span>
-              <span class="insert-recommendation-meta">
-                {{ formatInsertRecommendationMeta(candidate.duration, candidate.programType, candidate.confidence) }}
-              </span>
-              <span v-if="candidate.reasonTags.length" class="reason-tag-row insert-recommendation-tags">
-                <span v-for="tag in candidate.reasonTags" :key="`${candidate.candidateId}-${tag}`" class="reason-tag">
-                  {{ tag }}
-                </span>
-              </span>
-            </span>
-          </button>
-          <div class="insert-recommendation-footer-note">
-            我按节目线索和当前播单排好了候选。你选一个后我再写入；不选就不会改动播单。
-          </div>
-        </div>
-      </div>
-
-      <div class="pending-command-actions insert-recommendation-actions">
-        <div class="insert-recommendation-action-hint">
-          {{ getAtomicRecommendationActionHint() }}
-        </div>
-        <div class="insert-recommendation-action-buttons">
-          <el-button type="primary" size="small" :disabled="loading || !pendingAtomicInsertSelectedCandidateId" @click="confirmPendingInsertRecommendation">
-            {{ getAtomicRecommendationConfirmLabel() }}
-          </el-button>
-          <el-button size="small" :disabled="loading" @click="cancelPendingInsertRecommendation">取消</el-button>
-        </div>
-      </div>
-    </div>
+    <CandidateRecommendationPanel
+      v-if="showInsertRecommendationAtomicPanel && pendingAtomicContext"
+      mode="insert_recommendation"
+      :candidates="pendingAtomicInsertRecommendationItems"
+      :selected-id="pendingAtomicInsertSelectedCandidateId"
+      :loading="loading"
+      :title="getAtomicRecommendationTitle()"
+      :summary="formatPendingAtomicSummary(pendingAtomicContext)"
+      :reasoning="formatPendingAtomicReasoning(pendingAtomicContext)"
+      :detail-items="getPendingAtomicContextDetailItems()"
+      :list-aria-label="getAtomicRecommendationAriaLabel()"
+      :action-hint="getAtomicRecommendationActionHint()"
+      :confirm-label="getAtomicRecommendationConfirmLabel()"
+      footer-note="我按节目线索和当前播单排好了候选。你选一个后我再写入；不选就不会改动播单。"
+      :format-meta="formatInsertRecommendationMetaForPanel"
+      @update:selected-id="pendingAtomicInsertSelectedCandidateId = $event"
+      @confirm="confirmPendingInsertRecommendation"
+      @cancel="cancelPendingInsertRecommendation"
+    />
 
     <div v-if="showAgentPendingConfirmationPanel && pendingAtomicContext" class="pending-command-panel agent-confirmation-panel">
       <div class="pending-command-header">
@@ -407,6 +328,13 @@
       </el-button>
     </div>
 
+    <!-- 方向 1 失败可恢复性闭环：结构化失败信封渲染 -->
+    <FailureFormatter
+      v-if="recoverableFailureEnvelope"
+      :envelope="recoverableFailureEnvelope"
+      @quick-reply="handleFailureQuickReply"
+    />
+
     <div class="input-area">
       <input
         ref="layoutFileInput"
@@ -438,12 +366,12 @@
           <button
             type="button"
             class="send-action-button"
-            :class="{ 'is-stop': isForegroundOrchestrationRunning }"
-            :disabled="isForegroundOrchestrationRunning ? !props.canInterrupt : !inputMessage.trim() || loading"
-            :title="isForegroundOrchestrationRunning ? '中止编排' : '发送'"
+            :class="{ 'is-stop': isPrimaryStopAction }"
+            :disabled="isPrimaryStopAction ? !isPrimaryStopEnabled : !inputMessage.trim() || loading"
+            :title="isPrimaryStopAction ? '停止当前请求' : '发送'"
             @click="handlePrimaryAction"
           >
-            <span v-if="isForegroundOrchestrationRunning" class="stop-square" />
+            <span v-if="isPrimaryStopAction" class="stop-square" />
             <el-icon v-else><Top /></el-icon>
           </button>
         </div>
@@ -508,7 +436,8 @@ import { resolveForegroundLayoutDraft } from '@/services/runtime/foregroundLayou
 import {
   buildWorkspaceScopedRuntimeHistory,
   buildForegroundWorkspaceIdentity,
-  isForegroundWorkspaceMessageVisible,
+  isForegroundConversationMessageVisible,
+  rebindUnscopedConversationToWorkspace,
   resolveForegroundWorkspaceKey,
   resolveForegroundWorkspaceTransition,
 } from '@/services/runtime/foregroundWorkspaceState'
@@ -546,6 +475,16 @@ import {
   isLayoutImportDetails,
   isOrchestrationOverviewDetails,
 } from './chatPanelDetails'
+import FailureFormatter from './FailureFormatter.vue'
+import CandidateRecommendationPanel, {
+  type CandidateRecommendationItem,
+} from './CandidateRecommendationPanel.vue'
+import { createChatPanelActiveRequestController } from './chatPanelActiveRequestController'
+import { buildRecoverableFailureEnvelope } from '@/services/agent/recoverableFailureEnvelope'
+import type {
+  QuickReply,
+  RecoverableInterpretationFailure,
+} from '@/services/agent/recoverableFailureEnvelope'
 
 type ProcessType =
   | 'planning'
@@ -682,6 +621,12 @@ const analysisContext = ref<RuntimeAnalysisContext | null>(null)
 const pendingReviewWorkspaceKey = ref<string | null>(null)
 const pendingReviewInterruptedNotice = ref<string | null>(null)
 const recoverableRuntimeFailure = ref<RecoverableRuntimeFailure | null>(null)
+/**
+ * 方向 1 失败可恢复性闭环：结构化失败信封 ref。
+ * 与既有 recoverableRuntimeFailure 并存（方向 1 不修改既有逻辑，仅新增渲染入口）。
+ * 当后台返回 RecoverableInterpretationFailure envelope 时，前台设置此 ref 渲染 FailureFormatter。
+ */
+const recoverableFailureEnvelope = ref<RecoverableInterpretationFailure | null>(null)
 const activeReactTaskRun = ref<ReactTaskRun | null>(null)
 const activeReactTaskWorkspaceKey = ref<string | null>(null)
 const pendingLayoutDraft = ref<LayoutDraft | null>(null)
@@ -703,6 +648,15 @@ const commandExecutor = getCommandExecutor()
 const candidateService = getCandidateService()
 const scheduleCommandBus = getScheduleCommandBus()
 const runtimeClient = getAgentRuntimeClient()
+const shortRequestController = createChatPanelActiveRequestController()
+const isPrimaryStopAction = computed(() => (
+  isForegroundOrchestrationRunning.value || shortRequestController.canStop.value
+))
+const isPrimaryStopEnabled = computed(() => (
+  isForegroundOrchestrationRunning.value
+    ? Boolean(props.canInterrupt)
+    : shortRequestController.canStop.value && !shortRequestController.stopping.value
+))
 const layoutImportService = getLayoutImportService()
 const displayedLogIds = ref<string[]>([])
 const lastSummarySessionId = ref('')
@@ -843,11 +797,7 @@ const isForegroundDraftPayloadKey = (key: string): boolean => {
 }
 
 const containsForegroundDraftPayload = (value: unknown): boolean => {
-  if (typeof value === 'string') {
-    return value.includes('版面草案')
-      || value.includes('编排参考')
-      || value.includes('layout_draft')
-  }
+  if (typeof value === 'string') return false
 
   if (Array.isArray(value)) {
     return value.some((item) => containsForegroundDraftPayload(item))
@@ -906,16 +856,15 @@ const isVisibleLayoutDraftBlockingFeedback = (message: Message): boolean => (
 
 const isForegroundLayoutDraftMessage = (message: Message): boolean => {
   if (message.role === 'user') return false
+  const details = getMessageDetails(message)
+  if (details?.playlistState) return false
   if (isVisibleLayoutDraftBlockingFeedback(message)) return false
   if (message.processTypeLabel === '版面更新' || message.processTypeLabel === '版面草案') return false
   if (message.processTypeLabel === '编单分析' || message.processTypeLabel === '优化建议') return false
   if (isForegroundAgentMainReplyText(message.content)) return false
-  if (/^已切换到.+频道版面/.test(message.content) || /^已切换到当前频道默认版面/.test(message.content)) return false
-  const details = getMessageDetails(message)
+  if (/^已切换到.+频道版面/.test(message.content) || message.content.startsWith('已切换到当前频道默认版面')) return false
   if (details?.readOnly === true) return false
-  return message.content.includes('版面草案')
-    || message.processTypeLabel?.includes('版面草案') === true
-    || containsForegroundDraftPayload(message.explanation?.explanation)
+  return message.processTypeLabel?.includes('版面草案') === true
     || isForegroundLongFlowDetails(details)
 }
 
@@ -923,7 +872,7 @@ const visibleMessages = computed(() =>
   messages.value.filter((message) => (
     !message.hiddenFromThread
     && !isForegroundLayoutDraftMessage(message)
-    && isForegroundWorkspaceMessageVisible(message, resolveCurrentPendingWorkspaceKey())
+    && isForegroundConversationMessageVisible(message, resolveCurrentPendingWorkspaceKey())
   )),
 )
 
@@ -950,6 +899,62 @@ const applyQuickAction = (prompt: string) => {
   pendingRuntimeInputSource.value = 'quick_action'
   inputMessage.value = prompt
   void sendMessage()
+}
+
+/**
+ * 处理 FailureFormatter emit 的 quick reply 事件（方向 1 D3 策略化重试）。
+ *
+ * 设计约束（AGENTS.md 本地只保护结果，LLM-first）：
+ * - cancel：清空失败信封
+ * - fill_instruction with payload.value（非策略）：填充到输入框，用户手动发送
+ * - fill_instruction with payload.strategy（resubmit/broaden_target/narrow_target）：自动构造指令并发送
+ * - switch_strategy with payload.strategy：自动构造策略切换指令并发送
+ * - 策略化重试指令由 LLM 理解，本地不改写用户原始意图
+ */
+const handleFailureQuickReply = (reply: QuickReply) => {
+  const payload = (reply.payload ?? {}) as { value?: unknown; slot?: string; strategy?: string }
+
+  // cancel：清空失败信封
+  if (reply.action === 'cancel') {
+    recoverableFailureEnvelope.value = null
+    return
+  }
+
+  // fill_instruction with payload.value（非策略）：填充到输入框，用户手动发送
+  if (
+    reply.action === 'fill_instruction'
+    && payload.value !== undefined
+    && typeof payload.value === 'string'
+    && !payload.strategy
+  ) {
+    inputMessage.value = payload.value
+    recoverableFailureEnvelope.value = null
+    return
+  }
+
+  // 策略化重试：自动构造指令并发送（D3）
+  const strategy = payload.strategy
+  let retryContent: string | null = null
+
+  if (reply.action === 'fill_instruction' && strategy === 'resubmit') {
+    retryContent = '重试'
+  } else if (reply.action === 'fill_instruction' && strategy === 'broaden_target') {
+    retryContent = '放宽关键词重试'
+  } else if (reply.action === 'fill_instruction' && strategy === 'narrow_target') {
+    retryContent = '收窄目标重试'
+  } else if (reply.action === 'switch_strategy' && typeof strategy === 'string') {
+    retryContent = `切换为${strategy}策略`
+  }
+
+  if (retryContent) {
+    inputMessage.value = retryContent
+    recoverableFailureEnvelope.value = null
+    void sendMessage()
+    return
+  }
+
+  // 兜底：清空失败信封
+  recoverableFailureEnvelope.value = null
 }
 
 const continuePendingAtomicClarification = (prompt: string) => {
@@ -1207,6 +1212,26 @@ const handlePrimaryAction = async () => {
     return
   }
 
+  if (shortRequestController.canStop.value) {
+    if (!runtimeClient.cancelActiveInstruction) return
+    try {
+      const result = await shortRequestController.stop((workspaceKey) => (
+        runtimeClient.cancelActiveInstruction!(workspaceKey)
+      ))
+      if (result.stopped) {
+        messages.value.push(buildAssistantMessage({
+          content: '已停止当前请求，已有播单状态保持不变。',
+          processType: 'general',
+          processTypeLabel: '已停止',
+        }))
+        await scrollToBottom()
+      }
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : '停止请求失败')
+    }
+    return
+  }
+
   await sendMessage()
 }
 
@@ -1287,23 +1312,6 @@ const expirePendingReviewForWorkspaceChange = (message: string) => {
   ElMessage.warning(message)
 }
 
-const isPendingReviewConfirmText = (content: string): boolean =>
-  /^(确认|确定|执行|可以|好的|好|ok|yes)$/iu.test(content.replace(/\s+/g, ''))
-  || /^(确认重新编排|确认重排|重新编排|重排|确认覆盖|覆盖吧|开始重新编排|开始重排|开始编排|按这个重新编排|按草案重新编排|按当前草案重新编排|按这个开始编排|可以重新编排|可以重排)$/iu.test(content.replace(/\s+/g, ''))
-  || /^(更新|更新草案|更新到草案|写入草案|改到草案|改进草案|就按这个|就这个|用这个|用这个方向|按这个方向|没问题)$/iu.test(content.replace(/\s+/g, ''))
-
-const isPendingReviewCancelText = (content: string): boolean =>
-  /^(取消|不用了|算了|先不用|no|cancel)$/iu.test(content.replace(/\s+/g, ''))
-
-const isPendingReviewSelectionText = (content: string): boolean =>
-  /^(第?[一二三四五六七八九十\d]+个?|选[一二三四五六七八九十\d]+|用[一二三四五六七八九十\d]+)$/u.test(content.replace(/\s+/g, ''))
-
-const isPendingReviewAnswerText = (content: string): boolean => (
-  isPendingReviewConfirmText(content)
-  || isPendingReviewCancelText(content)
-  || isPendingReviewSelectionText(content)
-)
-
 const resolvePendingReviewExpiredNotice = (reason?: 'workspace_changed' | 'next_non_answer') => (
   reason === 'workspace_changed'
     ? '上一条待确认操作不属于当前工作区，已自动失效。'
@@ -1327,6 +1335,7 @@ const resolveRecoverableRuntimeRetryInput = (content: string): string | null | u
   if (!failure) return null
   if (failure.workspaceKey !== resolveCurrentPendingWorkspaceKey()) {
     recoverableRuntimeFailure.value = null
+    recoverableFailureEnvelope.value = null
     return null
   }
   return failure.originalUserInput
@@ -1387,26 +1396,22 @@ const extractRecoverableRuntimeFailure = (
   }
 }
 
+const extractRecoverableFailureEnvelope = (
+  feedback: RuntimeFeedback | null,
+): RecoverableInterpretationFailure | null => {
+  const details = (feedback?.details ?? undefined) as DetailMap | undefined
+  const envelope = details?.recoverableFailureEnvelope as Partial<RecoverableInterpretationFailure> | undefined
+  if (!envelope || typeof envelope !== 'object') return null
+  if (!envelope.kind || !Array.isArray(envelope.quickReplies) || !envelope.humanSummary) return null
+  return envelope as RecoverableInterpretationFailure
+}
+
 const pushPendingReviewExpiredMessage = (reason?: 'workspace_changed' | 'next_non_answer') => {
   pushAssistantMessage(buildAssistantMessage({
     content: resolvePendingReviewExpiredNotice(reason),
     processType: 'general',
     processTypeLabel: '待确认已失效',
   }))
-}
-
-const interruptPendingReviewForNewInput = (content: string): boolean => {
-  const hasWriteReview = Boolean(pendingCommand.value) || isAtomicContextWriteReview(pendingAtomicContext.value)
-  if (!hasWriteReview) return false
-  if (isPendingReviewAnswerText(content)) return false
-  if (isPendingCompositeBatchStepText(content)) return false
-  pendingCommand.value = null
-  if (isAtomicContextWriteReview(pendingAtomicContext.value)) {
-    pendingAtomicContext.value = null
-  }
-  pendingReviewWorkspaceKey.value = null
-  pendingReviewInterruptedNotice.value = resolvePendingReviewExpiredNotice('next_non_answer')
-  return true
 }
 
 const applyPlaylistStateFromDetails = (details?: DetailMap) => {
@@ -1497,6 +1502,10 @@ const appendRuntimeFeedback = (feedback: RuntimeFeedback) => {
   const feedbackProcessType = feedback.processType as ProcessType
   const details = (feedback.details ?? undefined) as DetailMap | undefined
   const feedbackWorkspaceKey = resolveRuntimeFeedbackWorkspaceKey(details)
+  const currentWorkspaceKey = resolveCurrentPendingWorkspaceKey()
+  if (currentWorkspaceKey === 'none' && feedbackWorkspaceKey && feedbackWorkspaceKey !== 'none') {
+    rebindUnscopedConversationToWorkspace(messages.value, feedbackWorkspaceKey)
+  }
   applyPlaylistStateFromDetails(details)
   bindLatestUserMessageToWorkspace(feedbackWorkspaceKey)
   pushAssistantMessage(buildAssistantMessage({
@@ -1598,6 +1607,7 @@ const buildPendingExecuteInput = (pendingCommand: RuntimePendingCommand) => {
     pendingCommand,
     scheduleDate: props.date,
     channelId: props.channelId,
+    workspaceKey: resolveCurrentPendingWorkspaceKey() ?? undefined,
     currentSchedule: props.currentSchedule,
     foregroundStateVersion: formalPlaylistVersion,
     expectedPlaylistVersion: formalPlaylistVersion,
@@ -1782,7 +1792,7 @@ const applyRuntimeExecutedResult = (executed: RuntimeExecutedResult, stepMetric?
   })
 
   const details = {
-    ...(executed.details ?? {}),
+    ...executed.details,
     validationSummary: executed.validationSummary,
   } as DetailMap
 
@@ -1848,13 +1858,33 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
   loading.value = true
   const stepProgress = startStepProgress(progressLabel)
   const runtimeProgressKeys = new Set<string>()
+  const runtimeStreamMessages = new Map<string, Message>()
   const handleRuntimeProgress = (event: RuntimeProgressEvent) => {
     const progressContent = event.content.trim()
     if (!progressContent) return
     const progressKey = event.id || `${event.processTypeLabel}:${progressContent}`
     if (runtimeProgressKeys.has(progressKey)) return
     runtimeProgressKeys.add(progressKey)
-    messages.value.push(buildAssistantMessage({
+    const streamId = typeof event.details?.streamId === 'string' ? event.details.streamId : null
+    const streamMessage = streamId ? runtimeStreamMessages.get(streamId) : undefined
+    if (streamMessage) {
+      streamMessage.content = progressContent
+      streamMessage.thinking = event.thinking
+      streamMessage.processType = event.processType
+      streamMessage.processTypeLabel = event.processTypeLabel
+      streamMessage.explanation = event.details
+        ? {
+          type: 'command',
+          targetId: progressKey,
+          explanation: event.thinking || progressContent,
+          details: event.details,
+        }
+        : undefined
+      stepProgress.keepRunningAtBottom()
+      void scrollToBottom()
+      return
+    }
+    const nextMessage = buildAssistantMessage({
       content: progressContent,
       thinking: event.thinking,
       processType: event.processType,
@@ -1868,7 +1898,9 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
           details: event.details,
         }
         : undefined,
-    }))
+    })
+    messages.value.push(nextMessage)
+    if (streamId) runtimeStreamMessages.set(streamId, nextMessage)
     stepProgress.keepRunningAtBottom()
     void scrollToBottom()
   }
@@ -1891,6 +1923,7 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       effectiveContent = retryInput
     } else {
       recoverableRuntimeFailure.value = null
+      recoverableFailureEnvelope.value = null
     }
 
     const scheduleState = buildCurrentRuntimeScheduleState()
@@ -1915,30 +1948,6 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
     const pendingReviewExpiredNotice = interruptedPendingReviewNotice ?? (pendingReviewLifecycle.shouldExpire
       ? resolvePendingReviewExpiredNotice(pendingReviewLifecycle.expireReason)
       : null)
-    if (usablePendingCommand && isPendingReviewCancelText(content)) {
-      const summary = usablePendingCommand.summary.replace(/[，,。.!！?？]+$/u, '')
-      pendingCommand.value = null
-      pendingAtomicContext.value = null
-      conversationAtomicContext.value = null
-      pendingReviewWorkspaceKey.value = null
-      messages.value.push(buildAssistantMessage({
-        content: `${summary}，已取消执行。`,
-        thinking: '我已根据你的选择停止这次待确认修改，不会对当前编排单做任何变更。',
-        processType: 'general',
-        processTypeLabel: '已取消',
-        stepMetric: stepProgress.finish(),
-      }))
-      return
-    }
-    if (usablePendingCommand && isPendingReviewConfirmText(content)) {
-      pendingCommand.value = null
-      pendingAtomicContext.value = null
-      conversationAtomicContext.value = null
-      pendingReviewWorkspaceKey.value = null
-      const result = await runtimeClient.executePendingCommand(buildPendingExecuteInput(usablePendingCommand))
-      applyRuntimeExecutedResult(result, stepProgress.finish())
-      return
-    }
     if (pendingReviewLifecycle.shouldExpire) {
       pendingCommand.value = null
       pendingAtomicContext.value = null
@@ -1948,9 +1957,11 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
     const llmReadiness = resolveForegroundLlmReadiness()
     if (!llmReadiness.ready) {
       recoverableRuntimeFailure.value = null
+      recoverableFailureEnvelope.value = null
       pushLlmNotReadyMessage(llmReadiness.message, llmReadiness.errors, stepProgress.finish())
       return
     }
+    shortRequestController.start(currentWorkspaceKey)
     const foregroundContextPackage = buildForegroundAgentContextPackage({
       latestUserInput: effectiveContent,
       scheduleState,
@@ -1983,6 +1994,7 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       inputSource: retryInput !== undefined ? 'user' : runtimeInputSource,
       onProgress: handleRuntimeProgress,
     })
+    if (shortRequestController.stopRequested.value) return
     recordBrowserRuntimeTrace('submit:decision', {
       userInput: effectiveContent,
       kind: decision.kind,
@@ -2001,8 +2013,10 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       effectiveContent,
       currentWorkspaceKey,
     )
+    recoverableFailureEnvelope.value = extractRecoverableFailureEnvelope(runtimeFeedback)
     attachStepMetricToLatestAssistantMessage(stepProgress.finish())
   } catch (error) {
+    if (shortRequestController.stopRequested.value) return
     const stepMetric = stepProgress.finish()
     const errorMessage = error instanceof Error ? error.message : 'AI 请求失败，请稍后重试。'
     if (/LLM|模型|超时|timeout|timed out/i.test(errorMessage)) {
@@ -2011,6 +2025,12 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
         workspaceKey: resolveCurrentPendingWorkspaceKey(),
         createdAt: Date.now(),
       }
+      recoverableFailureEnvelope.value = buildRecoverableFailureEnvelope({
+        kind: 'llm_timeout',
+        noMutation: true,
+        humanSummary: errorMessage,
+        traceId: `frontend-llm-timeout-${Date.now()}`,
+      })
     }
     messages.value.push(buildAssistantMessage({
       content: /LLM|模型|超时|timeout|timed out/i.test(errorMessage)
@@ -2021,6 +2041,7 @@ const processMessage = async (content: string, progressLabel = '思考中') => {
       stepMetric,
     }))
   } finally {
+    shortRequestController.finish()
     loading.value = false
     await scrollToBottom()
     const nextContent = queuedCommands.value.shift()
@@ -2041,21 +2062,7 @@ const sendMessage = async () => {
     hasCompositeTaskRun: Boolean(pendingAtomicContext.value?.compositeTaskRun),
   })
 
-  const pendingReviewInterrupted = interruptPendingReviewForNewInput(content)
   messages.value.push(buildUserMessage(content))
-  if (pendingReviewInterrupted) {
-    const interruptedNotice = pendingReviewInterruptedNotice.value
-    pendingReviewInterruptedNotice.value = null
-    if (interruptedNotice) {
-      pushAssistantMessage(buildAssistantMessage({
-        content: interruptedNotice,
-        processType: 'general',
-        processTypeLabel: '待确认已失效',
-      }), {
-        autoFocus: false,
-      })
-    }
-  }
   inputMessage.value = ''
   await scrollToBottom()
 
@@ -2460,12 +2467,17 @@ const formatInsertRecommendationMeta = (duration: number, programType: string, _
   return `${durationMinutes} · ${formatProgramTypeLabel(programType)}`
 }
 
-const getInsertRecommendationBadgeLabel = (index: number): string => (
-  index === 0 ? '优先推荐' : `候选 ${index + 1}`
-)
-
-const formatRecommendationStrengthLabel = (index: number): string => (
-  index === 0 ? '建议优先看' : '可作为备选'
+/**
+ * CandidateRecommendationPanel 的 formatMeta 适配器（方向 1 D4）。
+ * 把组件回调签名 (candidate, index) 适配到既有 formatInsertRecommendationMeta(duration, programType, confidence)。
+ */
+const formatInsertRecommendationMetaForPanel = (
+  candidate: CandidateRecommendationItem,
+  _index: number,
+): string => formatInsertRecommendationMeta(
+  candidate.duration ?? 0,
+  candidate.programType ?? '',
+  candidate.confidence ?? 0,
 )
 
 const getAtomicPhaseLabel = (phase?: RuntimePendingAtomicContext['phase']) => {
@@ -2540,6 +2552,17 @@ const pendingAtomicPhase = computed(() => (
 ))
 const pendingAtomicTargetCandidates = computed(() => pendingAtomicContext.value?.targetCandidates ?? [])
 const pendingAtomicInsertRecommendations = computed(() => pendingAtomicContext.value?.insertRecommendations ?? [])
+/**
+ * 候选推荐 panel 的展示用候选列表（方向 1 D4）。
+ * 把 RuntimeInsertRecommendationCandidate.candidateId 映射为 CandidateRecommendationItem.id，
+ * 让 CandidateRecommendationPanel 用统一 id 字段判断选中态。
+ */
+const pendingAtomicInsertRecommendationItems = computed<CandidateRecommendationItem[]>(() => (
+  pendingAtomicInsertRecommendations.value.map(({ candidateId, ...rest }) => ({
+    id: candidateId,
+    ...rest,
+  }))
+))
 const pendingAtomicTargetSelectedItemId = computed<string | null>({
   get: () => pendingAtomicContext.value?.selectedItemId ?? null,
   set: (value) => {
@@ -3164,6 +3187,11 @@ const shouldKeepDraftBlockingInputVisible = (input: Omit<Message, 'role'>): bool
   && isLayoutDraftBlockingText(input.content, input.processTypeLabel)
 )
 
+const shouldKeepPlaylistStateFeedbackVisible = (input: Omit<Message, 'role'>): boolean => {
+  const details = input.explanation?.details as DetailMap | undefined
+  return Boolean(details?.playlistState)
+}
+
 const shouldKeepReadOnlyAnalysisInputVisible = (input: Omit<Message, 'role'>): boolean => {
   if (isForegroundAgentMainReplyText(input.content)) return true
   if (input.processTypeLabel === '版面草案') return true
@@ -3177,6 +3205,7 @@ const buildAssistantMessage = (input: Omit<Message, 'role'>): Message => {
     || (!foregroundLayoutDraftEnabled
       && containsForegroundDraftPayload(input)
       && !shouldKeepDraftBlockingInputVisible(input)
+      && !shouldKeepPlaylistStateFeedbackVisible(input)
       && !shouldKeepReadOnlyAnalysisInputVisible(input))
   return decorateAssistantMessage({
     role: 'assistant',
@@ -4279,7 +4308,7 @@ const executeCommand = async (
             targetId: 'execution-result',
             explanation: options.explanation,
             details: {
-              ...(detailPayload ?? {}),
+              ...detailPayload,
               validationSummary: result.validationReport?.summary,
             },
           }
@@ -5214,6 +5243,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  shortRequestController.finish()
   activeThinkingController?.stop()
   activeThinkingController = null
   activeStepTimerIds.forEach((timerId) => window.clearInterval(timerId))
@@ -5898,271 +5928,6 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   gap: 8px;
   padding: 0 14px 12px;
-}
-
-.target-selection-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 14px;
-}
-
-:deep(.target-selection-list .el-radio) {
-  display: flex;
-  align-items: flex-start;
-  width: 100%;
-  margin-right: 0;
-  margin-bottom: 0;
-  padding: 12px 14px;
-  border: 1px solid var(--app-line);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.8);
-  transition:
-    border-color 0.18s ease,
-    background 0.18s ease,
-    box-shadow 0.18s ease,
-    transform 0.18s ease;
-}
-
-:deep(.target-selection-list .el-radio:hover) {
-  border-color: rgba(100, 108, 255, 0.38);
-  background: rgba(255, 255, 255, 0.96);
-  transform: translateY(-1px);
-}
-
-:deep(.target-selection-list .el-radio.is-checked) {
-  border-color: rgba(100, 108, 255, 0.52);
-  background: linear-gradient(180deg, rgba(248, 249, 255, 0.98) 0%, rgba(238, 242, 255, 0.92) 100%);
-  box-shadow: 0 18px 30px -24px rgba(83, 91, 242, 0.42);
-}
-
-:deep(.target-selection-list .el-radio__input) {
-  flex: 0 0 auto;
-  margin-top: 3px;
-}
-
-:deep(.target-selection-list .el-radio__label) {
-  flex: 1;
-  min-width: 0;
-  padding-left: 12px;
-  color: #334155;
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: normal;
-  word-break: break-word;
-}
-
-:deep(.target-selection-list .el-radio__input .el-radio__inner:hover) {
-  border-color: var(--app-accent);
-}
-
-:deep(.target-selection-list .el-radio__input.is-checked .el-radio__inner) {
-  border-color: var(--app-accent);
-  background: var(--app-accent);
-}
-
-.insert-recommendation-panel {
-  border-color: rgba(100, 108, 255, 0.38);
-  background: linear-gradient(180deg, rgba(248, 249, 255, 0.96) 0%, rgba(238, 242, 255, 0.94) 100%);
-  box-shadow: 0 24px 36px -30px rgba(83, 91, 242, 0.4);
-}
-
-.insert-recommendation-panel .pending-command-header {
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--app-line);
-}
-
-.insert-recommendation-list {
-  margin-top: 16px;
-}
-
-.insert-recommendation-card {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 8px;
-  padding-left: 12px;
-}
-
-.insert-recommendation-option {
-  display: flex;
-  align-items: flex-start;
-  width: 100%;
-  margin: 0;
-  padding: 12px 14px;
-  border: 1px solid var(--app-line);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.8);
-  cursor: pointer;
-  text-align: left;
-  color: inherit;
-  font: inherit;
-  appearance: none;
-  transition:
-    border-color 0.18s ease,
-    background 0.18s ease,
-    box-shadow 0.18s ease,
-    transform 0.18s ease;
-}
-
-.insert-recommendation-option:hover {
-  border-color: rgba(100, 108, 255, 0.38);
-  background: rgba(255, 255, 255, 0.96);
-  transform: translateY(-1px);
-}
-
-.insert-recommendation-option:focus-visible {
-  outline: none;
-  border-color: rgba(100, 108, 255, 0.52);
-  box-shadow:
-    0 0 0 3px rgba(100, 108, 255, 0.16),
-    0 18px 30px -24px rgba(83, 91, 242, 0.42);
-}
-
-.insert-recommendation-option.is-selected {
-  border-color: rgba(100, 108, 255, 0.52);
-  background: linear-gradient(180deg, rgba(248, 249, 255, 0.98) 0%, rgba(238, 242, 255, 0.92) 100%);
-  box-shadow: 0 18px 30px -24px rgba(83, 91, 242, 0.42);
-}
-
-.insert-recommendation-selector {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  margin-top: 2px;
-  border: 1px solid #d1d5db;
-  border-radius: 999px;
-  background: #fff;
-  transition:
-    border-color 0.18s ease,
-    background 0.18s ease;
-}
-
-.insert-recommendation-selector-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--app-accent);
-  transform: scale(0);
-  transition: transform 0.18s ease;
-}
-
-.insert-recommendation-option.is-selected .insert-recommendation-selector {
-  border-color: var(--app-accent);
-  background: rgba(238, 242, 255, 0.92);
-}
-
-.insert-recommendation-option.is-selected .insert-recommendation-selector-dot {
-  transform: scale(1);
-}
-
-.insert-recommendation-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.insert-recommendation-name-line {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-}
-
-.insert-recommendation-name {
-  color: #1f2937;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.5;
-}
-
-.insert-recommendation-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 22px;
-  padding: 0 8px;
-  border-radius: 999px;
-  background: rgba(100, 108, 255, 0.08);
-  border: 1px solid var(--app-line);
-  color: var(--app-accent-deep);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.insert-recommendation-meta {
-  margin-top: 0;
-  color: #5b6472;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.insert-recommendation-confidence {
-  flex: 0 0 auto;
-  padding-left: 12px;
-  color: var(--app-accent-deep);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-
-.insert-recommendation-tags {
-  margin-top: 0;
-  gap: 8px;
-}
-
-.insert-recommendation-tags .reason-tag {
-  background: rgba(255, 255, 255, 0.82);
-  border-color: var(--app-line);
-  color: var(--app-accent-deep);
-  font-weight: 500;
-}
-
-.insert-recommendation-footer-note {
-  padding: 0 4px;
-  color: #475569;
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-.insert-recommendation-actions {
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--app-line);
-  background: linear-gradient(180deg, rgba(248, 249, 255, 0) 0%, rgba(238, 242, 255, 0.82) 100%);
-}
-
-.insert-recommendation-action-hint {
-  color: #475569;
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-.insert-recommendation-action-buttons {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 8px;
-}
-
-@media (max-width: 720px) {
-  .insert-recommendation-actions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .insert-recommendation-action-buttons {
-    width: 100%;
-    justify-content: flex-end;
-  }
 }
 
 .layout-draft-panel {

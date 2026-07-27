@@ -14,6 +14,8 @@
 
 - `ChatPanel` 负责用户输入、消息展示、pending 面板、上传草案、确认/取消/继续。
 - `schedulingAgentRuntimeFacade` 承接正式前台运行入口。
+- `formalOrchestrationRuntime` 承接正式编排的真 ReAct 批次执行内核；`FormalOrchestrationCapability` 只接受显式 `reactTask` 请求并验证 observation 后重新 decide。atomic/write 端口、服务端 session checkpoint、停止保留与 replay 已接通；decider 历史使用确定性上下文压缩，压缩 trace 随 checkpoint 原样持久化和回放。生产前台、facade 与 capability 已移除旧 `Orchestrator` 兼容路径，缺少结构化计划时返回 `react_plan_invalid`，不执行候选检索或写入。
+- `POST /api/agent/sessions/:sessionId/orchestration/recover` 提供正式跨请求恢复：检查/继续/重试/缩小范围/取消均为显式动作；恢复校验 workspace 与正式播单版本，复用原 run/checkpoint 并跳过半批次已完成 action。瞬时 LLM transport 故障只在同一 stage deadline 内有限重试，失败后仍停在 checkpoint。
 - `agentPlanner` 和 intent interpreter 负责 LLM-only 理解。
 - `reactTaskRuntime` 保存 ReAct 任务的轮次、观察和失败恢复状态。
 - `demoRuntimeFacade` 内仍承载大量实际业务运行逻辑，需要逐步拆出。
@@ -23,6 +25,11 @@
 主要技术债是：LLM 调用、任务状态、素材查证、pending 状态和正式写入裁决仍大量留在前台进程里，不适合多人访问、稳定审计和服务端密钥保护。
 
 ## 目标架构
+
+- ReAct 原子动作必须沿用请求级 `CapabilityRegistry` 唯一路由；正式端口只负责适配 action 与写入边界，不得复制或旁路原子 capability 分发。冲突应作为结构化可恢复失败返回，不能降级成成功或静默选择 owner。
+- 业务确认门禁在 commit 前返回 pending 时，服务端 observation 必须携带完整正式 pending 身份和原始 `pendingTask`，确保 session/checkpoint 能按 workspace 续接，而不是只保留一段说明文本。
+- Agent Server 对审批中断返回 HTTP 200 + `status: waiting_user`，并通过 SSE/POST progress 投影“等待用户确认”；`confirm_pending` 恢复必须经过 workspace、播单版本、checkpoint 与 pendingTask 校验，不能把普通 `continue` 当作正式写入授权。
+- `broadcast-plan` 已接入独立的正式 ReAct 审批条：确认/取消分别调用 `confirm_pending` / `cancel` recovery action，不经过自然语言意图链。前台使用当前 workspace 与稳定播单版本校验按钮有效性；Agent Server 在执行前从 session 正式快照初始化工作副本，并在等待或完成时把 outcome 快照与新版本写回 session，前台消费 `scheduleItems` 更新页面。
 
 ### 前台
 
@@ -34,7 +41,7 @@
 - 把用户输入、确认、取消、继续、上传草案等事件发送给 Agent API。
 - 接收服务端事件流，更新消息、任务状态、草案和播单。
 
-前台不再直接持有 API key，不直接组织完整 prompt，不直接执行长程 ReAct loop。
+前台不再直接持有 API key，不直接组织完整 prompt，不直接执行长程 ReAct loop；前台只持有展示所需的审批摘要和当前 workspace/version，执行准据仍在服务端 session/checkpoint。
 
 性能目标是让前台更轻：不要把新的大模型调用、批量循环、素材库扫描或正式写入重试继续堆到浏览器里；这些能力迁移后应由服务端异步推进，前台只接收摘要、进度和最终 patch。
 
@@ -113,6 +120,20 @@
 `POST /api/agent/sessions/:sessionId/tasks/:taskId/stop`
 
 停止当前任务。
+
+`POST /api/agent/sessions/:sessionId/instruction/stop`
+
+停止当前短链 LLM 请求。服务端按 `sessionId + workspaceKey` 校验并中断请求级 `AbortSignal`；短链默认整体预算 180s、单个 LLM stage 上限 90s，意图后保留 60s、候选判断后保留 15s，5s 后才允许停止。
+
+短链 LLM 还会通过同一 session 的 SSE 推送 `first_token` 与安全增量进度；POST 返回完整结构化 decision，前台不得把半截 JSON 当作执行结果。
+
+`POST /api/agent/orchestration`
+
+正式 ReAct 也使用同一 session 的 SSE path A + POST path B。客户端先建立 SSE 再提交请求；服务端实时投影任务规划、查节目库、候选决策、checkpoint 和结构化可恢复失败，POST envelope 仅补回按稳定事件 id 判断尚未送达的进度。SSE 断流不会改变 checkpoint，也不会触发 action 重跑；业务可恢复失败以 HTTP 200 + `failed` outcome 返回，不得抛成 HTTP 500 或降成 `completed`。旧非 ReAct 兼容入口继续保留原异常语义。
+
+`POST /api/agent/sessions/:sessionId/orchestration/recover`
+
+恢复是显式用户动作，必须校验 workspace 与正式播单版本；继续时复用原 run/checkpoint 并跳过已有稳定 action key。
 
 `GET /api/agent/sessions/:sessionId/events`
 
@@ -206,7 +227,7 @@
 - pending 绑定当前工作区；用户换话题时旧 pending 失效。
 - 多候选不自动替用户选择。
 - 电视顺播/期数过滤后唯一可用候选可以直接排，并用人话说明理由。
-- OpenClaw 只是未来外部访问方，不是当前测试或实现阻塞条件。
+- Codex、OpenClaw 等桌面 Agent 只是未来外部访问方；它们应调用统一 CLI/API 契约，不在编排系统内部保留专用进程内桥，也不是当前测试或实现阻塞条件。
 
 ## 风险和控制
 
@@ -234,7 +255,7 @@
 - build 通过。
 - 覆盖矩阵说明新增能力和剩余缺口。
 - 不清空本地 LLM 配置和 API key。
-- 不把 OpenClaw 作为阻塞条件。
+- 不把任何外部桌面 Agent 或尚未实现的 CLI/skill 适配作为阻塞条件。
 
 阶段 4 以后需要新增：
 
@@ -301,11 +322,14 @@
 - 这一步是迁移外壳，不重写原子命令、候选选择、批量移动、顺播、校验等既有业务逻辑。
 - 这一步不会立刻带来明显页面加速，但它把重复确认防重、写入审计和后续批量恢复从前台路径外移，为后续服务端异步执行打基础。
 - 写入边界已经支持：
+  - Mutation policy 写屏障：所有正式写入必须显式携带 `mutationContext`；缺失、`preview_only` 或 `pending_only` 均在 delegate 前阻断。
   - 幂等 key：同一会话内重复确认同一写入，不会再次调用原执行器。
   - 播单版本检查：如果服务端已知版本和前台期望版本不一致，会阻断写入并要求刷新后重新确认。
   - 批量元数据：批量命令会把命令数量、已完成数量、剩余数量、下一步位置记录到 `details.formalWrite`，用于后续失败恢复。
   - 审计事件：服务端 session event 会记录本次正式写入边界、结果和错误。
-- 当前前台默认仍不发送版本号，因此旧本地/HTTP 体验不会因为阶段 4 第一批改动被额外阻断；版本字段接入前，行为保持和原来一致。
+- 前台审批恢复与普通 pending 确认均携带当前正式播单版本；同一播单的完整日期时间和页面时钟时间在版本计算时规范化为同一表示，真实现场变化仍会阻断恢复或写入。
+- 已有正式节目整批重编不再把完整授权对象放进前台请求。`AgentServerRuntime` 只根据提交前 session 中真实 `formal_rebuild_confirmation` pending 签发 `FormalOrchestrationGrant`，前台仅回传 `grantId`；服务端在 ReAct 启动和恢复时重新解析 Grant，并校验 session/workspace、当前播单版本、草案可执行指纹及任务范围。客户端伪造完整授权、删除 grantId、切换工作区或偷换 objective/target/search scope 均在 runtime 进入前阻断。
+- Grant 随 server session 保存并进入 replay 审计；可恢复失败和等待用户时保持 active，正式任务完成后标记 consumed。作用域内动作可避免逐项重复审批，但实际 mutation 仍逐次经过 capability、`MutationPolicy` 和 `FormalPlaylistWriteAdapter`，不构成写入豁免。
 
 下一步阶段 4 的后续工作，才适合逐步接入真正的 `playlistPatch`、服务端数据层版本、跨请求批量恢复和持久化审计日志。
 
@@ -401,6 +425,10 @@ Goal 48 不只是修前台体验问题，也把“服务端真正执行、前台
 
 这个阶段完成后，迁移进度可从 68%-70% 提升到约 72%-75%。它仍不是“原子执行器完全服务端重写”，但已经把长期试用所需的会话和正式播单状态从纯内存推进到可恢复的服务端状态文件。
 
+### Pending 状态归属补充
+
+Agent Server 保存或返回 pending mutation 时统一补齐 owner、workspaceKey、mutationId、mutationPolicy；跨工作区 pending 在运行时入口拒绝，历史 session 缺字段时仅沿用已保存 workspace 兼容重放。
+
 ## Goal 49：服务端执行闭环迁移到 90%+
 
 Goal 49 把执行归属从“前台持有 pending 和当前播单，再调用共享执行器”继续推到“服务端持有 pending、正式播单快照和执行准据，前台只展示和确认”。
@@ -464,7 +492,7 @@ Goal 51 不继续追大而全的商用权限系统，而是把当前 Agent Serve
 
 - 多用户权限、账号体系和租户隔离。
 - 复杂审计后台、执行回放和正式回滚。
-- OpenClaw 主路径接入。
+- 外部桌面 Agent 的统一 CLI/API 契约适配（仅在出现明确需求后实施，当前不实现 CLI）。
 - 真实素材库深度接入。
 
 这个阶段完成后，迁移进度评估约 96%。剩余部分主要是数据库化、多用户权限隔离、真实素材库适配、正式审计检索、监控限流和进程托管。

@@ -7,21 +7,40 @@ import {
   type FormalPlaylistPatch,
   type FormalPlaylistSnapshot,
 } from './formalPlaylistState'
+import {
+  assertMutationAllowed,
+  PreviewOnlyViolationError,
+  PendingOnlyViolationError,
+  type MutationContext,
+} from '@/services/agent/mutationPolicy'
 
 type VersionValue = string | number
 
 export interface FormalPlaylistWriteContext {
   sessionId?: string
+  workspaceKey?: string
+  transport?: 'local' | 'agent-server'
   actualPlaylistVersion?: VersionValue | null
   currentSnapshot?: FormalPlaylistSnapshot | null
+  /**
+   * Mutation 策略上下文（方向 1 D2 写屏障）。
+   * 传入后 execute 入口会调用 assertMutationAllowed 校验：
+   * - preview_only 时拒绝写入并返回 blocked 结果
+   * - pending_only 时拒绝写入正式播单并返回 blocked 结果
+   * - formal_write 时放行
+   * 未传入时保持原有行为（向后兼容）。
+   */
+  mutationContext: MutationContext
 }
 
 export interface FormalPlaylistWriteMetadata {
-  boundary: 'agent-server'
+  boundary: 'formal-playlist-write-adapter'
+  transport: 'local' | 'agent-server'
   writeRunId: string
   status: 'applied' | 'failed' | 'blocked' | 'reused'
   reused: boolean
   sessionId?: string
+  workspaceKey?: string
   pendingId?: string
   idempotencyKey?: string
   foregroundStateVersion?: VersionValue
@@ -72,10 +91,12 @@ const buildMetadata = (
     playlistPatch?: FormalPlaylistPatch
   },
 ): FormalPlaylistWriteMetadata => ({
-  boundary: 'agent-server',
+  boundary: 'formal-playlist-write-adapter',
+  transport: context?.transport ?? 'agent-server',
   sessionId: context?.sessionId,
+  workspaceKey: context?.workspaceKey ?? context?.mutationContext?.workspaceKey,
   pendingId: input.pendingId,
-  idempotencyKey: input.idempotencyKey,
+  idempotencyKey: input.idempotencyKey ?? input.pendingId ?? input.pendingCommand.pendingId,
   foregroundStateVersion: input.foregroundStateVersion,
   expectedPlaylistVersion: input.expectedPlaylistVersion,
   actualPlaylistVersion: context?.actualPlaylistVersion ?? undefined,
@@ -90,7 +111,7 @@ const withFormalWriteDetails = (
   ...result,
   playlistPatch: formalWrite.playlistPatch ?? result.playlistPatch,
   details: {
-    ...(result.details ?? {}),
+    ...result.details,
     formalWrite,
   },
 })
@@ -100,6 +121,7 @@ export class FormalPlaylistWriteAdapter {
   private readonly prepareSnapshotForExecution?: FormalPlaylistWriteAdapterOptions['prepareSnapshotForExecution']
   private readonly createRunId: () => string
   private readonly completedByIdempotencyKey = new Map<string, RuntimeExecutedResult>()
+  private readonly inFlightByIdempotencyKey = new Map<string, Promise<RuntimeExecutedResult>>()
 
   constructor(options: FormalPlaylistWriteAdapterOptions) {
     this.executeDelegate = options.executePendingCommand
@@ -109,12 +131,72 @@ export class FormalPlaylistWriteAdapter {
 
   async execute(
     input: RuntimeExecutePendingCommandInput,
-    context: FormalPlaylistWriteContext = {},
+    context: FormalPlaylistWriteContext,
   ): Promise<RuntimeExecutedResult> {
+    if (!context.mutationContext) {
+      return withFormalWriteDetails({
+        success: false,
+        command: input.pendingCommand.command,
+        message: '正式写入缺少 mutation policy，已拒绝执行。',
+        error: 'mutation_policy_required',
+        summary: input.pendingCommand.summary,
+        thinking: '写屏障拦截：正式播单写入必须显式声明 mutation policy。',
+        explanation: 'FormalPlaylistWriteAdapter requires mutationContext for every formal write.',
+        details: {
+          mutationPolicy: null,
+          mutationId: null,
+        },
+      }, buildMetadata(input, context, {
+        writeRunId: this.createRunId(),
+        status: 'blocked',
+        reused: false,
+      }))
+    }
+
+    // 写屏障校验：preview_only / pending_only 违反时返回 blocked 结果，不抛错。
+    {
+      try {
+        assertMutationAllowed(context.mutationContext, 'formal')
+      } catch (error) {
+        const isKnownViolation = error instanceof PreviewOnlyViolationError
+          || error instanceof PendingOnlyViolationError
+        const policyLabel = context.mutationContext.policy === 'preview_only' ? '预览' : '待确认'
+        return withFormalWriteDetails({
+          success: false,
+          command: input.pendingCommand.command,
+          message: `当前为${policyLabel}模式，不能写入正式播单。`,
+          error: isKnownViolation ? `${context.mutationContext.policy}_violation` : 'mutation_policy_violation',
+          summary: input.pendingCommand.summary,
+          thinking: `写屏障拦截：${context.mutationContext.policy} 模式下不能写入正式播单。`,
+          explanation: error instanceof Error ? error.message : String(error),
+          details: {
+            mutationPolicy: context.mutationContext.policy,
+            mutationId: context.mutationContext.mutationId,
+          },
+        }, buildMetadata(input, context, {
+          writeRunId: this.createRunId(),
+          status: 'blocked',
+          reused: false,
+        }))
+      }
+    }
+
     const cacheKey = this.resolveIdempotencyCacheKey(input, context)
     if (cacheKey) {
       const previous = this.completedByIdempotencyKey.get(cacheKey)
       if (previous) {
+        const priorFormalWrite = previous.details?.formalWrite as FormalPlaylistWriteMetadata | undefined
+        return withFormalWriteDetails(previous, {
+          ...buildMetadata(input, context, {
+            writeRunId: priorFormalWrite?.writeRunId ?? this.createRunId(),
+            status: 'reused',
+            reused: true,
+          }),
+        })
+      }
+      const inFlight = this.inFlightByIdempotencyKey.get(cacheKey)
+      if (inFlight) {
+        const previous = await inFlight
         const priorFormalWrite = previous.details?.formalWrite as FormalPlaylistWriteMetadata | undefined
         return withFormalWriteDetails(previous, {
           ...buildMetadata(input, context, {
@@ -175,7 +257,16 @@ export class FormalPlaylistWriteAdapter {
       }
     }
 
-    const result = await this.executeDelegate(input)
+    const delegatePromise = this.executeDelegate(input)
+    if (cacheKey) this.inFlightByIdempotencyKey.set(cacheKey, delegatePromise)
+    let result: RuntimeExecutedResult
+    try {
+      result = await delegatePromise
+    } finally {
+      if (cacheKey && this.inFlightByIdempotencyKey.get(cacheKey) === delegatePromise) {
+        this.inFlightByIdempotencyKey.delete(cacheKey)
+      }
+    }
     const artifacts = buildFormalPlaylistWriteArtifacts(input, result, context.currentSnapshot)
     const resultWithMetadata = withFormalWriteDetails(result, buildMetadata(input, context, {
       writeRunId: this.createRunId(),
@@ -191,7 +282,9 @@ export class FormalPlaylistWriteAdapter {
         }
       : resultWithMetadata
 
-    if (cacheKey) {
+    // 只有已成功应用的正式写入才具备可安全复用的幂等结果。
+    // 失败/阻断结果必须允许用户沿用同一 mutation 重试，不能把临时故障固化进缓存。
+    if (cacheKey && resultWithSnapshot.success) {
       this.completedByIdempotencyKey.set(cacheKey, resultWithSnapshot)
     }
     return resultWithSnapshot
@@ -201,8 +294,14 @@ export class FormalPlaylistWriteAdapter {
     input: RuntimeExecutePendingCommandInput,
     context: FormalPlaylistWriteContext,
   ): string | null {
-    if (!input.idempotencyKey) return null
-    return `${context.sessionId ?? 'anonymous'}:${input.idempotencyKey}`
+    const idempotencyKey = input.idempotencyKey ?? input.pendingId ?? input.pendingCommand.pendingId
+    if (!idempotencyKey) return null
+    const workspaceKey = context.workspaceKey ?? context.mutationContext?.workspaceKey ?? 'workspace:unknown'
+    return JSON.stringify([
+      context.sessionId ?? 'anonymous',
+      workspaceKey,
+      idempotencyKey,
+    ])
   }
 
   private resolveVersionConflict(

@@ -5,6 +5,7 @@ const result = spawnSync(command, [
   'vitest',
   'run',
   'src/services/__tests__/schedulingAgentRuntime.realLlmEvaluation.test.ts',
+  ...process.argv.slice(2),
 ], {
   stdio: 'inherit',
   shell: process.platform === 'win32',

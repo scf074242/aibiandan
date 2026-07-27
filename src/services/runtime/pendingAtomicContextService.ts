@@ -13,6 +13,7 @@ const DEFAULT_PENDING_ATOMIC_CONTEXT_LIFECYCLE_CONFIG: PendingAtomicContextLifec
 }
 
 const toIso = (timestamp: number) => new Date(timestamp).toISOString()
+const createPendingId = (now: number) => `pending_${now}_${Math.random().toString(36).slice(2, 10)}`
 
 export class PendingAtomicContextService {
   constructor(
@@ -24,6 +25,7 @@ export class PendingAtomicContextService {
     const updatedAt = context.updatedAt || createdAt
     return {
       ...context,
+      pendingId: context.pendingId ?? createPendingId(now),
       createdAt,
       updatedAt,
       expiresAt: context.expiresAt ?? toIso(now + this.config.ttlMs),

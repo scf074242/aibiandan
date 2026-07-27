@@ -9,7 +9,7 @@ import type {
 import type { LLMClient } from './llm/llmClient'
 import type { DialogueContext } from './dialogueContext'
 import type { GapPlanningThought } from './orchestrationStrategyService'
-import { buildGapCandidateSelectionPrompt, buildInsertCandidateSelectionPrompt } from './orchestrationPromptBuilder'
+import { buildGapCandidateSelectionPrompt, buildInsertCandidateSelectionPrompt, ORCHESTRATION_PROMPT_BUILDER_VERSION } from './orchestrationPromptBuilder'
 import type { InsertParams } from './paramExtractor'
 import {
   extractFunctionalSearchKeywords,
@@ -48,7 +48,6 @@ type CandidateStrategyMetadata = ProgramCandidate & {
 }
 
 const GAP_SELECTION_LLM_TIMEOUT_MS = 8000
-const CONTENT_MATCH_MIN_AUTO_SCORE = 70
 const CONTENT_MATCH_MIN_MATCHED_INTENT_KEYWORDS = 2
 
 export class CandidateSelectionService {
@@ -70,7 +69,7 @@ export class CandidateSelectionService {
     try {
       const response = await this.llmClient.chat(
         buildInsertCandidateSelectionPrompt(context, params, candidates),
-        { temperature: 0.1, maxTokens: 240 },
+        { temperature: 0.1, maxTokens: 240, traceLabel: 'insert_candidate_selection', promptVersion: ORCHESTRATION_PROMPT_BUILDER_VERSION },
       )
 
       const selected = this.parseSelection(response.content, candidates)
@@ -125,7 +124,7 @@ export class CandidateSelectionService {
   ): Promise<Awaited<ReturnType<LLMClient['chat']>> | null> {
     let timeoutId: ReturnType<typeof setTimeout> | undefined
     const request = this.llmClient
-      .chat(prompt, { temperature: 0.1, maxTokens: 260 })
+      .chat(prompt, { temperature: 0.1, maxTokens: 260, traceLabel: 'gap_candidate_selection', promptVersion: ORCHESTRATION_PROMPT_BUILDER_VERSION })
       .catch(() => null)
     const timeout = new Promise<null>((resolve) => {
       timeoutId = setTimeout(() => resolve(null), GAP_SELECTION_LLM_TIMEOUT_MS)
@@ -775,11 +774,7 @@ export class CandidateSelectionService {
     const intentKeywords = this.resolveContentIntentKeywords(planningThought?.searchKeywords ?? [])
     const matchedKeywords = this.resolveMatchedContentIntentKeywords(candidate, planningThought?.searchKeywords ?? [])
     const requiredMatches = Math.min(CONTENT_MATCH_MIN_MATCHED_INTENT_KEYWORDS, intentKeywords.length)
-    const totalScore = candidate.editorialDecision?.totalScore
-
     return matchedKeywords.length >= requiredMatches
-      && typeof totalScore === 'number'
-      && totalScore >= CONTENT_MATCH_MIN_AUTO_SCORE
   }
 
   private requiresProfessionalContentGate(planningThought?: GapPlanningThought): boolean {

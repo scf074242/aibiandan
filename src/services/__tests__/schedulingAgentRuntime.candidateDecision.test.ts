@@ -246,6 +246,80 @@ describe('LlmAgentCandidateJudge 单元决策', () => {
   })
 
   /**
+   * Q1 回归 case：needs_clarification 时 reasoning 必须是一句话澄清说明
+   *
+   * 验证 prompt 约束生效后，LLM 返回的 reasoning（一句话点出"差在哪个关键维度"）
+   * 被 normalizeDecision 原样透传，不丢失、不被本地改写。
+   * 本地不做"是否是一句话"的语义校验（LLM-only），仅验证结构透传。
+   */
+  it('needs_clarification 时一句话 reasoning 被原样透传', async () => {
+    const oneSentenceReasoning = '库里有两个版本的《琅琊榜》第5集，请确认要哪个'
+    const mockLlmClient = {
+      chat: vi.fn().mockResolvedValue({
+        content: JSON.stringify({
+          candidateId: '',
+          reasoning: oneSentenceReasoning,
+          decisionType: 'needs_clarification',
+        }),
+      }),
+    }
+    const judge = new LlmAgentCandidateJudge({ llmClient: mockLlmClient })
+
+    const candidates = [
+      buildCandidate({ id: 'c1', programName: '琅琊榜 第5集', issueNo: '5' }),
+      buildCandidate({ id: 'c2', programName: '琅琊榜 第5集', issueNo: '5' }),
+    ]
+    const decision = await judge.selectBestCandidate({
+      userInput: '插入琅琊榜第5集',
+      playlistType: 'tv',
+      commandIntent: 'insert',
+      candidates,
+      context: {} as never,
+    })
+
+    expect(decision.decisionType).toBe('needs_clarification')
+    expect(decision.reasoning).toBe(oneSentenceReasoning)
+    expect(decision.candidateOptions).toEqual(candidates)
+  })
+
+  /**
+   * Q2 回归 case：unable_to_decide 时 reasoning 末尾点出最接近候选
+   *
+   * 验证 prompt 约束生效后，LLM 返回的 reasoning（末尾一句话点出最接近候选）
+   * 被 normalizeDecision 原样透传，给编排人员一个可继续的入口。
+   * 本地不做"是否点出候选名"的语义校验（LLM-only），仅验证结构透传。
+   */
+  it('unable_to_decide 时末尾候选引导 reasoning 被原样透传', async () => {
+    const reasoningWithAlternative = '库里没有《琅琊榜》，但有《琅琊榜之风起长林》是否考虑？'
+    const mockLlmClient = {
+      chat: vi.fn().mockResolvedValue({
+        content: JSON.stringify({
+          candidateId: '',
+          reasoning: reasoningWithAlternative,
+          decisionType: 'unable_to_decide',
+        }),
+      }),
+    }
+    const judge = new LlmAgentCandidateJudge({ llmClient: mockLlmClient })
+
+    const candidates = [
+      buildCandidate({ id: 'c1', programName: '琅琊榜之风起长林 第1集' }),
+      buildCandidate({ id: 'c2', programName: '琅琊榜之风起长林 第2集' }),
+    ]
+    const decision = await judge.selectBestCandidate({
+      userInput: '插入琅琊榜',
+      playlistType: 'tv',
+      commandIntent: 'insert',
+      candidates,
+      context: {} as never,
+    })
+
+    expect(decision.decisionType).toBe('unable_to_decide')
+    expect(decision.candidate).toBeNull()
+    expect(decision.reasoning).toBe(reasoningWithAlternative)
+  })
+
+  /**
    * 单候选直接返回 auto_select（不调 LLM）
    */
   it('单候选时直接返回 auto_select 不调用 LLM', async () => {
@@ -343,6 +417,106 @@ describe('LlmAgentCandidateJudge 单元决策', () => {
     expect(decision.decisionType).toBe('auto_select')
     expect(decision.candidate?.id).toBe('c1')
   })
+
+  /**
+   * Case P1: prompt v1.1 修正后，LLM auto_select 最早一期 → normalizeDecision 正确返回
+   *
+   * 验证 prompt v1.1 移除"时长适配"硬条件后，LLM 在无基线场景下遵守"选最早一期"规则，
+   * normalizeDecision 正确透传 LLM 决策（candidateId 校验通过、reasoning 原样透传）。
+   */
+  it('LLM auto_select 最早一期时正确返回 candidate（prompt v1.1）', async () => {
+    const mockLlmClient = {
+      chat: vi.fn().mockResolvedValue({
+        content: JSON.stringify({
+          candidateId: 'c1',
+          reasoning: '无顺播基线，按顺播硬约束选最早一期（111期）',
+          considerations: ['顺播硬约束', '无基线选最早一期'],
+          decisionType: 'auto_select',
+        }),
+      }),
+    }
+    const judge = new LlmAgentCandidateJudge({ llmClient: mockLlmClient })
+
+    const candidates = [
+      buildCandidate({ id: 'c1', programName: '看东方', instanceName: '看东方第111期', issueNo: '0111', duration: 5400 }),
+      buildCandidate({ id: 'c2', programName: '看东方', instanceName: '看东方第112期', issueNo: '0112', duration: 5400 }),
+      buildCandidate({ id: 'c3', programName: '看东方', instanceName: '看东方第113期', issueNo: '0113', duration: 5400 }),
+      buildCandidate({ id: 'c4', programName: '看东方', instanceName: '看东方第114期', issueNo: '0114', duration: 5400 }),
+    ]
+    const decision = await judge.selectBestCandidate({
+      userInput: '在10点插入看东方',
+      playlistType: 'tv',
+      commandIntent: 'insert',
+      candidates,
+      context: {} as never,
+    })
+
+    expect(decision.decisionType).toBe('auto_select')
+    expect(decision.candidate?.id).toBe('c1')
+    expect(decision.candidate?.issueNo).toBe('0111')
+    expect(decision.reasoning).toContain('最早一期')
+  })
+
+  /**
+   * Case P3: prompt v1.1 移除"时长适配"硬条件
+   *
+   * 验证 system prompt 中不再出现"时长适配"硬条件字样，
+   * 明确"时长适配由 FormalPlaylistWriteAdapter 写入校验把关"，
+   * 并标注 prompt 版本号 v1.1。
+   */
+  it('prompt v1.1 不含"时长适配"硬条件字样且标注版本号', async () => {
+    const candidateFreedomCase = {
+      id: 'candidate-judge-no-count-threshold',
+      userInput: '从完整候选集中选出唯一符合顺播和内容条件的节目',
+      expectedDecision: 'LLM 可依据证据唯一性决策，不以候选数量作为自动选择门槛',
+      mustNotHappen: '候选数超过固定阈值就机械要求编排员选择',
+      verification: 'system prompt 不含 <= 5，并明确无论候选数量均按证据判断',
+    } as const
+    const mockLlmClient = {
+      chat: vi.fn().mockResolvedValue({
+        content: JSON.stringify({
+          candidateId: 'c1',
+          reasoning: '测试',
+          decisionType: 'auto_select',
+        }),
+      }),
+    }
+    const judge = new LlmAgentCandidateJudge({ llmClient: mockLlmClient })
+
+    const candidates = [
+      buildCandidate({ id: 'c1', programName: '看东方' }),
+      buildCandidate({ id: 'c2', programName: '午间新闻' }),
+    ]
+    await judge.selectBestCandidate({
+      userInput: '插入看东方',
+      playlistType: 'tv',
+      commandIntent: 'insert',
+      candidates,
+      context: {} as never,
+    })
+
+    expect(mockLlmClient.chat).toHaveBeenCalled()
+    const messages = mockLlmClient.chat.mock.calls[0]![0] as Array<{ role: string; content: string }>
+    const systemPrompt = messages.find((m) => m.role === 'system')?.content ?? ''
+    // 移除"时长适配"作为评估步骤（硬条件）
+    expect(systemPrompt).not.toMatch(/\d+\.\s*时长适配[：:]/u)
+    expect(systemPrompt).not.toContain('4. 时长适配：候选时长是否适合目标时段')
+    // 强化"无基线选最早一期"规则
+    expect(systemPrompt).toContain('无顺播基线时')
+    expect(systemPrompt).toContain('auto_select 最早一期')
+    // 标注版本号（v1.3 移除候选数量阈值）
+    expect(systemPrompt).toContain('[prompt v1.3]')
+    expect(systemPrompt).not.toContain('<= 5')
+    expect(systemPrompt).toContain('无论候选数量')
+    expect(candidateFreedomCase).toMatchObject({
+      expectedDecision: expect.any(String),
+      mustNotHappen: expect.any(String),
+      verification: expect.any(String),
+    })
+    // 明确时长适配由写入校验把关（保留引导 LLM 不要因此退回的说明）
+    expect(systemPrompt).toContain('FormalPlaylistWriteAdapter')
+    expect(systemPrompt).toContain('时长是否适配目标时段不在候选决策层评估')
+  })
 })
 
 // ============ SchedulingAgentRuntime selectCandidate 集成测试 ============
@@ -424,6 +598,94 @@ describe('SchedulingAgentRuntime selectCandidate LLM 决策分流', () => {
       },
     })
 
+    expect(result.status).toBe('needs_selection')
+    expect(result.decision?.recommendations?.length).toBeGreaterThan(0)
+  })
+
+  /**
+   * Case H1: 无基线 + 用户明确节目名 + 多期数候选 + LLM auto_select 最早一期 → executed
+   *
+   * 验证 prompt v1.1 修正后，无顺播基线场景下 LLM auto_select 最早一期，
+   * selectCandidate 透传执行，不进入 needs_selection。
+   * mustNotHappen: 不应进入 needs_selection；不应选 112/113/114。
+   */
+  it('Case H1: 无基线 + LLM auto_select 最早一期 → executed', async () => {
+    const candidates = [
+      buildCandidate({ id: 'c1', programName: '看东方', instanceName: '看东方第111期', issueNo: '0111', duration: 5400 }),
+      buildCandidate({ id: 'c2', programName: '看东方', instanceName: '看东方第112期', issueNo: '0112', duration: 5400 }),
+      buildCandidate({ id: 'c3', programName: '看东方', instanceName: '看东方第113期', issueNo: '0113', duration: 5400 }),
+      buildCandidate({ id: 'c4', programName: '看东方', instanceName: '看东方第114期', issueNo: '0114', duration: 5400 }),
+    ]
+    const mockJudge = buildMockCandidateJudge({
+      candidate: candidates[0]!,
+      reasoning: '无顺播基线，按顺播硬约束选最早一期（111期）',
+      considerations: ['顺播硬约束', '无基线选最早一期'],
+      decisionType: 'auto_select',
+    })
+    const { runtime } = buildRuntime({
+      items: [],
+      playlistType: 'tv',
+      programCandidates: candidates,
+      candidateJudge: mockJudge,
+    })
+
+    const result = await runtime.submit({
+      userInput: '在19点插入看东方',
+      channelId: 'dragon',
+      date,
+      interpretation: {
+        intent: 'insert',
+        confidence: 1,
+        source: 'test',
+        slots: { targetTime: '19:00:00', programHint: '看东方' },
+      },
+    })
+
+    expect(result.status).toBe('executed')
+    expect(result.executionResult?.committed).toBe(true)
+    expect(mockJudge.selectBestCandidate).toHaveBeenCalled()
+  })
+
+  /**
+   * Case H2: 无基线 + LLM needs_clarification → needs_selection（验证不加本地兜底）
+   *
+   * 验证 prompt v1.1 修正后，LLM 偶发不遵守"无基线选最早一期"时，
+   * selectCandidate 透传 needs_selection，本地不兜底选最早一期。
+   * mustNotHappen: 不应 auto_select（不应 executed）；不应出现本地兜底 trace。
+   */
+  it('Case H2: 无基线 + LLM needs_clarification → needs_selection（不加本地兜底）', async () => {
+    const candidates = [
+      buildCandidate({ id: 'c1', programName: '看东方', instanceName: '看东方第111期', issueNo: '0111', duration: 5400 }),
+      buildCandidate({ id: 'c2', programName: '看东方', instanceName: '看东方第112期', issueNo: '0112', duration: 5400 }),
+      buildCandidate({ id: 'c3', programName: '看东方', instanceName: '看东方第113期', issueNo: '0113', duration: 5400 }),
+      buildCandidate({ id: 'c4', programName: '看东方', instanceName: '看东方第114期', issueNo: '0114', duration: 5400 }),
+    ]
+    const mockJudge = buildMockCandidateJudge({
+      candidate: null,
+      reasoning: '候选较多，需要确认具体排哪个',
+      decisionType: 'needs_clarification',
+      candidateOptions: candidates,
+    })
+    const { runtime } = buildRuntime({
+      items: [],
+      playlistType: 'tv',
+      programCandidates: candidates,
+      candidateJudge: mockJudge,
+    })
+
+    const result = await runtime.submit({
+      userInput: '在19点插入看东方',
+      channelId: 'dragon',
+      date,
+      interpretation: {
+        intent: 'insert',
+        confidence: 1,
+        source: 'test',
+        slots: { targetTime: '19:00:00', programHint: '看东方' },
+      },
+    })
+
+    // 不加本地兜底：LLM 返回 needs_clarification 时直接透传 needs_selection
     expect(result.status).toBe('needs_selection')
     expect(result.decision?.recommendations?.length).toBeGreaterThan(0)
   })

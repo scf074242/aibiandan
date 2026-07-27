@@ -29,8 +29,20 @@ export interface ForegroundRuntimeHistoryMessage {
   workspaceKey?: string | null
 }
 
-export interface ForegroundWorkspaceMessageVisibilityInput {
+export interface ForegroundConversationMessageVisibilityInput {
   workspaceKey?: string | null
+}
+
+export const rebindUnscopedConversationToWorkspace = <T extends ForegroundRuntimeHistoryMessage>(
+  messages: T[],
+  workspaceKey: string,
+): void => {
+  if (!workspaceKey || workspaceKey === 'none') return
+  messages.forEach((message) => {
+    if (!message.workspaceKey || message.workspaceKey === 'none') {
+      message.workspaceKey = workspaceKey
+    }
+  })
 }
 
 export const buildForegroundWorkspaceIdentity = (
@@ -142,15 +154,12 @@ export const buildWorkspaceScopedRuntimeHistory = (
   return historyCandidates.slice(-(input.historyLimit ?? 6))
 }
 
-export const isForegroundWorkspaceMessageVisible = (
-  message: ForegroundWorkspaceMessageVisibilityInput,
-  currentWorkspaceKey: string | null,
+export const isForegroundConversationMessageVisible = (
+  _message: ForegroundConversationMessageVisibilityInput,
+  _currentWorkspaceKey: string | null,
 ): boolean => {
-  if (!message.workspaceKey) return !currentWorkspaceKey || currentWorkspaceKey === 'none'
-  if (!currentWorkspaceKey || currentWorkspaceKey === 'none') {
-    return message.workspaceKey === currentWorkspaceKey
-  }
-  return message.workspaceKey === currentWorkspaceKey
+  // workspaceKey 隔离业务事实和 mutation；会话线程本身始终连续可见。
+  return true
 }
 
 const buildChangedTransition = (

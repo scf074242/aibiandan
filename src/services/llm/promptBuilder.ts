@@ -1,7 +1,7 @@
 /**
  * Prompt 构建器（重构版）
  * 基于新技术方案，构建不同阶段的 LLM Prompt
- * 
+ *
  * 核心原则：
  * 1. 聚焦局部上下文（当前空窗 + 必要上下文）
  * 2. 输出结构化命令（非完整业务对象）
@@ -21,6 +21,13 @@ import type {
 } from '@/types/orchestration'
 import type { ChatMessage } from '@/types/llm'
 
+/**
+ * PromptBuilder 文件级 prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * 7 个 build 方法共享同一 prompt 基线，调用方需 import 并透传到 llmClient.chat 的 promptVersion 字段。
+ * 修订任一 build 方法的 prompt 时必须同步升版本号。
+ */
+export const PROMPT_BUILDER_VERSION = 'v1.0' as const
+
 /** Prompt 构建器 */
 export class PromptBuilder {
   /**
@@ -36,7 +43,7 @@ export class PromptBuilder {
   }): ChatMessage[] {
     const { channelId, channelName, date, gapCount, strategy } = params
 
-    const systemPrompt = `你是一位电视节目编排策略专家。
+    const systemPrompt = `[prompt ${PROMPT_BUILDER_VERSION}] 你是一位电视节目编排策略专家。
 你的职责是根据频道、日期和空窗情况，制定编排策略。
 
 策略应包括：
@@ -94,7 +101,7 @@ ${strategy ? `- 用户偏好：${JSON.stringify(strategy)}` : ''}
   }): ChatMessage[] {
     const { gap, precedingItem, followingItem, strategy, usedProgramCodes } = params
 
-    const systemPrompt = `你是一位电视节目编排助手。
+    const systemPrompt = `[prompt ${PROMPT_BUILDER_VERSION}] 你是一位电视节目编排助手。
 请为当前空窗生成候选检索条件。
 
 检索条件应包括：
@@ -167,7 +174,7 @@ ${usedProgramCodes.length > 0 ? usedProgramCodes.join(', ') : '无'}
   }): ChatMessage[] {
     const { gap, candidates, precedingItem, followingItem, strategy } = params
 
-    const systemPrompt = `你是一位电视节目编排专家。
+    const systemPrompt = `[prompt ${PROMPT_BUILDER_VERSION}] 你是一位电视节目编排专家。
 请从候选节目中选择最适合当前空窗的一项。
 
 选择标准（按优先级）：
@@ -236,7 +243,7 @@ ${followingItem ? `- 后邻节目: ${followingItem.programName} (${followingItem
   }): ChatMessage[] {
     const { validationReport, currentItems, availableCandidates, repairRound, maxRepairRounds } = params
 
-    const systemPrompt = `你是一位电视节目编排修复专家。
+    const systemPrompt = `[prompt ${PROMPT_BUILDER_VERSION}] 你是一位电视节目编排修复专家。
 当校验发现问题时，请选择合适的修复策略。
 
 可选修复策略：
@@ -306,7 +313,7 @@ ${availableCandidates.map(c => `- ${c.programName} (${this.formatDuration(c.dura
   }): ChatMessage[] {
     const { userInput, scheduleState, suggestedModes } = params
 
-    const systemPrompt = `你是一位电视节目编排助手。
+    const systemPrompt = `[prompt ${PROMPT_BUILDER_VERSION}] 你是一位电视节目编排助手。
 当用户意图不明确时，请礼貌地请求澄清。
 
 可选任务模式：
@@ -360,7 +367,7 @@ ${suggestedModes ? `【可能的意图】\n${suggestedModes.join(', ')}` : ''}
     let userPrompt = ''
 
     if (type === 'candidate_selection') {
-      systemPrompt = `你是一位电视节目编排专家。
+      systemPrompt = `[prompt ${PROMPT_BUILDER_VERSION}] 你是一位电视节目编排专家。
 请解释为什么选择某个候选节目。
 
 输出要求：
@@ -386,7 +393,7 @@ ${suggestedModes ? `【可能的意图】\n${suggestedModes.join(', ')}` : ''}
 
 请解释为什么选择这个节目。`
     } else if (type === 'validation_issue') {
-      systemPrompt = `你是一位电视节目编排专家。
+      systemPrompt = `[prompt ${PROMPT_BUILDER_VERSION}] 你是一位电视节目编排专家。
 请解释校验问题的含义和影响。
 
 输出要求：
@@ -430,7 +437,7 @@ ${suggestedModes ? `【可能的意图】\n${suggestedModes.join(', ')}` : ''}
   }): ChatMessage[] {
     const { userInput, scheduleState, history } = params
 
-    const systemPrompt = `你是一位电视节目编排系统的任务判别助手。
+    const systemPrompt = `[prompt ${PROMPT_BUILDER_VERSION}] 你是一位电视节目编排系统的任务判别助手。
 你的职责是分析用户意图和当前节目单状态，准确判断任务类型。
 
 可选任务模式：

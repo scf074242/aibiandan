@@ -56,6 +56,11 @@ export interface EditorDemandCoverageCase {
   coveredBy: string[]
   rootCauses: EditorDemandRootCause[]
   reverseInference: string
+  /** Agent Harness 五字段；新增或修订 case 必须显式填写。 */
+  userInput?: string
+  expectedDecision?: string
+  mustNotHappen?: string
+  verification?: string
 }
 
 export interface EditorDemandHarnessEngineeringRule {
@@ -268,7 +273,7 @@ export const recommendedEngineeringSkillFits: RecommendedEngineeringSkillFit[] =
   },
 ]
 
-export const editorDemandCoverageCases: EditorDemandCoverageCase[] = [
+const editorDemandCoverageCaseDrafts: EditorDemandCoverageCase[] = [
   {
     id: 'workspace-create-tv',
     category: 'workspace',
@@ -359,11 +364,16 @@ export const editorDemandCoverageCases: EditorDemandCoverageCase[] = [
     playlistModel: 'tv',
     userRequest: '草案只到下午，剩下晚上也帮我补一下思路',
     expectedDisposition: '基于已有草案给建议，允许继续补充草案信息，但不误写正式播单。',
-    supportLevel: 'partial',
-    harness: 'llm_protocol',
-    coveredBy: ['layoutDraftCompleteness.test.ts'],
-    rootCauses: ['ui_feedback_gap'],
-    reverseInference: '草案完整度判断已有，但多轮自然补草案还需要更多真实前台话术覆盖。',
+    supportLevel: 'supported',
+    harness: 'foreground_browser',
+    coveredBy: [
+      'layoutDraftCompleteness.test.ts',
+      'layoutDraftService.test.ts',
+      'demoRuntimeFacade.fullGenerateBootstrap.test.ts',
+      'Goal 37 browser scenario tv-partial-layout-suggest-refine',
+    ],
+    rootCauses: ['none'],
+    reverseInference: 'planner 读取 partial 草案上下文后决定续补；多段 refine 默认与既有草案合并，只有明确整份重写才替换。',
   },
   {
     id: 'tv-insert-column-at-time',
@@ -484,11 +494,16 @@ export const editorDemandCoverageCases: EditorDemandCoverageCase[] = [
     playlistModel: 'tv',
     userRequest: '把4点到10点全部节目删掉',
     expectedDisposition: '应批量定位时段内节目，分批确认或要求继续。',
-    supportLevel: 'partial',
-    harness: 'manual_product_gate',
-    coveredBy: ['schedulingTaskPlanCompiler.test.ts'],
-    rootCauses: ['batch_execution_limit'],
-    reverseInference: '批量框架已有，但大范围多项执行还需要前台分批继续和失败恢复体验。',
+    supportLevel: 'supported',
+    harness: 'foreground_browser',
+    coveredBy: [
+      'schedulingTaskPlanCompiler.test.ts',
+      'demoRuntimeFacade.compositeTask.test.ts',
+      'Goal 37 browser scenario tv-delete-time-range-large',
+      'Goal 37 browser scenario batch-delete-failure-can-retry',
+    ],
+    rootCauses: ['none'],
+    reverseInference: '时间范围由 LLM 结构化为 batch_delete；本地按10条分批、确认后写入，并沿 pending 保留剩余数量和失败恢复现场。',
   },
   {
     id: 'tv-batch-replace-column',
@@ -616,11 +631,16 @@ export const editorDemandCoverageCases: EditorDemandCoverageCase[] = [
     playlistModel: 'rotation',
     userRequest: '在城市宣传片后面插入一条静安区景点介绍',
     expectedDisposition: '按内容队列锚点插入，队列自然串联。',
-    supportLevel: 'partial',
-    harness: 'foreground_runtime',
-    coveredBy: ['foregroundAgentFlow.test.ts'],
-    rootCauses: ['data_realism_gap'],
-    reverseInference: '轮播队列语义可承接，但假数据对景点/区域内容不够真实，候选质量会影响体验。',
+    supportLevel: 'supported',
+    harness: 'foreground_browser',
+    coveredBy: [
+      'schedulingAgentRuntime.nlMatrix.test.ts',
+      'demoRuntimeFacade.playlistState.test.ts',
+      'Goal 37 browser scenario rotation-queue-anchor-followup-and-relative-move',
+      'canonicalSchedulingData.test.ts',
+    ],
+    rootCauses: ['none'],
+    reverseInference: 'LLM 返回队列锚点和插入语义，运行时按当前轮播项解析相对位置；景点候选来自 canonical 节目库，前台已验证直接后置插入与位置补充续接。',
   },
   {
     id: 'rotation-delete-item-queue',
@@ -652,11 +672,15 @@ export const editorDemandCoverageCases: EditorDemandCoverageCase[] = [
     playlistModel: 'rotation',
     userRequest: '做一个上海市静安区景点30小时轮播编排',
     expectedDisposition: '先生成草案并继续细化关键词、时长块和候选方向，不应马上硬排。',
-    supportLevel: 'partial',
-    harness: 'llm_protocol',
-    coveredBy: ['foregroundAgentContextPackage.test.ts', 'layoutDraftCompleteness.test.ts', 'Goal 38 browser scenario rotation-research-check-pending'],
-    rootCauses: ['data_realism_gap', 'missing_user_input'],
-    reverseInference: '真实成品库几乎无限，用户主题很宽时应先细化草案，减少选错节目概率。',
+    supportLevel: 'guarded_supported',
+    harness: 'foreground_runtime',
+    coveredBy: [
+      'demoRuntimeFacade.fullGenerateBootstrap.test.ts',
+      'canonicalSchedulingData.test.ts',
+      'Goal 37 browser scenario rotation-research-check-pending',
+    ],
+    rootCauses: ['missing_user_input'],
+    reverseInference: '主题和总时长足以生成一个不写正式播单的轮播草案；用户未给出30小时内部结构时保留单块并引导继续细化，不由本地或 mock 擅自拆成节目。',
   },
   {
     id: 'rotation-three-hour-scenic-then-padding',
@@ -664,11 +688,11 @@ export const editorDemandCoverageCases: EditorDemandCoverageCase[] = [
     playlistModel: 'rotation',
     userRequest: '先放3小时景点宣传片，再放3小时垫片',
     expectedDisposition: '形成顺序内容块草案或任务计划，确认前不写正式队列。',
-    supportLevel: 'partial',
+    supportLevel: 'supported',
     harness: 'llm_protocol',
-    coveredBy: ['schedulingTaskPlanCompiler.test.ts', 'Goal 38 browser scenario rotation-partial-draft-formal-block'],
-    rootCauses: ['atomic_capability_gap'],
-    reverseInference: 'LLM 能拆出顺序块，但执行器需要更稳定的轮播批量填充能力。',
+    coveredBy: ['demoRuntimeFacade.layoutDraft.test.ts', 'Goal 37 browser scenario rotation-partial-draft-formal-block'],
+    rootCauses: ['none'],
+    reverseInference: 'LLM 将两个3小时目标返回为有序草案块，草案编译器保留各块时长和选择策略；该需求只形成草案，确认前不启动正式批量填充。',
   },
   {
     id: 'rotation-strategy-rating',
@@ -688,11 +712,16 @@ export const editorDemandCoverageCases: EditorDemandCoverageCase[] = [
     playlistModel: 'rotation',
     userRequest: '上传这个轮播草案，按它来排',
     expectedDisposition: '上传后作为当前激活草案，确认前不写正式播单。',
-    supportLevel: 'partial',
-    harness: 'manual_product_gate',
-    coveredBy: ['layoutImportService.test.ts', 'demoRuntimeFacade.uploadedLayout.test.ts'],
-    rootCauses: ['harness_gap'],
-    reverseInference: '导入能力有测试，但真实浏览器文件上传链路仍是工具受限场景。',
+    supportLevel: 'supported',
+    harness: 'foreground_browser',
+    coveredBy: [
+      'layoutImportService.test.ts',
+      'demoRuntimeFacade.uploadedLayout.test.ts',
+      'foregroundLayoutDraft.test.ts',
+      'Goal 37 browser scenario rotation-upload-layout-xls',
+    ],
+    rootCauses: ['none'],
+    reverseInference: 'Playwright 真实上传固定 xlsx 后，前台将其激活为 carousel 上传草案；上传只更新 draft owner，不写正式播单。',
   },
   {
     id: 'draft-system-column-kind',
@@ -791,6 +820,70 @@ export const editorDemandCoverageCases: EditorDemandCoverageCase[] = [
     reverseInference: '草案和正式单是两套对象，必须由本地裁决守住边界。',
   },
   {
+    id: 'formal-pending-switches-to-draft-owner',
+    category: 'pending_context',
+    playlistModel: 'mixed',
+    userRequest: '先不确认刚才的正式删除，把草案第二段改成城市文旅',
+    expectedDisposition: '结束正式播单 pending，只更新当前草案，不执行或确认上一轮正式删除。',
+    supportLevel: 'guarded_supported',
+    harness: 'llm_protocol',
+    coveredBy: ['agentPlanner.promptVersion.test.ts', 'demoRuntimeFacade.agentPlanner.test.ts'],
+    rootCauses: ['business_guardrail'],
+    reverseInference: '跨轮目标从正式播单切到草案时，模型必须看到 pending owner 并显式开始新任务。',
+    userInput: '先不确认刚才的正式删除，把草案第二段改成城市文旅',
+    expectedDecision: 'pendingAction=start_new_task + refine_layout_draft，只更新草案',
+    mustNotHappen: '续接上一轮正式删除、写入正式播单或把草案修改解释成 atomic_command',
+    verification: 'planner prompt 包含跨 owner 规则，facade 返回 layout_draft 且旧 pending 不执行',
+  },
+  {
+    id: 'draft-pending-switches-to-formal-owner',
+    category: 'pending_context',
+    playlistModel: 'mixed',
+    userRequest: '先不更新草案，删除正式播单里9点的看东方',
+    expectedDisposition: '结束草案 pending，进入正式播单删除确认，不修改草案。',
+    supportLevel: 'guarded_supported',
+    harness: 'llm_protocol',
+    coveredBy: ['agentPlanner.promptVersion.test.ts', 'demoRuntimeFacade.agentPlanner.test.ts'],
+    rootCauses: ['business_guardrail'],
+    reverseInference: '草案待确认不能吞掉下一轮明确指向正式播单的原子命令。',
+    userInput: '先不更新草案，删除正式播单里9点的看东方',
+    expectedDecision: 'atomic_command(delete) 绑定 formal_playlist，并保持删除确认门禁',
+    mustNotHappen: '更新草案、直接删除正式节目或继续草案确认',
+    verification: 'facade 返回正式删除 needs_confirmation，currentLayoutDraft 不参与 mutation',
+  },
+  {
+    id: 'ambiguous-draft-formal-owner-clarifies',
+    category: 'guardrail',
+    playlistModel: 'mixed',
+    userRequest: '把第二段删掉',
+    expectedDisposition: '当草案段和正式节目都可能被指代时，追问目标对象。',
+    supportLevel: 'guarded_supported',
+    harness: 'llm_protocol',
+    coveredBy: ['agentPlanner.promptVersion.test.ts'],
+    rootCauses: ['business_guardrail'],
+    reverseInference: '目标 owner 不明确属于语义缺口，应让 LLM 追问，不能由本地默认选择草案或正式播单。',
+    userInput: '把第二段删掉',
+    expectedDecision: 'clarify：确认删除草案第二段还是正式播单第二条节目',
+    mustNotHappen: '默认删除草案段、默认删除正式节目或同时修改两个对象',
+    verification: 'planner v1.7 明确要求 owner 歧义时返回 clarify',
+  },
+  {
+    id: 'tv-atomic-insert-with-incomplete-draft',
+    category: 'atomic_command',
+    playlistModel: 'tv',
+    userRequest: '草案还没做完，9点插入看东方',
+    expectedDisposition: '忽略草案完整度，按正式播单原子插入处理；信息不足时只追问原子槽位。',
+    supportLevel: 'guarded_supported',
+    harness: 'llm_protocol',
+    coveredBy: ['agentPlanner.promptVersion.test.ts', 'demoRuntimeFacade.agentPlanner.test.ts'],
+    rootCauses: ['business_guardrail'],
+    reverseInference: '草案是整体编排依据，不是正式播单原子命令的前置门禁。',
+    userInput: '草案还没做完，9点插入看东方',
+    expectedDecision: 'atomic_command(insert) 绑定 formal_playlist；槽位完整时执行，缺槽位时澄清',
+    mustNotHappen: '补草案、提交草案、启动整体编排或因草案不完整拒绝原子插入',
+    verification: 'planner v1.8 明确解耦草案完整度，facade 原子 case 不返回 layout_draft/layout_commit/orchestration',
+  },
+  {
     id: 'live-llm-chain-coverage',
     category: 'configuration',
     playlistModel: 'mixed',
@@ -827,6 +920,25 @@ export const editorDemandCoverageCases: EditorDemandCoverageCase[] = [
     reverseInference: '外部访问方应是消费者，当前重点仍是前台可用性和稳定服务边界。',
   },
 ]
+
+/**
+ * 编排员矩阵沿用历史字段保存业务语义；导出前统一补齐 Agent Harness 的五个核心字段，
+ * 让矩阵 case 与 agent 行为 case 可以使用同一套门禁检查，而不丢失原有 coveredBy 证据。
+ */
+export type EditorDemandHarnessCase = EditorDemandCoverageCase & {
+  userInput: string
+  expectedDecision: string
+  mustNotHappen: string
+  verification: string
+}
+
+export const editorDemandCoverageCases: EditorDemandHarnessCase[] = editorDemandCoverageCaseDrafts.map((item) => ({
+  ...item,
+  userInput: item.userInput ?? item.userRequest,
+  expectedDecision: item.expectedDecision ?? item.expectedDisposition,
+  mustNotHappen: item.mustNotHappen ?? item.reverseInference,
+  verification: item.verification ?? (item.coveredBy.length ? item.coveredBy.join(', ') : '由人工产品门槛验证'),
+}))
 
 export const summarizeEditorDemandCoverage = (cases: readonly EditorDemandCoverageCase[]) => {
   const bySupport = cases.reduce<Record<EditorDemandSupportLevel, number>>((summary, item) => {

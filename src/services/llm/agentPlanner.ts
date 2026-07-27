@@ -13,6 +13,26 @@ import type { ReactTaskPlannerDraft } from '@/services/runtime/reactTaskTypes'
 import type { RuntimeScheduleItem } from '@/services/runtime/demoRuntimeFacade'
 import type { LLMClient } from './llmClient'
 import { buildLlmFailureInfo } from './llmFailure'
+import { STAGE_TIMEOUT_BUDGET, type AgentDeadline } from '@/services/agent/agentDeadline'
+import type { AgentLlmStreamObserver } from '@/services/agent/agentLlmStreaming'
+import type { MutationPolicy } from '@/services/agent/mutationPolicy'
+import type { AgentPendingAction } from '@/services/agent/types'
+
+/**
+ * agentPlanner prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本
+ * - v1.1：formal_orchestration action 直接返回 taskKind / targetTimeRange / searchKeywords，禁止本地语义回填
+ * - v1.2：formal_orchestration 同时返回结构化 reactTask，正式长流程进入真 ReAct runtime
+ * - v1.3：atomic_command 显式返回 pendingAction，禁止本地关键词猜测确认/取消
+ * - v1.4：formal rebuild pending 透传原动作结构，确认轮显式返回匹配的 confirmExistingRebuild
+ * - v1.5：formal ReAct 首批 research_check 必须携带 LLM 提供的非空查询或语义标签
+ * - v1.6：formal_orchestration / commit_layout_draft 正式执行必须携带 reactTask，禁止回退旧编排器
+ * - v1.7：显式区分草案与正式播单 owner，并约束跨轮 pending 切换
+ * - v1.8：明确草案完整度不阻断正式播单原子命令，缺槽位时保持原子 owner 追问
+ * - v1.9：补充正式编排语义、重编确认与首批 research_check 契约
+ * - v1.10：有顺序依赖的多动作必须进入 ReAct，禁止并列 action 被本地盲目串行执行
+ */
+export const AGENT_PLANNER_PROMPT_VERSION = 'v1.10' as const
 
 export type AgentPlannerAtomicIntent = 'move' | 'insert' | 'replace' | 'delete' | 'batch_move' | 'batch_delete' | 'query' | 'validate'
 
@@ -43,12 +63,16 @@ export type AgentPlannerAction =
   | {
       type: 'formal_orchestration'
       mode: Extract<TaskMode, 'full_generate' | 'partial_generate'>
+      taskKind: 'full_day' | 'overall_refill' | 'local_refill'
       useLayoutDraft?: boolean
       targetTimeRange?: { start: string; end: string }
+      searchKeywords?: string[]
+      confirmExistingRebuild?: boolean
     }
   | {
       type: 'atomic_command'
       intent?: AgentPlannerAtomicIntent
+      pendingAction?: AgentPendingAction
       targetTime?: string
       newStartTime?: string
       rangeStart?: string
@@ -62,6 +86,7 @@ export type AgentPlannerAction =
       targetProgramName?: string
       keyword?: string
       searchAlternatives?: string[]
+      mutationPolicy?: MutationPolicy
     }
   | {
       type: 'read_only_analysis'
@@ -98,6 +123,7 @@ export interface AgentPlannerInput {
 
 export interface AgentPlan {
   mode?: AgentPlanMode
+  pendingAction?: AgentPendingAction
   actions: AgentPlannerAction[]
   reactTask?: ReactTaskPlannerDraft<AgentPlannerAction>
   assistantReplyDraft?: string
@@ -152,10 +178,16 @@ const buildPlannerForegroundContext = (contextPackage?: ForegroundAgentContextPa
     review: contextPackage.review
       ? {
           kind: contextPackage.review.kind,
+          owner: contextPackage.review.owner,
+          phase: contextPackage.review.phase,
+          pendingId: contextPackage.review.pendingId,
           action: contextPackage.review.action,
           summary: contextPackage.review.summary,
+          allowedResponses: contextPackage.review.allowedResponses,
+          formalRebuild: contextPackage.review.formalRebuild,
         }
       : null,
+    pending: contextPackage.pending,
     activeReactTask: contextPackage.reactTask.active || contextPackage.reactTask.recovery?.canRetry
       ? contextPackage.reactTask
       : null,
@@ -182,7 +214,7 @@ const normalizeSegment = (value: unknown): LayoutIntentSegment | null => {
   }
 }
 
-const normalizeAction = (value: unknown): AgentPlannerAction | null => {
+export const normalizeAgentPlannerAction = (value: unknown): AgentPlannerAction | null => {
   if (!isRecord(value) || typeof value.type !== 'string') return null
   if (value.type === 'create_playlist') {
     const playlistType = value.playlistType === 'tv' || value.playlistType === 'rotation'
@@ -239,11 +271,33 @@ const normalizeAction = (value: unknown): AgentPlannerAction | null => {
     }
   }
   if (value.type === 'formal_orchestration') {
+    const mode = value.mode === 'full_generate' || value.mode === 'partial_generate'
+      ? value.mode
+      : null
+    const taskKind = value.taskKind === 'full_day'
+      || value.taskKind === 'overall_refill'
+      || value.taskKind === 'local_refill'
+      ? value.taskKind
+      : null
+    const hasConsistentTaskKind = mode === 'full_generate'
+      ? taskKind === 'full_day'
+      : taskKind === 'overall_refill' || taskKind === 'local_refill'
+    if (!mode || !taskKind || !hasConsistentTaskKind) return null
+    const searchKeywords = Array.isArray(value.searchKeywords)
+      ? value.searchKeywords
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 8)
+      : undefined
     return {
       type: 'formal_orchestration',
-      mode: value.mode === 'partial_generate' ? 'partial_generate' : 'full_generate',
+      mode,
+      taskKind,
       useLayoutDraft: value.useLayoutDraft === true,
       targetTimeRange: normalizeTimeRange(value.targetTimeRange),
+      searchKeywords,
+      confirmExistingRebuild: value.confirmExistingRebuild === true,
     }
   }
   if (value.type === 'atomic_command') {
@@ -269,6 +323,15 @@ const normalizeAction = (value: unknown): AgentPlannerAction | null => {
     return {
       type: 'atomic_command',
       intent,
+      pendingAction: typeof value.pendingAction === 'string' && [
+        'start_new_task',
+        'cancel_pending',
+        'select_candidate',
+        'confirm',
+        'reject',
+      ].includes(value.pendingAction)
+        ? value.pendingAction as AgentPendingAction
+        : undefined,
       targetTime: normalizeClock(value.targetTime),
       newStartTime: normalizeClock(value.newStartTime),
       rangeStart: normalizeClock(value.rangeStart),
@@ -282,6 +345,9 @@ const normalizeAction = (value: unknown): AgentPlannerAction | null => {
       targetProgramName: typeof value.targetProgramName === 'string' ? value.targetProgramName.trim() : undefined,
       keyword: typeof value.keyword === 'string' ? value.keyword.trim() : undefined,
       searchAlternatives,
+      mutationPolicy: value.mutationPolicy === 'preview_only' || value.mutationPolicy === 'pending_only' || value.mutationPolicy === 'formal_write'
+        ? value.mutationPolicy
+        : undefined,
     }
   }
   if (value.type === 'validate' || value.type === 'read_only_analysis') {
@@ -334,7 +400,7 @@ const normalizeReactTask = (value: unknown): ReactTaskPlannerDraft<AgentPlannerA
       ? value.actions
       : []
   const nextActions = rawActions
-    .map(normalizeAction)
+    .map(normalizeAgentPlannerAction)
     .filter((item): item is AgentPlannerAction => Boolean(item))
   if (!nextActions.length) return undefined
   const objective = typeof value.objective === 'string' && value.objective.trim()
@@ -352,17 +418,58 @@ const normalizeReactTask = (value: unknown): ReactTaskPlannerDraft<AgentPlannerA
 export class AgentPlanner {
   constructor(private llmClient: LLMClient) {}
 
-  async plan(input: AgentPlannerInput): Promise<AgentPlan> {
+  async plan(input: AgentPlannerInput, deadline?: AgentDeadline, onStreamEvent?: AgentLlmStreamObserver): Promise<AgentPlan> {
+    const startedAt = Date.now()
+    let sequence = 0
+    let receivedChars = 0
+    let firstTokenLatencyMs: number | undefined
     try {
+      // deadline 接入：stage timeout 从 deadline 剩余预算推导，signal 联动底层 fetch 中止
+      const stageTimeout = deadline?.stageTimeoutMs(STAGE_TIMEOUT_BUDGET.candidate_search) ?? STAGE_TIMEOUT_BUDGET.candidate_search
       const response = await this.llmClient.chat(this.buildPrompt(input), {
         temperature: 0.2,
         maxTokens: 1100,
-        timeout: 30000,
+        timeout: stageTimeout,
         maxRetries: 1,
         traceLabel: 'agent_planner',
+        promptVersion: AGENT_PLANNER_PROMPT_VERSION,
+        ...(deadline ? { signal: deadline.signal() } : {}),
+        onToken: (_delta, meta) => {
+          receivedChars = meta.receivedChars
+          firstTokenLatencyMs = meta.firstTokenLatencyMs
+          onStreamEvent?.({
+            stage: 'planner',
+            kind: meta.index === 0 ? 'first_token' : 'token_delta',
+            sequence: sequence++,
+            receivedChars,
+            elapsedMs: meta.elapsedMs,
+            firstTokenLatencyMs,
+          })
+        },
       })
-      return this.parsePlan(response.content)
+      const plan = this.parsePlan(response.content)
+      // 浏览器 mock 可能只返回完整内容而不产生 token；没有真实流事件时不插入
+      // “结构完成”进度，避免改变原有计划说明的展示顺序。
+      if (sequence > 0) {
+        onStreamEvent?.({
+          stage: 'planner',
+          kind: plan.llmFailure ? 'structured_invalid' : 'structured_complete',
+          sequence: sequence++,
+          receivedChars: receivedChars || response.content.length,
+          elapsedMs: Date.now() - startedAt,
+          firstTokenLatencyMs,
+        })
+      }
+      return plan
     } catch (error) {
+      onStreamEvent?.({
+        stage: 'planner',
+        kind: 'structured_invalid',
+        sequence: sequence++,
+        receivedChars,
+        elapsedMs: Date.now() - startedAt,
+        firstTokenLatencyMs,
+      })
       return {
         actions: [],
         llmFailure: buildLlmFailureInfo('agent_planning', error),
@@ -394,7 +501,7 @@ export class AgentPlanner {
     return [
       {
         role: 'system',
-        content: this.buildSystemInstructions(input).join('\n'),
+        content: `[prompt ${AGENT_PLANNER_PROMPT_VERSION}] ${this.buildSystemInstructions(input).join('\n')}`,
       },
       {
         role: 'user',
@@ -441,11 +548,24 @@ export class AgentPlanner {
 
   private buildCorePlannerPolicy(): string[] {
     return [
+      'formal_orchestration 是长流程控制动作，必须同时返回顶层 mode:"react" 和 reactTask；actions 中保留 formal_orchestration 用于 bootstrap 与业务语义，reactTask.nextActions 给出第一批实际动作，本地不会替你生成第一步。',
+      'commit_layout_draft 会启动正式编排时同样是长流程控制动作，也必须同时返回顶层 mode:"react" 和 reactTask；不能只返回 commit_layout_draft 让本地旧编排器补做后续。',
+      '正式编排 reactTask.nextActions 的第一批只能包含 research_check、validate 等可观察动作。观察之后再由 decide 决定是否进入 atomic_command；atomic_command 必须显式携带 mutationPolicy（preview_only / pending_only / formal_write），不得依赖本地默认值。',
+      '只有用户本轮是在确认当前 formal rebuild pending 时，formal_orchestration action 才返回 confirmExistingRebuild:true；首次发起或没有对应 pending 时不得返回。',
+      '当 foregroundContext.review.kind="formal_rebuild" 且用户本轮确认时，必须复用 review.formalRebuild 的 actionKind、mode、useLayoutDraft：actionKind="formal_orchestration" 时返回顶层 mode:"react"、匹配 mode/useLayoutDraft 的 formal_orchestration action、confirmExistingRebuild:true 和 reactTask；actionKind="commit_layout_draft" 时返回匹配 mode 的 commit_layout_draft。不要再次发起一个未确认的新重编请求。',
       '你是 AI 编审助手的 LLM planner。你的任务是理解编排员的自然语言，并返回一个可执行的多动作计划。',
       '不要把一句话压成单个分类。用户一句话可能同时包含：创建播单、生成草案、细分内容块、只读分析、正式编排、原子修改。',
+      '多动作输出有严格边界：只有“创建播单并生成对应草案”可以在 single 模式返回两个 actions；多个原子动作、查询后再写入、先查证再修改等有顺序依赖的任务必须返回 mode:"react" + reactTask，由每轮 observation 后重新 decide，不要在 single actions 中并列返回后期待本地串行执行。',
       '本地系统只负责安全裁决和执行；你负责理解业务意图、拆动作、生成草案结构。',
       '上一轮候选、缺参或确认信息会作为上下文提供给你；普通自然语言追问、选择和修正都由你结合上下文理解，不要假设本地会用关键词替你续接。',
+      'assistantReplyDraft 必须承接当前上下文并给出下一步引导：说明“我正在做什么/已完成什么/下一步会做什么”，但不得承诺尚未通过候选、业务门禁或正式写入校验的结果。',
+      '当前存在 pending 且用户在确认、取消、拒绝或开始新任务时，atomic_command 必须显式返回 pendingAction（confirm / cancel_pending / reject / start_new_task）和与 pending 一致的 intent。本地不会从“确认”“继续”等文字猜测。',
+      '如果新任务不是 atomic_command（例如 read_only_analysis 或草案操作），但需要结束当前 pending，在 AgentPlan 顶层返回 pendingAction:"start_new_task"。本地只依据该结构化字段处置 pending。',
+      'foregroundContext.pending.owner 明确表示当前 pending 属于 layout_draft 还是 formal_playlist。用户本轮明确切换 owner 时，必须结束旧 pending：非 atomic 新任务在顶层返回 pendingAction:"start_new_task"；atomic 新任务在 atomic_command 中返回 pendingAction:"start_new_task"。不得把上一 owner 的槽位、候选或确认复用到新 owner。',
+      '如果草案和正式播单同时存在，而“第二段”“那条”“删掉这个”等指代无法判断目标属于草案还是正式播单，返回 clarify 追问目标对象；不要默认选择任一 owner。',
       '当你返回 atomic_command 时，如果你已经从本轮或历史上下文理解到动作、时间/队列位置、节目线索、替换线索或候选选择，必须写入 action 字段：intent、targetTime、programHint、replacementHint、candidateId、targetItemId、targetProgramName、searchAlternatives 等。不要只返回 {"type":"atomic_command"} 后让下一层重新猜。',
+      '当你返回 formal_orchestration 时，必须直接给出 mode、taskKind、useLayoutDraft、targetTimeRange 和 searchKeywords；本地不会再从用户原话猜这些语义。taskKind 只能是 full_day / overall_refill / local_refill：全天重编用 full_day，补齐整张播单的全部空窗用 overall_refill，指定时段或局部范围补排用 local_refill。',
+      'formal_orchestration 的 mode 与 taskKind 必须一致：full_generate 只能搭配 full_day；partial_generate 只能搭配 overall_refill 或 local_refill。local_refill 应给出 targetTimeRange；没有明确关键词时 searchKeywords 返回空数组，不要编造。',
       '多轮补充也一样：如果上一轮是“插入上海景点宣传片”且系统追问位置，用户本轮说“队列最开始”，应返回 {"type":"atomic_command","intent":"insert","targetTime":"00:00:00","programHint":"上海市景点相关的宣传片"}。轮播单队列开头用 targetTime:"00:00:00" 表示。',
       '如果用户是在问“整体怎么样/怎么优化”，返回 read_only_analysis，除非用户明确确认更新草案。',
       '只返回 JSON，不要 Markdown。',
@@ -474,6 +594,7 @@ export class AgentPlanner {
     if (playlistType === 'tv') {
       return [
         '当前工作区是电视播单。电视播单是时间格子，电视草案里的栏目/时段可帮助定位正式播单的编排位置。',
+        '已打开电视播单时，正式播单的插入、删除、移动、替换与草案完整度无关：即使草案为空或只完成一部分，也必须保持 atomic_command；信息完整时进入原子执行链，缺少时间、节目或目标时进入原子补参/候选澄清，不能改成 refine_layout_draft、commit_layout_draft 或 formal_orchestration。',
         '如果用户说“填入/排入/插入/编排/放到播单里”，默认是正式播单动作，应返回 atomic_command；如果他说“在某栏目/某草案格子里填入期数最大的一期”，也应返回 atomic_command，并让本地借当前草案定位栏目或时段。',
         '例如当前电视草案有“东方快报”时，用户说“在东方快报里，帮我找到期数最大的一期填入”，这是正式编排请求，应返回 atomic_command，并写出 intent:"insert"、targetTime:"06:00:00"（如果 currentDraft 能定位到该栏目开始时间）、targetProgramName:"东方快报"、programHint:"东方快报 期数最大"、searchAlternatives:["东方快报 期数最大","东方快报 最新一期","东方快报"]。不要返回 research_check，也不要说已更新草案。',
         '如果用户是插入、删除、移动、替换、查询、校验等原子或复合操作，返回 atomic_command 或 validate，让本地原子能力继续处理。',
@@ -485,9 +606,11 @@ export class AgentPlanner {
   private buildDraftPlannerPolicy(input: { playlistType: PlaylistType; hasDraft: boolean }): string[] {
     const base = [
       '“草案查证/草案改写”和“正式填入节目”必须分清。只有用户明确说“更新草案/改草案/调整版面草案/写到草案”时，才把结果停留在 refine_layout_draft 或 draft_precheck。',
+      '用户明确操作草案段、草案块、版面时，即使使用“插入、删除、移动、替换”等原子动词，也属于 layout_draft owner：返回 refine_layout_draft，并用 segments 表达更新后的草案结构；不得返回 formal playlist 的 atomic_command。',
+      '用户明确操作正式播单、编排单、串联单或已有正式节目时，属于 formal_playlist owner：返回 atomic_command；草案只能作为定位参考，不能被修改。',
       '用户给出第一小时/第二小时/每条10分钟/拆成N条/分三段等结构时，必须在 prepare_layout_draft 或 refine_layout_draft 中返回 segments。',
       '如果用户要求“先看看/核验/找最火/最近三年/有没有素材/查一下成品库/这个草案块选什么”，返回 research_check。research_check 只负责让本地查草案和素材库，不会改草案，也不会写正式节目。',
-      'research_check 应由你给出 targetSegmentIndex 或 targetSegmentLabel、semanticLabel 和 queries；不要让本地猜策划内容。',
+      'research_check 应由你给出 targetSegmentIndex 或 targetSegmentLabel、semanticLabel 和非空 queries；queries 或语义标签至少一项必须可直接检索，不要让本地猜策划内容，也不要返回 queries:[]。',
     ]
     if (!input.hasDraft) return base
     return [
@@ -522,6 +645,7 @@ export class AgentPlanner {
     const examples = [
       'JSON 形状：{"mode":"single","actions":[{"type":"create_playlist","playlistType":"rotation","rotationStrategy":"content_match","rotationDurationSeconds":3600},{"type":"prepare_layout_draft","rotationDurationSeconds":3600,"semanticLabel":"世界杯亚洲球队介绍","segments":[{"start":"00:00:00","end":"00:15:00","semanticLabel":"中国队介绍","programTypeHint":"news_magazine"}]}],"assistantReplyDraft":"...","reasoning":"..."}',
       '原子槽位示例：{"mode":"single","actions":[{"type":"atomic_command","intent":"insert","targetTime":"00:00:00","programHint":"上海市景点相关的宣传片","searchAlternatives":["上海景点宣传片","上海文旅宣传片","上海地标短片"]}],"assistantReplyDraft":"我会按轮播队列开头继续找上海景点相关宣传片候选。","reasoning":"用户补充了上一轮缺少的插入位置。"}',
+      '正式重编确认示例：当 foregroundContext.review={"kind":"formal_rebuild","formalRebuild":{"actionKind":"formal_orchestration","mode":"full_generate","useLayoutDraft":true}} 且用户确认时，返回 {"mode":"react","actions":[{"type":"formal_orchestration","mode":"full_generate","taskKind":"full_day","useLayoutDraft":true,"searchKeywords":["东方卫视 当前版面 栏目候选"],"confirmExistingRebuild":true}],"reactTask":{"objective":"按当前草案重新编排正式播单","maxTurns":5,"batchSize":5,"stopCondition":"完成目标范围并通过最终校验","nextActions":[{"type":"research_check","purpose":"candidate_precheck","semanticLabel":"按当前版面草案检索各栏目候选","queries":["东方卫视 当前版面 栏目候选"]}]},"assistantReplyDraft":"我会先查节目库并逐批校验。","reasoning":"用户确认当前待处理的正式重编。"}',
     ]
     if (input.playlistType === 'tv') {
       examples.push('电视草案定位示例：{"mode":"single","actions":[{"type":"atomic_command","intent":"insert","targetTime":"06:00:00","targetProgramName":"东方快报","programHint":"东方快报 期数最大","searchAlternatives":["东方快报 期数最大","东方快报 最新一期","东方快报"]}],"assistantReplyDraft":"我会按草案里的东方快报栏目定位时段，再按期数最大的要求去筛节目，确认可用后写入正式播单。","reasoning":"用户是在电视草案栏目里要求正式填入节目，不是修改草案。"}')
@@ -529,6 +653,7 @@ export class AgentPlanner {
     if (input.hasDraft) {
       examples.push('草案块名称微调示例：{"mode":"single","actions":[{"type":"refine_layout_draft","targetSegmentIndex":10,"targetSegmentLabel":"亚洲队10介绍","semanticLabel":"中国队介绍"}],"assistantReplyDraft":"我会把第10段从亚洲队10介绍调整为中国队介绍，只更新草案，不写正式节目。","reasoning":"用户按草案块名称提出局部微调。"}')
     }
+    examples.push('正式编排示例：{"mode":"react","actions":[{"type":"formal_orchestration","mode":"partial_generate","taskKind":"overall_refill","useLayoutDraft":false,"searchKeywords":["新闻","纪录片"]}],"reactTask":{"objective":"补齐当前播单的全部空窗","maxTurns":5,"batchSize":3,"stopCondition":"所有目标空窗完成或暴露无法填充原因","nextActions":[{"type":"research_check","purpose":"candidate_precheck","queries":["新闻","纪录片"]}]},"assistantReplyDraft":"我会先查节目库，再逐批补齐当前空窗。","reasoning":"用户要求整体补空，不是指定时段的局部补排。"}')
     if (input.playlistType !== 'tv') {
       examples.push('ReAct 示例：{"mode":"react","actions":[],"reactTask":{"objective":"先核验金山区热门景点素材，再更新草案方向","maxTurns":3,"batchSize":5,"stopCondition":"素材方向明确后更新草案，不直接写正式播单","nextActions":[{"type":"research_check","purpose":"candidate_precheck","targetSegmentIndex":1,"semanticLabel":"金山区最近三年热门景点","programTypeHint":"documentary","queries":["金山区 近三年 热门景点 宣传片","金山 乐高乐园 景点 宣传片"]}]},"assistantReplyDraft":"我先核一下素材库，再把可用方向整理到草案里。正式播单不会被写入。","reasoning":"用户要求先查证再处理草案。"}')
     }
@@ -551,12 +676,21 @@ export class AgentPlanner {
         .find(Boolean)
       const actions = rawActions
         .filter((item) => !(isRecord(item) && item.type === 'react_task'))
-        .map(normalizeAction)
+        .map(normalizeAgentPlannerAction)
         .filter((item): item is AgentPlannerAction => Boolean(item))
       const reactTask = normalizeReactTask(parsed.reactTask) ?? legacyReactTask
       const mode: AgentPlanMode = parsed.mode === 'react' || reactTask ? 'react' : 'single'
       return {
         mode,
+        pendingAction: typeof parsed.pendingAction === 'string' && [
+          'start_new_task',
+          'cancel_pending',
+          'select_candidate',
+          'confirm',
+          'reject',
+        ].includes(parsed.pendingAction)
+          ? parsed.pendingAction as AgentPendingAction
+          : undefined,
         actions,
         reactTask,
         assistantReplyDraft: typeof parsed.assistantReplyDraft === 'string' ? parsed.assistantReplyDraft.trim() : undefined,

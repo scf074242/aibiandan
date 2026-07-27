@@ -65,6 +65,10 @@ describe('editor demand coverage matrix', () => {
       expect(item.userRequest.trim(), `${item.id} userRequest`).not.toBe('')
       expect(item.expectedDisposition.trim(), `${item.id} expectedDisposition`).not.toBe('')
       expect(item.reverseInference.trim(), `${item.id} reverseInference`).not.toBe('')
+      expect(item.userInput.trim(), `${item.id} userInput`).not.toBe('')
+      expect(item.expectedDecision.trim(), `${item.id} expectedDecision`).not.toBe('')
+      expect(item.mustNotHappen.trim(), `${item.id} mustNotHappen`).not.toBe('')
+      expect(item.verification.trim(), `${item.id} verification`).not.toBe('')
       expect(allowedHarnesses).toContain(item.harness)
       expect(allowedPlaylistModels).toContain(item.playlistModel)
       expect(allowedSupportLevels).toContain(item.supportLevel)
@@ -117,17 +121,26 @@ describe('editor demand coverage matrix', () => {
   it('keeps current support high while exposing why special logic still exists', () => {
     const summary = summarizeEditorDemandCoverage(editorDemandCoverageCases)
     const rootCauseKeys = Object.keys(summary.byRootCause) as EditorDemandRootCause[]
+    const remainingPartialIds = editorDemandCoverageCases
+      .filter((item) => item.supportLevel === 'partial')
+      .map((item) => item.id)
+      .sort()
 
     expect(summary.supportedNow).toBeGreaterThanOrEqual(37)
     expect(summary.supportedNowRatio).toBeGreaterThanOrEqual(0.8)
-    expect(summary.bySupport.partial).toBeGreaterThanOrEqual(6)
+    expect(remainingPartialIds).toEqual([
+      'live-llm-chain-coverage',
+    ])
     expect(summary.bySupport.not_yet).toBe(2)
 
     expect(rootCauseKeys).toContain('business_guardrail')
     expect(rootCauseKeys).toContain('candidate_ambiguity')
-    expect(rootCauseKeys).toContain('data_realism_gap')
-    expect(rootCauseKeys).toContain('atomic_capability_gap')
-    expect(rootCauseKeys).toContain('batch_execution_limit')
+    expect(rootCauseKeys).not.toContain('data_realism_gap')
+    expect(rootCauseKeys).not.toContain('atomic_capability_gap')
+    expect(rootCauseKeys).toContain('missing_user_input')
+    expect(rootCauseKeys).not.toContain('batch_execution_limit')
+    expect(rootCauseKeys).not.toContain('ui_feedback_gap')
+    expect(rootCauseKeys).toContain('harness_gap')
     expect(rootCauseKeys).toContain('public_access_gap')
   })
 
@@ -235,7 +248,7 @@ describe('editor demand coverage matrix', () => {
     expect(agentRulesDoc).toContain('轮播单是内容队列里的编排')
     expect(agentRulesDoc).toContain('pending 像 Codex 审查')
     expect(agentRulesDoc).toContain('草案和正式播单默认独立')
-    expect(agentRulesDoc).toContain('OpenClaw 只是外部访问方')
+    expect(agentRulesDoc).toContain('外部访问方')
     expect(agentRulesDoc).toContain('需求 case -> 业务边界 -> 实现 -> 验证 -> 根因归类')
     expect(agentRulesDoc).toContain('playwright')
     expect(agentRulesDoc).toContain('security-threat-model')

@@ -1,4 +1,5 @@
 import { SchedulingAgentRuntime } from './schedulingAgentRuntime'
+import type { AgentDeadline } from './agentDeadline'
 import type {
   AgentIntentInterpreter,
   AgentResult,
@@ -95,9 +96,14 @@ export interface AgentLlmRuntimeConversationEvaluationReport {
   results: AgentLlmRuntimeConversationCaseResult[]
 }
 
+export interface AgentLlmRuntimeEvaluationOptions {
+  createDeadline?: () => AgentDeadline
+}
+
 export const evaluateAgentLlmRuntimeCases = async (
   interpreter: AgentIntentInterpreter,
   cases: AgentLlmRuntimeEvaluationCase[],
+  options: AgentLlmRuntimeEvaluationOptions = {},
 ): Promise<AgentLlmRuntimeEvaluationReport> => {
   const results: AgentLlmRuntimeEvaluationCaseResult[] = []
 
@@ -110,7 +116,7 @@ export const evaluateAgentLlmRuntimeCases = async (
     const result = await runtime.submit({
       ...testCase.input,
       userInput: testCase.userInput,
-    })
+    }, options.createDeadline?.())
     const failures = await evaluateRuntimeResult(testCase.expected, testCase.input, result, dataGateway)
     results.push({
       id: testCase.id,
@@ -137,6 +143,7 @@ export const evaluateAgentLlmRuntimeCases = async (
 export const evaluateAgentLlmRuntimeConversationCases = async (
   interpreter: AgentIntentInterpreter,
   cases: AgentLlmRuntimeConversationCase[],
+  options: AgentLlmRuntimeEvaluationOptions = {},
 ): Promise<AgentLlmRuntimeConversationEvaluationReport> => {
   const results: AgentLlmRuntimeConversationCaseResult[] = []
 
@@ -155,7 +162,7 @@ export const evaluateAgentLlmRuntimeConversationCases = async (
         ...testCase.input,
         userInput: turn.userInput,
         pendingTask,
-      })
+      }, options.createDeadline?.())
       turnResults.push(result)
       failures.push(
         ...(await evaluateRuntimeResult(turn.expected, testCase.input, result, dataGateway))
@@ -218,10 +225,19 @@ const collectLlmUsage = (results: AgentResult[]): {
   llmCallsFailed: number
 } => results.reduce((summary, result) => {
   const usage = result.decision.auditSummary?.llmUsage
+  const traceCalls = usage ? undefined : result.trace
+    .map((step) => step.detail?.llmCall)
+    .filter((call): call is Record<string, unknown> => Boolean(call) && typeof call === 'object')
   return {
-    llmCallsAttempted: summary.llmCallsAttempted + (usage?.callsAttempted ?? 0),
-    llmCallsSucceeded: summary.llmCallsSucceeded + (usage?.callsSucceeded ?? 0),
-    llmCallsFailed: summary.llmCallsFailed + (usage?.callsFailed ?? 0),
+    llmCallsAttempted: summary.llmCallsAttempted + (
+      usage?.callsAttempted ?? traceCalls?.filter((call) => call.status === 'attempted').length ?? 0
+    ),
+    llmCallsSucceeded: summary.llmCallsSucceeded + (
+      usage?.callsSucceeded ?? traceCalls?.filter((call) => call.status === 'succeeded').length ?? 0
+    ),
+    llmCallsFailed: summary.llmCallsFailed + (
+      usage?.callsFailed ?? traceCalls?.filter((call) => call.status === 'failed').length ?? 0
+    ),
   }
 }, {
   llmCallsAttempted: 0,

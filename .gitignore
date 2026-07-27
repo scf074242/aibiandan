@@ -37,5 +37,20 @@ coverage
 # Vitest
 __screenshots__/
 
+# Local agent/browser debugging artifacts
+/atomic-fail*.json
+/recoverable*.json
+/recoverable*.txt
+/goal37-debug-*.json
+/t.json
+/test.json
+/tmp-*
+/modify_llmClient.mjs
+/scripts/debug*
+/scripts/patch*
+/scripts/update_*
+/scripts/create_formal_orchestration.py
+/test-results/*.png
+
 # Vite
 *.timestamp-*-*.mjs

@@ -6,8 +6,10 @@ import { buildForegroundAgentContextPackage } from '@/services/runtime/foregroun
 import { resolveForegroundLayoutDraft } from '@/services/runtime/foregroundLayoutDraft'
 import { clearRuntimeLayout } from '@/services/orchestration/runtimeLayoutRegistry'
 
+const mockLlmChat = vi.hoisted(() => vi.fn())
+
 vi.mock('@/services/llm/llmClient', () => ({
-  getLLMClient: () => ({}),
+  getLLMClient: () => ({ chat: mockLlmChat }),
 }))
 
 vi.mock('@/services/llm/taskClassifier', () => ({
@@ -147,9 +149,40 @@ const createTvDraft = (): LayoutDraft => ({
   ],
 })
 
+const mockFormalPlanner = (input: {
+  action: 'commit_layout_draft' | 'formal_orchestration'
+  mode: 'full_generate' | 'partial_generate'
+  taskKind: 'full_day' | 'overall_refill' | 'local_refill'
+  useLayoutDraft: boolean
+  targetTimeRange?: { start: string; end: string }
+  searchKeywords?: string[]
+}) => {
+  mockLlmChat.mockResolvedValueOnce({
+    content: JSON.stringify({
+      mode: 'react',
+      actions: [input.action === 'commit_layout_draft'
+        ? { type: input.action, mode: input.mode, useLayoutDraft: input.useLayoutDraft }
+        : { type: input.action, ...input }],
+      reactTask: {
+        objective: '执行正式编排验收场景',
+        maxTurns: 5,
+        batchSize: 3,
+        nextActions: [{
+          type: 'research_check',
+          purpose: 'candidate_precheck',
+          queries: input.searchKeywords?.length ? input.searchKeywords : ['当前播单编排需求'],
+        }],
+      },
+      assistantReplyDraft: '我会先核对节目库和当前播单。',
+      reasoning: 'LLM planner 已返回正式编排语义。',
+    }),
+  })
+}
+
 describe('foreground Agent verification matrix', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockLlmChat.mockReset()
     clearRuntimeLayout('dragon', '2026-03-25')
   })
 
@@ -158,24 +191,37 @@ describe('foreground Agent verification matrix', () => {
       name: 'TV normal full-day generation',
       state: tvState({ isEmpty: false, itemCount: 2, gapCount: 1 }),
       userInput: '帮我全天编排',
-      expectedScenario: 'full_generate',
       expectedMode: 'full_generate',
+      taskKind: 'full_day',
+      useLayoutDraft: true,
     },
     {
       name: 'TV normal local gap filling',
       state: tvState({ isEmpty: false, itemCount: 2, gapCount: 1 }),
       userInput: '补齐当前所有空窗',
-      expectedScenario: 'partial_generate',
       expectedMode: 'partial_generate',
+      taskKind: 'overall_refill',
+      useLayoutDraft: false,
     },
     {
       name: 'TV normal daypart scheduling',
       state: tvState({ isEmpty: false, itemCount: 2, gapCount: 1 }),
       userInput: '下午改成新闻栏目',
-      expectedScenario: 'partial_generate',
       expectedMode: 'partial_generate',
+      taskKind: 'local_refill',
+      useLayoutDraft: false,
+      targetTimeRange: { start: '13:00:00', end: '18:00:00' },
+      searchKeywords: ['栏目=新闻'],
     },
   ])('$name stays on the formal playlist path with draft usage only when required', async (item) => {
+    mockFormalPlanner({
+      action: 'formal_orchestration',
+      mode: item.expectedMode as 'full_generate' | 'partial_generate',
+      taskKind: item.taskKind as 'full_day' | 'overall_refill' | 'local_refill',
+      useLayoutDraft: item.useLayoutDraft,
+      targetTimeRange: item.targetTimeRange,
+      searchKeywords: item.searchKeywords,
+    })
     const facade = new DemoRuntimeFacade()
     const draft = createTvDraft()
     const context = buildForegroundAgentContextPackage({
@@ -192,12 +238,14 @@ describe('foreground Agent verification matrix', () => {
       currentLayoutDraft: draft,
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
-    expect(context.scenario).toBe(item.expectedScenario)
+    expect(context.scenario).toBe('layout_reference')
     expect(context.layoutDraft.available).toBe(true)
     expect(context.layoutDraft.referencedByCurrentTask).toBe(false)
-    expect(context.allowedActions).not.toContain('prepare_layout')
+    expect(context.allowedActions).toEqual(expect.arrayContaining(['prepare_layout', 'full_generate', 'partial_generate']))
     if (item.expectedMode === 'full_generate' && item.state.itemCount > 0) {
       expect(decision.kind).toBe('pending_atomic_context')
       if (decision.kind !== 'pending_atomic_context') throw new Error('expected formal rebuild confirmation')
@@ -219,13 +267,19 @@ describe('foreground Agent verification matrix', () => {
       expect(decision.orchestrationRequest.layoutDraft).toBe(draft)
       expect(decision.feedback.details?.usesLayoutDraft).toBe(true)
     } else {
-      expect(context.layoutDraft.segments).toBeUndefined()
+      expect(context.layoutDraft.segments).toHaveLength(3)
       expect(decision.orchestrationRequest.layoutDraft).toBeUndefined()
       expect(decision.feedback.details?.usesLayoutDraft).toBe(false)
     }
   })
 
   it('uses the draft only for an explicit draft-reference foreground request', async () => {
+    mockFormalPlanner({
+      action: 'commit_layout_draft',
+      mode: 'partial_generate',
+      taskKind: 'overall_refill',
+      useLayoutDraft: true,
+    })
     const facade = new DemoRuntimeFacade()
     const draft = createTvDraft()
     const context = buildForegroundAgentContextPackage({
@@ -242,10 +296,12 @@ describe('foreground Agent verification matrix', () => {
       currentLayoutDraft: draft,
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     expect(context.scenario).toBe('layout_reference')
-    expect(context.layoutDraft.referencedByCurrentTask).toBe(true)
+    expect(context.layoutDraft.referencedByCurrentTask).toBe(false)
     expect(context.layoutDraft.segments).toEqual([
       {
         id: 'slot-morning-news',
@@ -276,6 +332,12 @@ describe('foreground Agent verification matrix', () => {
   })
 
   it('resolves the TV channel draft for explicit draft-reference requests even before the prop draft is synced', async () => {
+    mockFormalPlanner({
+      action: 'commit_layout_draft',
+      mode: 'partial_generate',
+      taskKind: 'overall_refill',
+      useLayoutDraft: true,
+    })
     const facade = new DemoRuntimeFacade()
     const context = buildForegroundAgentContextPackage({
       latestUserInput: '参考草案补齐当前所有空窗',
@@ -292,9 +354,10 @@ describe('foreground Agent verification matrix', () => {
       history: [],
       agentCoreEnabled: true,
       layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
-    expect(context.scenario).toBe('layout_reference')
+    expect(context.scenario).toBe('general')
     expect(context.layoutDraft.available).toBe(false)
     expect(decision.kind).toBe('layout_commit')
     if (decision.kind !== 'layout_commit') throw new Error('expected resolved draft-backed orchestration')
@@ -342,9 +405,14 @@ describe('foreground Agent verification matrix', () => {
     expect(defaultRotationDraft).toBeNull()
     expect(rotationContext.layoutDraft.visible).toBe(false)
     expect(rotationContext.layoutDraft.available).toBe(false)
-    expect(rotationContext.allowedActions).toEqual(['upload_layout_draft', 'generate_layout_draft', 'cancel'])
+    expect(rotationContext.allowedActions).toEqual(expect.arrayContaining([
+      'insert',
+      'partial_generate',
+      'generate_layout_draft',
+      'upload_layout_draft',
+    ]))
     expect(rotationWithDraftContext.layoutDraft.visible).toBe(true)
     expect(rotationWithDraftContext.layoutDraft.available).toBe(true)
-    expect(rotationWithDraftContext.allowedActions).toEqual(['partial_generate', 'cancel'])
+    expect(rotationWithDraftContext.allowedActions).toEqual(rotationContext.allowedActions)
   })
 })

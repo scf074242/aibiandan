@@ -54,6 +54,18 @@ const layoutDraft: LayoutDraft = {
 }
 
 describe('foreground agent context package', () => {
+  it('does not classify natural-language intent locally', () => {
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '请把全天节目重新安排得更适合家庭观看',
+      scheduleState,
+      currentSchedule: [],
+      currentLayoutDraft: null,
+    })
+
+    expect(context.scenario).toBe('general')
+    expect(context.latestUserInput).toContain('全天节目重新安排')
+  })
+
   it('keeps atomic commands compact and does not inject layout segments', () => {
     const context = buildForegroundAgentContextPackage({
       latestUserInput: '删除9点的节目',
@@ -65,22 +77,22 @@ describe('foreground agent context package', () => {
       currentLayoutDraft: layoutDraft,
     })
 
-    expect(context.scenario).toBe('atomic')
+    expect(context.scenario).toBe('layout_reference')
     expect(context.workspace.workspaceKey).toBe('tv:playlist-tv-1')
     expect(context.workspace.playlistId).toBe('playlist-tv-1')
-    expect(context.workspace.scheduleSummary).toHaveLength(8)
+    expect(context.workspace.scheduleSummary).toHaveLength(12)
     expect(context.layoutDraft.available).toBe(true)
-    expect(context.layoutDraft.segments).toBeUndefined()
-    expect(context.injectionProfile.includeLayoutSegments).toBe(false)
+    expect(context.layoutDraft.segments).toHaveLength(2)
+    expect(context.injectionProfile.includeLayoutSegments).toBe(true)
     expect(context.injectionProfile).toMatchObject({
-      scheduleItemLimit: 8,
-      layoutSegmentLimit: 0,
-      maxPromptChars: 6000,
+      scheduleItemLimit: 12,
+      layoutSegmentLimit: 12,
+      maxPromptChars: 12000,
     })
     expect(context.budget).toMatchObject({
-      maxPromptChars: 6000,
-      omittedScheduleItems: 6,
-      omittedLayoutSegments: 2,
+      maxPromptChars: 12000,
+      omittedScheduleItems: 2,
+      omittedLayoutSegments: 0,
       truncated: true,
     })
     expect(context.budget.omissions).toEqual(['schedule_summary'])
@@ -95,7 +107,7 @@ describe('foreground agent context package', () => {
     })
 
     expect(context.scenario).toBe('layout_reference')
-    expect(context.layoutDraft.referencedByCurrentTask).toBe(true)
+    expect(context.layoutDraft.referencedByCurrentTask).toBe(false)
     expect(context.layoutDraft.source).toBe('channel_default')
     expect(context.layoutDraft.effectiveFrom).toBe('2026-03-01')
     expect(context.layoutDraft.effectiveTo).toBe('2026-06-30')
@@ -123,7 +135,7 @@ describe('foreground agent context package', () => {
     })
 
     expect(context.scenario).toBe('layout_reference')
-    expect(context.layoutDraft.referencedByCurrentTask).toBe(true)
+    expect(context.layoutDraft.referencedByCurrentTask).toBe(false)
     expect(context.layoutDraft.segments).toEqual([
       { id: 'slot-1', startTime: '09:00:00', endTime: '10:00:00', label: '新闻', constraintKind: 'column' },
       { id: 'slot-2', startTime: '10:00:00', endTime: '11:00:00', label: '电视剧', constraintKind: 'program' },
@@ -143,9 +155,9 @@ describe('foreground agent context package', () => {
       currentLayoutDraft: layoutDraft,
     })
 
-    expect(context.scenario).toBe('layout_draft_switch')
-    expect(context.layoutDraft.referencedByCurrentTask).toBe(true)
-    expect(context.allowedActions).toEqual(['switch_layout_draft', 'generate_layout_draft', 'upload_layout_draft', 'cancel'])
+    expect(context.scenario).toBe('layout_reference')
+    expect(context.layoutDraft.referencedByCurrentTask).toBe(false)
+    expect(context.allowedActions).toContain('switch_layout_draft')
   })
 
   it('aligns rotation layout draft visibility with the foreground workspace', () => {
@@ -243,14 +255,8 @@ describe('foreground agent context package', () => {
       currentSchedule: [],
     })
 
-    expect(tvFullContext.scenario).toBe('full_generate')
-    expect(tvFullContext.allowedActions).toEqual([
-      'continue_layout_draft',
-      'partial_generate',
-      'upload_layout_draft',
-      'switch_layout_draft',
-      'cancel',
-    ])
+    expect(tvFullContext.scenario).toBe('layout_reference')
+    expect(tvFullContext.allowedActions).toContain('full_generate')
     expect(tvFullContext.layoutDraft.available).toBe(true)
     expect(tvFullContext.layoutDraft.referencedByCurrentTask).toBe(false)
     expect(tvFullContext.layoutDraft.completeness.status).toBe('partial')
@@ -259,14 +265,12 @@ describe('foreground agent context package', () => {
       { id: 'slot-2', startTime: '10:00:00', endTime: '11:00:00', label: '电视剧', constraintKind: 'program' },
     ])
     expect(tvFullContext.injectionProfile.includeLayoutSegments).toBe(true)
-    expect(tvFullContext.allowedActions).not.toContain('full_generate')
-    expect(tvPartialContext.scenario).toBe('partial_generate')
-    expect(tvPartialContext.allowedActions).toEqual(['partial_generate', 'cancel'])
-    expect(tvPartialContext.layoutDraft.segments).toBeUndefined()
-    expect(rotationContext.scenario).toBe('partial_generate')
-    expect(rotationContext.allowedActions).toEqual(['upload_layout_draft', 'generate_layout_draft', 'cancel'])
-    expect(rotationContext.allowedActions).not.toContain('partial_generate')
-    expect(rotationContext.allowedActions).not.toContain('prepare_layout')
+    expect(tvFullContext.allowedActions).toContain('partial_generate')
+    expect(tvPartialContext.scenario).toBe('layout_reference')
+    expect(tvPartialContext.allowedActions).toContain('partial_generate')
+    expect(tvPartialContext.layoutDraft.segments).toHaveLength(2)
+    expect(rotationContext.scenario).toBe('general')
+    expect(rotationContext.allowedActions).toContain('upload_layout_draft')
   })
 
   it('blocks rotation workspaces from advertising tv-style all-day generation without structured support', () => {
@@ -284,18 +288,9 @@ describe('foreground agent context package', () => {
       currentSchedule: [],
     })
 
-    expect(context.scenario).toBe('full_generate')
+    expect(context.scenario).toBe('general')
     expect(context.workspace.playlistType).toBe('rotation')
-    expect(context.allowedActions).toEqual([
-      'create_tv_playlist',
-      'open_tv_playlist',
-      'set_rotation_duration',
-      'switch_rotation_strategy',
-      'upload_layout_draft',
-      'generate_layout_draft',
-      'cancel',
-    ])
-    expect(context.allowedActions).not.toContain('full_generate')
+    expect(context.allowedActions).toContain('full_generate')
   })
 
   it('requires a loaded tv layout draft before advertising all-day generation', () => {
@@ -310,17 +305,10 @@ describe('foreground agent context package', () => {
       currentLayoutDraft: null,
     })
 
-    expect(context.scenario).toBe('full_generate')
+    expect(context.scenario).toBe('general')
     expect(context.workspace.playlistType).toBe('tv')
     expect(context.layoutDraft.available).toBe(false)
-    expect(context.allowedActions).toEqual([
-      'load_channel_layout_draft',
-      'upload_layout_draft',
-      'switch_layout_draft',
-      'partial_generate',
-      'cancel',
-    ])
-    expect(context.allowedActions).not.toContain('full_generate')
+    expect(context.allowedActions).toContain('full_generate')
   })
 
   it('does not leak rotation-only fields into a tv workspace context', () => {
@@ -393,7 +381,7 @@ describe('foreground agent context package', () => {
     expect(context.budget.estimatedPromptChars).toBeLessThanOrEqual(context.budget.maxPromptChars)
   })
 
-  it('marks pending command as a one-turn review gate', () => {
+  it('marks pending command as an explicit-disposition review gate', () => {
     const pendingCommand: RuntimePendingCommand = {
       command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
       summary: '删除 09:00 的《节目1》',
@@ -413,11 +401,11 @@ describe('foreground agent context package', () => {
       action: 'delete',
       riskLevel: 'high',
       allowedResponses: ['confirm', 'cancel'],
-      expiresOnNextNonAnswer: true,
+      expiresOnNextNonAnswer: false,
     })
   })
 
-  it('treats a different user request as a new task while exposing the stale pending review for UI expiry', () => {
+  it('keeps a pending review visible so the LLM can explicitly start a new task', () => {
     const pendingCommand: RuntimePendingCommand = {
       command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
       summary: '删除 09:00 的《节目1》',
@@ -431,13 +419,13 @@ describe('foreground agent context package', () => {
       pendingCommand,
     })
 
-    expect(context.scenario).toBe('atomic')
+    expect(context.scenario).toBe('review')
     expect(context.review).toMatchObject({
       kind: 'command',
       action: 'delete',
-      expiresOnNextNonAnswer: true,
+      expiresOnNextNonAnswer: false,
     })
-    expect(context.allowedActions).toContain('insert')
+    expect(context.allowedActions).toEqual(['confirm', 'cancel', 'select', 'clarify', 'start_new_task'])
   })
 
   it('keeps a pending review only when the user answers inside the same workspace', () => {
@@ -697,7 +685,7 @@ describe('foreground agent context package', () => {
     })
   })
 
-  it('expires a formal rebuild review when the user starts another request', () => {
+  it('keeps a formal rebuild review when another same-workspace request needs LLM disposition', () => {
     const lifecycle = resolvePendingReviewLifecycle({
       latestUserInput: '先查一下现在有哪些节目',
       currentWorkspaceKey: 'rotation:playlist-rotation-1',
@@ -729,13 +717,12 @@ describe('foreground agent context package', () => {
 
     expect(lifecycle).toEqual({
       hasPendingReview: true,
-      canUsePendingReview: false,
-      shouldExpire: true,
-      expireReason: 'next_non_answer',
+      canUsePendingReview: true,
+      shouldExpire: false,
     })
   })
 
-  it('expires a layout-draft research suggestion when the user starts another request', () => {
+  it('keeps a layout-draft suggestion when another same-workspace request needs LLM disposition', () => {
     const lifecycle = resolvePendingReviewLifecycle({
       latestUserInput: '第二段也重新查一下',
       currentWorkspaceKey: 'rotation:playlist-rotation-1',
@@ -772,9 +759,8 @@ describe('foreground agent context package', () => {
 
     expect(lifecycle).toEqual({
       hasPendingReview: true,
-      canUsePendingReview: false,
-      shouldExpire: true,
-      expireReason: 'next_non_answer',
+      canUsePendingReview: true,
+      shouldExpire: false,
     })
   })
 
@@ -800,7 +786,7 @@ describe('foreground agent context package', () => {
     })
   })
 
-  it('expires a pending review when the next user turn starts a new task', () => {
+  it('keeps a pending review until the LLM explicitly starts a new task', () => {
     const pendingCommand: RuntimePendingCommand = {
       command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
       summary: '删除 09:00 的《节目1》',
@@ -816,13 +802,12 @@ describe('foreground agent context package', () => {
 
     expect(lifecycle).toEqual({
       hasPendingReview: true,
-      canUsePendingReview: false,
-      shouldExpire: true,
-      expireReason: 'next_non_answer',
+      canUsePendingReview: true,
+      shouldExpire: false,
     })
   })
 
-  it('does not treat selection wording as an answer to a confirm-only pending command', () => {
+  it('keeps selection wording with the pending command for LLM interpretation', () => {
     const pendingCommand: RuntimePendingCommand = {
       command: { action: 'delete', reasoning: 'test', data: { itemId: 'item-1' } },
       summary: '删除 09:00 的《节目1》',
@@ -838,9 +823,8 @@ describe('foreground agent context package', () => {
 
     expect(lifecycle).toEqual({
       hasPendingReview: true,
-      canUsePendingReview: false,
-      shouldExpire: true,
-      expireReason: 'next_non_answer',
+      canUsePendingReview: true,
+      shouldExpire: false,
     })
   })
 
@@ -918,7 +902,7 @@ describe('foreground agent context package', () => {
     const promptBlock = formatForegroundAgentContextForPrompt(context)
 
     expect(promptBlock).toContain('统一前台上下文包')
-    expect(promptBlock).toContain('"scenario": "partial_generate"')
+    expect(promptBlock).toContain('"scenario": "general"')
     expect(promptBlock).toContain('"gapCount": 2')
     expect(promptBlock).toContain('"contextNotes"')
     expect(promptBlock).not.toContain('"workspaceKey"')

@@ -2618,4 +2618,145 @@ describe('SchedulingAgentRuntime intent interpreter', () => {
     })
     expect(result.executionResult).toBeUndefined()
   })
+
+  /**
+   * C1 回归 case：LLM 漏返回 confidence 字段时，normalizeConfidence 应返回 0，
+   * 让 normalizeInterpretation 的 confidence < MIN_STRUCTURED_CONFIDENCE(0.5) 判断触发 return null，
+   * 整体暴露失败，不本地"盖章"默认 0.75 让不完整理解静默通过门禁。
+   *
+   * 业务场景：LLM 偶发漏字段属于未遵守 prompt 的异常情况（prompt 第 127 行已强制要求返回 confidence），
+   * 应让用户重试或补充，而不是假装理解通过。
+   */
+  it('returns null when LLM omits confidence field instead of defaulting to 0.75', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        intent: 'insert',
+        // 故意不返回 confidence 字段
+        slots: {
+          targetTime: '10:00:00',
+          programHint: '看东方',
+        },
+      }),
+    }))
+    const interpreter = new LlmAgentIntentInterpreter({ chat })
+
+    const result = await interpreter.interpret({
+      userInput: '10点插入看东方',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(result).toBeNull()
+  })
+
+  /**
+   * C1 回归 case：LLM 返回非数字 confidence（如字符串）时，同样返回 null 暴露失败。
+   */
+  it('returns null when LLM returns non-numeric confidence', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        intent: 'insert',
+        confidence: 'high', // 非数字
+        slots: {
+          targetTime: '10:00:00',
+          programHint: '看东方',
+        },
+      }),
+    }))
+    const interpreter = new LlmAgentIntentInterpreter({ chat })
+
+    const result = await interpreter.interpret({
+      userInput: '10点插入看东方',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(result).toBeNull()
+  })
+
+  /**
+   * Q3 回归 case A：LLM 返回 confidence:0 + assistantFeedback 时，
+   * normalizeInterpretation 不丢弃 assistantFeedback，返回 intent=undefined 的失败结构，
+   * 让上层 schedulingAgentRuntime 能把分类引导话术透传给用户。
+   *
+   * 业务场景：用户说"插个节目"不给时间不给节目名，LLM 按 prompt 返回
+   * {"confidence":0,"assistantFeedback":"你想插到几点？"}，
+   * 用户应看到分类引导而非统一兜底"请换一种说法"。
+   */
+  it('透传 confidence:0 时的 assistantFeedback 分类引导话术', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        confidence: 0,
+        reasoning: '用户没有给出插入时间和节目名',
+        assistantFeedback: '你想插到几点？',
+      }),
+    }))
+    const interpreter = new LlmAgentIntentInterpreter({ chat })
+
+    const result = await interpreter.interpret({
+      userInput: '插个节目',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(result).not.toBeNull()
+    expect(result?.intent).toBeUndefined()
+    expect(result?.confidence).toBe(0)
+    expect(result?.source).toBe('llm')
+    expect(result?.assistantFeedback).toBe('你想插到几点？')
+  })
+
+  /**
+   * Q3 回归 case B：LLM 返回 confidence:0 但不带 assistantFeedback 时，
+   * normalizeInterpretation 保持原行为返回 null（无话术可透传，暴露失败）。
+   */
+  it('confidence:0 无 assistantFeedback 时仍返回 null 暴露失败', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        confidence: 0,
+        reasoning: '无法理解',
+      }),
+    }))
+    const interpreter = new LlmAgentIntentInterpreter({ chat })
+
+    const result = await interpreter.interpret({
+      userInput: '某个不可解析的输入',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(result).toBeNull()
+  })
+
+  /**
+   * Q3 回归 case C：schedulingAgentRuntime submit 在 LLM 返回 confidence:0 + assistantFeedback 时，
+   * 返回 failed 状态，且 explanation 是 LLM 的分类引导话术，而非硬编码兜底。
+   *
+   * 业务场景：用户只说"插个节目"，LLM 返回"你想插到几点？"，
+   * 用户在前端看到的是"你想插到几点？"而不是"这次模型没有正常理解这条指令..."。
+   */
+  it('submit 透传 LLM 分类引导话术到 explanation', async () => {
+    const dataGateway = buildGateway([buildItem()])
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        confidence: 0,
+        reasoning: '用户没有给出插入时间',
+        assistantFeedback: '你想插到几点？',
+      }),
+    }))
+    const runtime = new SchedulingAgentRuntime({
+      dataGateway,
+      intentInterpreter: new LlmAgentIntentInterpreter({ chat }),
+    })
+
+    const result = await runtime.submit({
+      userInput: '插个节目',
+      channelId: 'dragon',
+      date,
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.decision.constraintReport?.issues[0]?.code).toBe('llm_intent_unavailable')
+    expect(result.explanation).toBe('你想插到几点？')
+  })
 })

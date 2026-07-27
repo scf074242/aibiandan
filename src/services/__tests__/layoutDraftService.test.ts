@@ -120,7 +120,82 @@ const createLiveDraft = (): LayoutDraft => ({
   ],
 })
 
+const createPartialDayDraft = (): LayoutDraft => ({
+  id: 'draft-partial-day',
+  channelId: 'dragon',
+  date: '2026-03-25',
+  version: 1,
+  source: 'generated',
+  userIntent: '白天版面草案',
+  coverage: {
+    start: '06:00:00',
+    end: '18:00:00',
+  },
+  layoutReference: {
+    id: 'layout-partial-day',
+    name: '白天版面草案',
+    slots: [{
+      id: 'slot-daytime',
+      channelId: 'dragon',
+      startTime: '2026-03-25T06:00:00+08:00',
+      endTime: '2026-03-25T18:00:00+08:00',
+      columnId: 'runtime-column:daytime',
+    }],
+  },
+  columns: [{
+    columnId: 'runtime-column:daytime',
+    columnName: '白天综合版面',
+    channelId: 'dragon',
+    defaultProgramType: 'news_magazine',
+    semanticLabel: '白天综合版面',
+    source: 'generated',
+  }],
+})
+
 describe('LayoutDraftService', () => {
+  it('多段续补草案时保留既有时段并扩展覆盖范围', async () => {
+    const service = new LayoutDraftService({ chat: vi.fn() } as never)
+
+    const spec = await service.refineSpec({
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      userInput: '草案只到下午，晚上18点到20点补新闻，20点到22点补剧场',
+      currentDraft: createPartialDayDraft(),
+      segments: [
+        { start: '18:00:00', end: '20:00:00', semanticLabel: '晚间新闻', programTypeHint: 'news' },
+        { start: '20:00:00', end: '22:00:00', semanticLabel: '黄金剧场', programTypeHint: 'drama' },
+      ],
+    })
+
+    expect(spec.coverage).toEqual({ start: '06:00:00', end: '22:00:00' })
+    expect(spec.segments.map((segment) => [segment.startTime, segment.endTime, segment.label])).toEqual([
+      ['06:00:00', '18:00:00', '白天综合版面'],
+      ['18:00:00', '20:00:00', '晚间新闻'],
+      ['20:00:00', '22:00:00', '黄金剧场'],
+    ])
+  })
+
+  it('只有 planner 明确要求整份重写时多段草案才替换既有时段', async () => {
+    const service = new LayoutDraftService({ chat: vi.fn() } as never)
+
+    const spec = await service.refineSpec({
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      userInput: '草案全部改成晚间新闻和黄金剧场',
+      currentDraft: createPartialDayDraft(),
+      replaceAll: true,
+      segments: [
+        { start: '18:00:00', end: '20:00:00', semanticLabel: '晚间新闻', programTypeHint: 'news' },
+        { start: '20:00:00', end: '22:00:00', semanticLabel: '黄金剧场', programTypeHint: 'drama' },
+      ],
+    })
+
+    expect(spec.coverage).toEqual({ start: '06:00:00', end: '22:00:00' })
+    expect(spec.segments.map((segment) => segment.label)).toEqual(['晚间新闻', '黄金剧场'])
+  })
+
   it('enriches LLM-generated outdoor live hints after parsing spec JSON', async () => {
     const chat = vi.fn(async () => ({
       content: JSON.stringify({
@@ -357,5 +432,88 @@ describe('LayoutDraftService', () => {
         canRetry: true,
       },
     })
+  })
+})
+
+describe('LayoutDraftService promptVersion 透传', () => {
+  /**
+   * case c6-generate-passes-version
+   * - expectedDecision: generateSpec 调用 LLM 时透传 promptVersion + traceLabel
+   * - mustNotHappen: options 缺失 promptVersion
+   * - verification: chat.mock.calls[0][1] 含 promptVersion: 'v1.0' + traceLabel: 'layout_draft_generate'
+   */
+  it('c6-generate-passes-version: generateSpec 透传 promptVersion', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        coverage: { start: '06:00:00', end: '23:59:59' },
+        segments: [
+          {
+            id: 'seg-1',
+            label: '晨间新闻',
+            startTime: '06:00:00',
+            endTime: '07:00:00',
+            programType: 'news',
+            queryHints: ['晨间新闻'],
+          },
+        ],
+      }),
+    }))
+    const service = new LayoutDraftService({ chat } as never)
+
+    await service.generateSpec({
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      userInput: '排全天新闻',
+    })
+
+    expect(chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        promptVersion: 'v1.0',
+        traceLabel: 'layout_draft_generate',
+      }),
+    )
+  })
+
+  /**
+   * case c6-refine-passes-version
+   * - expectedDecision: refineSpec 调用 LLM 时透传 promptVersion + traceLabel
+   * - mustNotHappen: options 缺失 promptVersion
+   * - verification: chat.mock.calls[0][1] 含 promptVersion: 'v1.0' + traceLabel: 'layout_draft_refine'
+   */
+  it('c6-refine-passes-version: refineSpec 透传 promptVersion', async () => {
+    const chat = vi.fn(async () => ({
+      content: JSON.stringify({
+        coverage: { start: '06:00:00', end: '23:59:59' },
+        segments: [
+          {
+            id: 'seg-1',
+            label: '晨间新闻',
+            startTime: '06:00:00',
+            endTime: '07:00:00',
+            programType: 'news',
+            queryHints: ['晨间新闻'],
+          },
+        ],
+      }),
+    }))
+    const service = new LayoutDraftService({ chat } as never)
+
+    await service.refineSpec({
+      channelId: 'dragon',
+      channelName: '东方卫视',
+      date: '2026-03-25',
+      userInput: '把晨间改成新闻联播',
+      currentDraft: createDraft(),
+    })
+
+    expect(chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        promptVersion: 'v1.0',
+        traceLabel: 'layout_draft_refine',
+      }),
+    )
   })
 })

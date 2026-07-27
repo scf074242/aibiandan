@@ -3,6 +3,16 @@ import type { LayoutDraft, LayoutDraftSpec, LayoutDraftSpecSegment, LayoutIntent
 import type { LLMClient } from '@/services/llm/llmClient'
 import { cleanLayoutDraftActionNoise, cleanLayoutDraftSemanticLabel } from '@/services/layoutDraftSemanticCleaner'
 import { createRecoverableLlmError, isRecoverableLlmError } from '@/services/llm/llmFailure'
+import { LONG_RUNNING_DEADLINE_BUDGET, type AgentDeadline } from '@/services/agent/agentDeadline'
+
+/**
+ * layoutDraftService prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本
+ *
+ * generateSpec / refineSpec 两个 LLM 调用共享同一 prompt 基线。
+ * 修订任一 prompt 时必须同步升版本号。
+ */
+const LAYOUT_DRAFT_PROMPT_VERSION = 'v1.0' as const
 
 export interface LayoutDraftGenerationInput {
   channelId: string
@@ -19,6 +29,7 @@ export interface LayoutDraftGenerationInput {
 
 export interface LayoutDraftRefineInput extends LayoutDraftGenerationInput {
   currentDraft: LayoutDraft
+  replaceAll?: boolean
 }
 
 const DEFAULT_COVERAGE = {
@@ -601,18 +612,22 @@ const expandCoverageToSegments = (
 export class LayoutDraftService {
   constructor(private llmClient: LLMClient) {}
 
-  async generateSpec(input: LayoutDraftGenerationInput): Promise<LayoutDraftSpec> {
+  async generateSpec(input: LayoutDraftGenerationInput, deadline?: AgentDeadline): Promise<LayoutDraftSpec> {
     if (input.segments?.length) {
       return ensureRequestedSegmentCount(input.userInput, this.buildSpecFromStructuredIntent(input), 'layout_draft_generate')
     }
 
     try {
+      // deadline 接入：stage timeout 从 deadline 剩余预算推导，signal 联动底层 fetch 中止
+      const stageTimeout = deadline?.stageTimeoutMs(LONG_RUNNING_DEADLINE_BUDGET.batchDeadlineMs) ?? LONG_RUNNING_DEADLINE_BUDGET.batchDeadlineMs
       const response = await this.llmClient.chat(this.buildGeneratePrompt(input), {
         temperature: 0.2,
         maxTokens: 1200,
-        timeout: 60000,
+        timeout: stageTimeout,
         maxRetries: 1,
         traceLabel: 'layout_draft_generate',
+        promptVersion: LAYOUT_DRAFT_PROMPT_VERSION,
+        ...(deadline ? { signal: deadline.signal() } : {}),
       })
 
       const parsed = this.parseSpecResponse(response.content)
@@ -631,18 +646,22 @@ export class LayoutDraftService {
     }
   }
 
-  async refineSpec(input: LayoutDraftRefineInput): Promise<LayoutDraftSpec> {
+  async refineSpec(input: LayoutDraftRefineInput, deadline?: AgentDeadline): Promise<LayoutDraftSpec> {
     if (input.segments?.length) {
       return ensureRequestedSegmentCount(input.userInput, this.buildRefinedSpecFromStructuredIntent(input), 'layout_draft_refine')
     }
 
     try {
+      // deadline 接入：stage timeout 从 deadline 剩余预算推导，signal 联动底层 fetch 中止
+      const stageTimeout = deadline?.stageTimeoutMs(LONG_RUNNING_DEADLINE_BUDGET.batchDeadlineMs) ?? LONG_RUNNING_DEADLINE_BUDGET.batchDeadlineMs
       const response = await this.llmClient.chat(this.buildRefinePrompt(input), {
         temperature: 0.2,
         maxTokens: 1400,
-        timeout: 60000,
+        timeout: stageTimeout,
         maxRetries: 1,
         traceLabel: 'layout_draft_refine',
+        promptVersion: LAYOUT_DRAFT_PROMPT_VERSION,
+        ...(deadline ? { signal: deadline.signal() } : {}),
       })
 
       const parsed = this.parseSpecResponse(response.content)
@@ -712,7 +731,7 @@ export class LayoutDraftService {
       }
     })
 
-    if ((input.segments?.length ?? 0) > 1) {
+    if ((input.segments?.length ?? 0) > 1 && input.replaceAll) {
       const replacements = this.buildSpecSegmentsFromStructuredIntent(input.segments ?? [])
       return {
         coverage: expandCoverageToSegments(input.currentDraft.coverage, replacements),
@@ -724,7 +743,7 @@ export class LayoutDraftService {
       let nextSegments = [...existingSegments]
       const replacements = this.buildSpecSegmentsFromStructuredIntent(input.segments)
       replacements.forEach((replacement) => {
-        const overlapped = existingSegments.find((segment) => segmentOverlapsRange(segment, {
+        const overlapped = nextSegments.find((segment) => segmentOverlapsRange(segment, {
           start: replacement.startTime,
           end: replacement.endTime,
         }))
@@ -753,7 +772,7 @@ export class LayoutDraftService {
     return [
       {
         role: 'system',
-        content: `你是电视播单版面草案生成器。
+        content: `[prompt ${LAYOUT_DRAFT_PROMPT_VERSION}] 你是电视播单版面草案生成器。
 请把用户的自然语言需求翻译成一个显式时间版的 LayoutDraftSpec。
 要求：
 - 所有时段必须输出明确的 startTime 和 endTime，格式固定为 HH:mm:ss。
@@ -785,7 +804,7 @@ ${input.programTypeHint ? `LLM 识别出的类型提示：${input.programTypeHin
     return [
       {
         role: 'system',
-        content: `你是电视播单版面草案微调器。
+        content: `[prompt ${LAYOUT_DRAFT_PROMPT_VERSION}] 你是电视播单版面草案微调器。
 请在保留 coverage 的前提下，根据用户的新要求返回完整的、更新后的 LayoutDraftSpec。
 要求：
 - 所有时段都必须保留显式的 HH:mm:ss 开始结束时间。

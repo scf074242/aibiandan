@@ -2,11 +2,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomicCapabilities'
 import { DemoRuntimeFacade, type RuntimeScheduleItem } from '@/services/runtime/demoRuntimeFacade'
+import { findCanonicalCandidate } from '@/services/agent/canonicalSchedulingData'
+import type { ProgramCandidate } from '@/types/orchestration'
 import type { ScheduleState } from '@/types/orchestration'
 
 const llmMocks = vi.hoisted(() => ({
   chat: vi.fn(),
 }))
+let activeUserInput = ''
+let activePendingContextForLlm: unknown
+
+const requireCanonicalCandidate = (query: string): ProgramCandidate => {
+  const candidate = findCanonicalCandidate(query)
+  if (!candidate) throw new Error(`data_fixture_missing:${query}`)
+  return candidate
+}
 
 vi.mock('@/services/llm/llmClient', () => ({
   getLLMClient: () => ({
@@ -52,13 +62,108 @@ const createItem = (
   programType: 'tv',
 })
 
+const createFacadeWithStructuredPendingPlanner = (): DemoRuntimeFacade => {
+  const facade = new DemoRuntimeFacade()
+  let activePendingContext: unknown
+  const planner = (facade as unknown as {
+    agentPlanner: { plan: (input: { userInput: string; contextPackage?: unknown }, deadline?: unknown) => Promise<unknown> }
+  }).agentPlanner
+  const originalPlan = planner.plan.bind(planner)
+
+  vi.spyOn(planner, 'plan').mockImplementation(async (input, deadline) => {
+    const userInput = input.userInput.trim()
+    const pending = activePendingContext as {
+      action?: string
+      resumeCompositeTask?: { kind?: string }
+      insertRecommendations?: Array<{ candidateId?: string }>
+    } | undefined
+    const intent = pending?.action === 'move'
+      ? 'move'
+      : pending?.action === 'insert'
+        ? 'insert'
+        : pending?.action === 'replace'
+          ? 'replace'
+      : pending?.resumeCompositeTask?.kind === 'batch_replace'
+        ? 'replace'
+        : JSON.stringify(activePendingContext).includes('insert_with_shift')
+          ? 'insert'
+          : 'batch_delete'
+
+    if (userInput === '确认') {
+      return {
+        mode: 'single',
+        pendingAction: 'confirm',
+        actions: [{ type: 'atomic_command', intent, pendingAction: 'confirm', mutationPolicy: 'formal_write' }],
+        assistantReplyDraft: '确认执行当前待处理任务。',
+        reasoning: '用户确认当前结构化 pending。',
+      }
+    }
+    if (userInput === '第一个') {
+      return {
+        mode: 'single',
+        pendingAction: 'select_candidate',
+        actions: [{
+          type: 'atomic_command',
+          intent: 'replace',
+          pendingAction: 'select_candidate',
+          candidateId: pending?.insertRecommendations?.[0]?.candidateId,
+          mutationPolicy: 'formal_write',
+        }],
+        assistantReplyDraft: '选择第一个候选。',
+        reasoning: '用户选择当前候选列表中的第一项。',
+      }
+    }
+    return await originalPlan(input, deadline)
+  })
+
+  const originalSubmitInstruction = facade.submitInstruction.bind(facade)
+  ;(facade as unknown as { submitInstruction: typeof facade.submitInstruction }).submitInstruction = async (input) => {
+    activeUserInput = input.userInput.trim()
+    activePendingContext = input.pendingAtomicContext
+    activePendingContextForLlm = input.pendingAtomicContext
+    const isPlannerTurn = activeUserInput === '确认' || activeUserInput === '第一个'
+    return await originalSubmitInstruction({
+      ...input,
+      inputSource: isPlannerTurn ? 'user' : input.inputSource,
+    })
+  }
+  return facade
+}
+
 describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
+    activeUserInput = ''
+    activePendingContextForLlm = undefined
     resetAtomicCapabilities()
     await getAtomicCapabilities().clearAll()
-    llmMocks.chat.mockResolvedValue({
-      content: JSON.stringify({
+    llmMocks.chat.mockImplementation(async () => ({
+      content: JSON.stringify(activeUserInput === '确认'
+        ? {
+            intent: JSON.stringify(activePendingContextForLlm).includes('batch_replace')
+              ? 'replace'
+              : (activePendingContextForLlm as { action?: string } | undefined)?.action === 'replace'
+                ? 'replace'
+              : (activePendingContextForLlm as { action?: string } | undefined)?.action === 'move'
+                ? 'move'
+                : 'insert',
+            pendingAction: 'confirm',
+            confidence: 1,
+            slots: {},
+            assistantFeedback: '确认执行当前待处理任务。',
+          }
+        : activeUserInput === '第一个'
+          ? {
+              intent: 'replace',
+              pendingAction: 'select_candidate',
+              confidence: 1,
+              slots: {
+                candidateId: (activePendingContextForLlm as { insertRecommendations?: Array<{ candidateId?: string }> } | undefined)
+                  ?.insertRecommendations?.[0]?.candidateId,
+              },
+              assistantFeedback: '选择第一个候选。',
+            }
+          : {
         intent: 'batch_delete',
         confidence: 0.93,
         slots: {
@@ -83,12 +188,12 @@ describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
             summary: '检查当前播单里是否还剩看东方',
           }],
         },
-      }),
-    })
+          }),
+    }))
   })
 
   it('compiles LLM taskPlanDraft into the same foreground pending confirmation path', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const currentSchedule = [
       createItem('item-east-1', '看东方', '2026-03-25T07:00:00+08:00', '2026-03-25T09:00:00+08:00'),
       createItem('item-news', '东方新闻', '2026-03-25T18:30:00+08:00', '2026-03-25T19:00:00+08:00'),
@@ -147,7 +252,7 @@ describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
         },
       }),
     })
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const currentSchedule = [
       createItem('item-news', '东方新闻', '2026-03-25T18:30:00+08:00', '2026-03-25T19:00:00+08:00'),
     ]
@@ -213,7 +318,7 @@ describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
         },
       }),
     })
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const currentSchedule = [
       createItem('item-0900', '看东方', '2026-03-25T09:00:00+08:00', '2026-03-25T09:30:00+08:00'),
       createItem('item-0930', '东方快报', '2026-03-25T09:30:00+08:00', '2026-03-25T10:00:00+08:00'),
@@ -296,19 +401,10 @@ describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
         },
       }),
     })
-    const facade = new DemoRuntimeFacade()
-    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([{
-      id: 'candidate-light-news',
-      programId: 'candidate-light-news',
-      programCode: 'candidate-light-news',
-      programName: '轻量资讯午后版',
-      instanceName: '轻量资讯午后版',
-      channelId: 'dragon-tv',
-      duration: 2700,
-      programType: 'news_magazine',
-      columnName: '轻量资讯',
-      contentTags: ['资讯'],
-    }])
+    const facade = createFacadeWithStructuredPendingPlanner()
+    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([
+      requireCanonicalCandidate('生命树 第1集'),
+    ])
     const currentSchedule = [
       createItem('item-drama-1', '东方剧场：纵有疾风起 第5集', '2026-03-25T13:00:00+08:00', '2026-03-25T13:45:00+08:00'),
       createItem('item-drama-2', '东方剧场：纵有疾风起 第6集', '2026-03-25T13:45:00+08:00', '2026-03-25T14:30:00+08:00'),
@@ -333,7 +429,7 @@ describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
       replacementHint: '轻量资讯',
       targetLabel: '东方剧场',
     })
-    expect(decision.feedback.content).toContain('不会自动套用候选')
+    expect(decision.feedback.content).toContain('不能替你直接选')
     expect(decision.pendingAtomicContext.insertRecommendations).toHaveLength(1)
 
     const planned = await facade.submitInstruction({
@@ -365,15 +461,15 @@ describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
     expect(confirmed.kind).toBe('agent_execution')
     if (confirmed.kind !== 'agent_execution') throw new Error('expected batch replace execution')
     expect(confirmed.result.status).toBe('executed')
-    expect(confirmed.feedback.content).toContain('已把 2 条节目替换为《轻量资讯午后版》')
+    expect(confirmed.feedback.content).toContain('已把 2 条节目替换为《生命树 第1集》')
     expect(confirmed.result.executionResult?.scheduleItems?.map((item) => item.programName)).toEqual([
-      '轻量资讯午后版',
-      '轻量资讯午后版',
+      '生命树 第1集',
+      '生命树 第1集',
       '东方新闻',
     ])
     expect(getAtomicCapabilities().getAllItems().map((item) => item.programName)).toEqual([
-      '轻量资讯午后版',
-      '轻量资讯午后版',
+      '生命树 第1集',
+      '生命树 第1集',
       '东方新闻',
     ])
   })
@@ -409,19 +505,10 @@ describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
         },
       }),
     })
-    const facade = new DemoRuntimeFacade()
-    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([{
-      id: 'candidate-long-news',
-      programId: 'candidate-long-news',
-      programCode: 'candidate-long-news',
-      programName: '长时段资讯特别版',
-      instanceName: '长时段资讯特别版',
-      channelId: 'dragon-tv',
-      duration: 3600,
-      programType: 'news_magazine',
-      columnName: '长时段资讯',
-      contentTags: ['资讯'],
-    }])
+    const facade = createFacadeWithStructuredPendingPlanner()
+    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([
+      requireCanonicalCandidate('静安寺户外直播'),
+    ])
     const currentSchedule = [
       createItem('item-drama-1', '东方剧场：纵有疾风起 第5集', '2026-03-25T13:00:00+08:00', '2026-03-25T13:45:00+08:00'),
       createItem('item-drama-2', '东方剧场：纵有疾风起 第6集', '2026-03-25T13:45:00+08:00', '2026-03-25T14:30:00+08:00'),
@@ -499,19 +586,10 @@ describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
         },
       }),
     })
-    const facade = new DemoRuntimeFacade()
-    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([{
-      id: 'candidate-guide',
-      programId: 'candidate-guide',
-      programCode: 'candidate-guide',
-      programName: '轻松导视',
-      instanceName: '轻松导视',
-      channelId: 'dragon-tv',
-      duration: 1200,
-      programType: 'short_clip',
-      columnName: '轻松导视',
-      contentTags: ['导视'],
-    }])
+    const facade = createFacadeWithStructuredPendingPlanner()
+    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([
+      requireCanonicalCandidate('频道导视：黄金剧场预告 30秒'),
+    ])
     const currentSchedule = [
       createItem('item-short-1', '城市短片 上海地标', '2026-03-25T00:00:00+08:00', '2026-03-25T00:30:00+08:00'),
       createItem('item-guide', '频道导视', '2026-03-25T00:30:00+08:00', '2026-03-25T01:00:00+08:00'),
@@ -557,9 +635,9 @@ describe('DemoRuntimeFacade LLM taskPlanDraft integration', () => {
     expect(confirmed.feedback.content).toContain('轮播单会按内容队列自然串联')
     const items = confirmed.result.executionResult?.scheduleItems ?? []
     expect(items.map((item) => item.programName)).toEqual([
-      '轻松导视',
+      '频道导视：黄金剧场预告 30秒',
       '频道导视',
-      '轻松导视',
+      '频道导视：黄金剧场预告 30秒',
     ])
     for (let index = 1; index < items.length; index += 1) {
       expect(new Date(items[index - 1]!.endTime).getTime()).toBe(new Date(items[index]!.startTime).getTime())

@@ -1358,15 +1358,15 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     })
     mockExtractInsertParams.mockResolvedValue({
       targetTime: '12:45:00',
-      programName: '\u751f\u547d\u6811\u7535\u89c6\u5267',
-      rawProgramText: '\u751f\u547d\u6811\u7535\u89c6\u5267',
-      semanticLabel: '\u751f\u547d\u6811\u7535\u89c6\u5267',
+      programName: '\u4e0d\u5b58\u5728\u7684\u8282\u76ee\u6d4b\u8bd5\u6807\u9898',
+      rawProgramText: '\u4e0d\u5b58\u5728\u7684\u8282\u76ee\u6d4b\u8bd5\u6807\u9898',
+      semanticLabel: '\u4e0d\u5b58\u5728\u7684\u8282\u76ee\u6d4b\u8bd5\u6807\u9898',
       programTypeHint: 'drama',
     })
 
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'tv' }),
-      userInput: '12:45\u63d2\u5165\u751f\u547d\u6811\u7535\u89c6\u5267',
+      userInput: '12:45\u63d2\u5165\u4e0d\u5b58\u5728\u7684\u8282\u76ee\u6d4b\u8bd5\u6807\u9898',
       currentSchedule: [],
       history: [],
     })
@@ -1375,7 +1375,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     if (result.kind !== 'message') throw new Error('expected message')
     expect(result.feedback.details?.rejectedReason).toBe('insert_keyword_no_match')
     expect(result.feedback.details?.candidateCount).toBe(0)
-    expect(result.feedback.content).toContain('\u751f\u547d\u6811\u7535\u89c6\u5267')
+    expect(result.feedback.content).toContain('\u4e0d\u5b58\u5728\u7684\u8282\u76ee\u6d4b\u8bd5\u6807\u9898')
   })
 
   it('tv playlist returns candidate guidance before inserting a semantic live-guide candidate when multiple candidates remain', async () => {
@@ -1386,14 +1386,14 @@ describe('DemoRuntimeFacade playlist state policy', () => {
     })
     mockExtractInsertParams.mockResolvedValue({
       targetTime: '14:00:00',
-      rawProgramText: '\u9759\u5b89\u5bfa\u5916\u573a\u76f4\u64ad\u5bfc\u89c6',
-      semanticLabel: '\u9759\u5b89\u5bfa\u5916\u573a\u76f4\u64ad\u5bfc\u89c6',
+      rawProgramText: '\u53d1\u5e03\u4f1a\u9884\u70ed\u5bfc\u89c6',
+      semanticLabel: '\u53d1\u5e03\u4f1a\u9884\u70ed\u5bfc\u89c6',
       programTypeHint: 'news_magazine',
     })
 
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'tv' }),
-      userInput: '14\u70b9\u63d2\u5165\u4e00\u6bb5\u9759\u5b89\u5bfa\u5916\u573a\u76f4\u64ad\u5bfc\u89c6',
+      userInput: '14\u70b9\u63d2\u5165\u4e00\u6bb5\u53d1\u5e03\u4f1a\u9884\u70ed\u5bfc\u89c6',
       currentSchedule: [],
       history: [],
     })
@@ -1433,7 +1433,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
   })
 
   it('replace title with no hard keyword match is blocked instead of using unrelated candidates', async () => {
-    const missingProgramName = '\u751f\u547d\u6811\u7535\u89c6\u5267'
+    const missingProgramName = '\u4e0d\u5b58\u5728\u7684\u8282\u76ee\u6d4b\u8bd5\u6807\u9898'
     mockIntentRecognize.mockResolvedValue({
       type: 'replace',
       confidence: 0.96,
@@ -1459,7 +1459,7 @@ describe('DemoRuntimeFacade playlist state policy', () => {
 
     const result = await new DemoRuntimeFacade().submitInstruction({
       scheduleState: createScheduleState({ playlistType: 'tv', isEmpty: false, itemCount: 1 }),
-      userInput: '\u628a9\u70b9\u7684\u8282\u76ee\u66ff\u6362\u6210\u751f\u547d\u6811\u7535\u89c6\u5267',
+      userInput: '\u628a9\u70b9\u7684\u8282\u76ee\u66ff\u6362\u6210\u4e0d\u5b58\u5728\u7684\u8282\u76ee\u6d4b\u8bd5\u6807\u9898',
       currentSchedule: [mockedItem],
       history: [],
     })

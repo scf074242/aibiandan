@@ -103,7 +103,7 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
     const capabilities = runtime.describeCapabilities()
 
     expect(capabilities).toMatchObject({
-      capabilityIds: ['atomic_command'],
+      capabilityIds: expect.arrayContaining(['atomic_command', 'orchestration']),
       commandPolicies: [
         { intent: 'move', tvMode: 'direct_execute', rotationMode: 'direct_execute' },
         { intent: 'batch_move', tvMode: 'direct_execute', rotationMode: 'direct_execute' },
@@ -6183,7 +6183,6 @@ describe('SchedulingAgentRuntime v1 atomic command matrix', () => {
         slots: {
           targetProgramName: '看东方',
         },
-        keyword: '看东方',
       },
     })
 

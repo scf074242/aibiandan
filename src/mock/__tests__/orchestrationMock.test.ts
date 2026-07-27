@@ -91,7 +91,8 @@ describe('orchestration demo program library', () => {
     expect(shortClips.every((candidate) => candidate.id.startsWith('asset-short-'))).toBe(true)
     expect(shortClips.every((candidate) => candidate.programName && candidate.instanceName)).toBe(true)
     expect(shortClips.every((candidate) => !candidate.columnId && !candidate.columnName)).toBe(true)
-    expect(shortClips.every((candidate) => candidate.duration > 0 && candidate.duration <= 60)).toBe(true)
+    // 导视/暖场短片可达 10 分钟（600s），用于轮播单检索；30/60s 为城市微短片
+    expect(shortClips.every((candidate) => candidate.duration > 0 && candidate.duration <= 600)).toBe(true)
     expect(shortClips.every((candidate) => candidate.contentTags?.includes('无节目编号'))).toBe(true)
     expect(shortClips.every((candidate) => candidate.contentTags?.includes('轮播'))).toBe(true)
     expect(shortClips.every((candidate) => candidate.contentTags?.some((tag) => tag.includes('开场远景')))).toBe(true)

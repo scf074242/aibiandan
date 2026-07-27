@@ -10,6 +10,12 @@ import type { LLMClient } from '@/services/llm/llmClient'
 import type { DataService } from '../dataService'
 import type { ChatMessage } from '@/types/llm'
 
+/**
+ * explainInterfaces prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本
+ */
+export const EXPLAIN_INTERFACES_PROMPT_VERSION = 'v1.0' as const
+
 export class ExplainInterfaces {
   private llmClient: LLMClient
   private dataService: DataService
@@ -42,6 +48,8 @@ export class ExplainInterfaces {
       const response = await this.llmClient.chat(messages, {
         temperature: 0.5,
         maxTokens: 300,
+        traceLabel: 'candidate_explanation',
+        promptVersion: EXPLAIN_INTERFACES_PROMPT_VERSION,
       })
 
       return {
@@ -148,7 +156,7 @@ export class ExplainInterfaces {
       {
         role: 'system',
         content:
-          '你是一位电视节目编排助手。请用一句简短中文说明为什么选择该候选节目填充当前空窗，重点说明时长匹配、类型匹配和上下文衔接。',
+          `[prompt ${EXPLAIN_INTERFACES_PROMPT_VERSION}] 你是一位电视节目编排助手。请用一句简短中文说明为什么选择该候选节目填充当前空窗，重点说明时长匹配、类型匹配和上下文衔接。`,
       },
       {
         role: 'user',

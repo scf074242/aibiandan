@@ -1,4 +1,4 @@
-﻿import type {
+import type {
   FillItemCommand,
   GapInfo,
   OrchestrationCommand,
@@ -45,6 +45,12 @@ import {
   matchesExplicitSequenceRequirements,
   matchesSpecificSearchKeywords,
 } from './candidateKeywordMatcher'
+
+/**
+ * orchestrator prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本
+ */
+export const ORCHESTRATOR_PROMPT_VERSION = 'v1.0' as const
 
 type EventPayloadMap = {
   'status-change': { status: PlanningSessionStatus; previousStatus: PlanningSessionStatus }
@@ -120,6 +126,12 @@ const DEFAULT_CONFIG: OrchestratorConfig = {
 
 const AD_INSERTION_PACING_MS = 3000
 
+/**
+ * 旧版编排器。
+ *
+ * @deprecated 新代码应使用 SchedulingAgentRuntimeFacade / OrchestrationCapability 进行编排。
+ * 保留此类仅用于兼容已有测试与历史调用，下一步将完全迁移到基于 CapabilityRegistry 的长流程能力。
+ */
 export class Orchestrator extends EventEmitter {
   private readonly llmClient: LLMClient
   private readonly taskClassifier: TaskClassifier
@@ -277,7 +289,8 @@ export class Orchestrator extends EventEmitter {
       await this.phase3Repair()
 
       if (!this.isCancelled) {
-        this.updateStatus(this.resolveTerminalStatus())
+        const terminalStatus = this.resolveTerminalStatus()
+        this.updateStatus(terminalStatus)
         this.emit('complete', { session: this.session! })
       }
     } catch (error) {
@@ -353,7 +366,8 @@ export class Orchestrator extends EventEmitter {
       await this.phase3Repair()
 
       if (!this.isCancelled) {
-        this.updateStatus(this.resolveTerminalStatus(partialTargetGapIds))
+        const partialTerminalStatus = this.resolveTerminalStatus(partialTargetGapIds)
+        this.updateStatus(partialTerminalStatus)
         this.emit('complete', { session: this.session! })
       }
     } catch (error) {
@@ -433,7 +447,7 @@ export class Orchestrator extends EventEmitter {
 
     try {
       const response = await this.runWithTimeout(
-        this.llmClient.chat(prompt, { temperature: 0.2, maxTokens: 800 }),
+        this.llmClient.chat(prompt, { temperature: 0.2, maxTokens: 800, traceLabel: 'orchestrator_planning', promptVersion: ORCHESTRATOR_PROMPT_VERSION }),
         this.config.planningLlmTimeoutMs,
         'LLM 策略规划超时',
       )
@@ -457,7 +471,7 @@ export class Orchestrator extends EventEmitter {
     if (this.getRelevantRemainingGaps(targetGapIds).length > 0) {
       return 'manual_review'
     }
-    if ((this.session?.execution.failedCommands ?? 0) > 0 || (this.session?.gaps.failed.length ?? 0) > 0) {
+    if ((this.session?.gaps.failed.length ?? 0) > 0) {
       return 'manual_review'
     }
     if (this.lastValidationReport && !this.lastValidationReport.isValid) {
@@ -1186,6 +1200,7 @@ export class Orchestrator extends EventEmitter {
       'explicit_sequence_no_match',
       'functional_keyword_no_match',
       'sequence_context_order_conflict',
+      '专业匹配证据不足',
     ]
     return this.gapManager?.getActiveGaps().some((gap) => {
       if (gap.status !== 'failed') return false
@@ -1199,7 +1214,7 @@ export class Orchestrator extends EventEmitter {
       {
         role: 'system',
         content: [
-          '你是电视节目单编排助手。请只输出 JSON PlanCommand，用于描述全局编排策略，而不是直接输出节目单。',
+          `[prompt ${ORCHESTRATOR_PROMPT_VERSION}] 你是电视节目单编排助手。请只输出 JSON PlanCommand，用于描述全局编排策略，而不是直接输出节目单。`,
           '必须严格输出一个 JSON 对象，不要使用 Markdown，不要输出解释文字。',
           'JSON 结构固定为：',
           '{"action":"plan","reasoning":"...","data":{"strategy":{"target":"demo-orchestration","referencePriority":["layout","history","library"],"allowFiller":true,"sequentialPreference":true,"riskPreference":"balanced"},"initialGapCount":1,"estimatedSteps":1}}',

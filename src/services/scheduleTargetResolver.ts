@@ -1,5 +1,11 @@
 import type { LLMClient } from './llm/llmClient'
 
+/**
+ * scheduleTargetResolver prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本
+ */
+export const SCHEDULE_TARGET_RESOLVER_PROMPT_VERSION = 'v1.0' as const
+
 export interface ScheduleTargetCandidate {
   id: string
   programCode?: string
@@ -128,7 +134,7 @@ export class ScheduleTargetResolver {
           {
             role: 'system',
             content:
-              '你是广播节目串联单目标记录定位器。请结合用户指令，在候选记录中判断用户最可能指向哪一条。只能返回 JSON，不要创造候选列表里不存在的 id。',
+              `[prompt ${SCHEDULE_TARGET_RESOLVER_PROMPT_VERSION}] 你是广播节目串联单目标记录定位器。请结合用户指令，在候选记录中判断用户最可能指向哪一条。只能返回 JSON，不要创造候选列表里不存在的 id。`,
           },
           {
             role: 'user',
@@ -143,7 +149,7 @@ export class ScheduleTargetResolver {
               '输出格式: {"status":"unique","targetItemId":"item_1","reasoning":"..."}。如果无法唯一判断，则返回 {"status":"multiple","reasoning":"..."} 或 {"status":"none","reasoning":"..."}。',
           },
         ],
-        { temperature: 0, maxTokens: 220 },
+        { temperature: 0, maxTokens: 220, traceLabel: 'schedule_target_resolve', promptVersion: SCHEDULE_TARGET_RESOLVER_PROMPT_VERSION },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)

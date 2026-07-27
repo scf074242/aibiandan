@@ -1,4 +1,10 @@
 import type { PlaylistType, ProgramCandidate, RotationPlaylistStrategy, ScheduleItemSnapshot, ScheduleSummary, TimeRange } from '@/types/orchestration'
+import type { AgentDeadline } from './agentDeadline'
+import type { ReactTaskPlannerDraft } from '@/services/runtime/reactTaskTypes'
+import type { AgentPlannerAction } from '@/services/llm/agentPlanner'
+import type { FormalOrchestrationCheckpoint } from '@/services/runtime/formalOrchestrationRuntime'
+import type { FormalOrchestrationResumePlan } from '@/services/runtime/formalOrchestrationRecovery'
+import type { FormalOrchestrationGrant } from '@/services/runtime/formalOrchestrationGrant'
 
 export type AgentRuntimeStatus =
   | 'idle'
@@ -42,6 +48,52 @@ export interface AgentSubmitInput {
   pendingTask?: AgentPendingTask | null
   interpretation?: AgentIntentInterpretation | null
   llmContextPackage?: AgentLlmContextPackage
+  /**
+   * 长流程编排参数（D23 三路径收口）。
+   * 当存在此字段时，表示本次提交是全天编排或局部补排请求，
+   * 由 OrchestrationCapability 处理，不再走原子命令能力。
+   */
+  orchestration?: {
+    /** 编排模式 */
+    mode: 'full_generate' | 'partial_generate'
+    /** 目标频道 ID */
+    channelId: string
+    /** 目标日期 */
+    date: string
+    /** 日开始时间（full_generate 必填） */
+    dayStartTime?: string
+    /** 日结束时间（full_generate 必填） */
+    dayEndTime?: string
+    /** 局部编排目标（partial_generate 使用） */
+    target?: string[] | {
+      targetGapIds?: string[]
+      targetTimeRange?: { start: string; end: string }
+      searchKeywords?: string[]
+    }
+    /** 编排策略 */
+    strategy?: Partial<{
+      target?: string
+      referencePriority?: string[]
+      allowFiller?: boolean
+      sequentialPreference?: boolean
+      riskPreference?: string
+    }>
+    /** 编排事件回调，用于向前台透传进度 */
+    onEvent?: (event: {
+      type: 'status-change' | 'gap-start' | 'gap-complete' | 'gap-failed' | 'log' | 'error' | 'complete'
+      payload: Record<string, unknown>
+    }) => void
+    onCheckpoint?: (checkpoint: FormalOrchestrationCheckpoint<AgentPlannerAction>) => void
+    /**
+     * 结构化 ReAct 计划。正式编排必须提供；缺省时返回 react_plan_invalid，不启动历史 Orchestrator。
+     */
+    reactTask?: {
+      workspaceKey: string
+      plannerTask: ReactTaskPlannerDraft<AgentPlannerAction>
+      resumeFrom?: FormalOrchestrationResumePlan<AgentPlannerAction>
+      authorization?: FormalOrchestrationGrant
+    }
+  }
 }
 
 export interface AgentIntentSlots {
@@ -68,11 +120,44 @@ export interface AgentIntentInterpretation {
   queryKind?: QueryCommandPlan['queryKind']
   keyword?: string
   searchAlternatives?: string[]
+  /**
+   * LLM 在意图解析阶段一次性生成的带策略标签的关键词组合（阶段 2 引入）。
+   *
+   * 设计约束（AGENTS.md LLM-first）：
+   * - 策略标签、关键词、理由全部由 LLM 生成
+   * - 本地只做结构校验与去重，不改写关键词
+   * - 与 searchAlternatives 并存（本地优先使用 keywordStrategies，searchAlternatives 保留兼容）
+   */
+  keywordStrategies?: AgentKeywordStrategy[]
+  /**
+   * LLM 是否建议在所有关键词都 0 命中时启用二次反思（escape hatch 标志）。
+   *
+   * - 仅当 enableSecondaryReflection=true 时有意义
+   * - 本地仅在所有策略 0 命中且此标志为 true 时触发二次反思
+   */
+  suggestSecondaryReflection?: boolean
   reasoning?: string
   assistantFeedback?: string
   streamingHint?: 'none' | 'thinking' | 'final'
   contextMode?: 'scenario_context'
   rawText?: string
+}
+
+/**
+ * LLM 一次性生成的关键词策略组合单元（阶段 2 引入）。
+ *
+ * 设计约束（AGENTS.md LLM-first / LLM-only）：
+ * - strategy 标签由 LLM 选择，覆盖 original/typo_fix/decompose/paraphrase/column_demote/broaden
+ * - keywords 由 LLM 基于完整上下文生成，本地不做同义词扩展或错别字修复
+ * - reason 由 LLM 给出，用于 trace 与失败暴露
+ */
+export interface AgentKeywordStrategy {
+  /** 策略标签 */
+  strategy: 'original' | 'typo_fix' | 'decompose' | 'paraphrase' | 'column_demote' | 'broaden'
+  /** 该策略下的关键词组合（1-3 个关键词，去重） */
+  keywords: string[]
+  /** LLM 给出的"为什么这组可能命中"的简短理由（中文，用于 trace 和失败暴露） */
+  reason: string
 }
 
 export type AgentTaskPlanStageDraftType = 'atomic' | 'batch_atomic' | 'draft_refill' | 'verify' | 'ask_user'
@@ -106,7 +191,13 @@ export interface AgentTaskPlanDraft {
 
 export interface AgentIntentInterpreter {
   usesLlm?: boolean
-  interpret(input: AgentSubmitInput): Promise<AgentIntentInterpretation | null>
+  /**
+   * 解析用户输入为结构化意图。
+   * @param input - agent 提交输入（含用户输入、上下文证据包、pending 任务等）
+   * @param deadline - 可选的统一 deadline 管理器，用于从剩余预算中推导 stage timeout
+   *                   未传时沿用各实现内部默认 timeout（向后兼容，D1 前的调用路径不受影响）
+   */
+  interpret(input: AgentSubmitInput, deadline?: AgentDeadline): Promise<AgentIntentInterpretation | null>
 }
 
 export type AgentPendingAction =
@@ -659,16 +750,48 @@ export interface AgentResult {
   trace: AgentTraceStep[]
 }
 
+
+/**
+ * Capability 元数据，用于基于意图和播单类型的路由分发。
+ */
+export interface CapabilityMetadata {
+  /** 能力名称 */
+  name: string
+  /** 该能力处理的原子命令意图列表 */
+  intents: string[]
+  /** 适用的播单类型；'all' 表示不限 */
+  playlistTypes?: ('tv' | 'carousel' | 'all')[]
+  /** 是否需要用户确认 */
+  requiresConfirmation?: boolean
+  /** 路由优先级，数值越高越优先 */
+  priority?: number
+}
+
 export interface AgentCapability {
   id: string
+  /** 可选的 capability 元数据，支持基于意图/播单类型的显式路由 */
+  metadata?: CapabilityMetadata
   canHandle(input: AgentSubmitInput): boolean
   handle(input: AgentSubmitInput, runtime: AgentCapabilityRuntime): Promise<AgentResult>
+}
+
+export interface AgentCapabilityResolver {
+  resolveAll(input: AgentSubmitInput): AgentCapability[]
 }
 
 export interface AgentCapabilityRuntime {
   dataGateway: SchedulingDataGateway
   candidateJudge: AgentCandidateJudge
   trace: AgentTraceRecorder
+  /** 当前请求使用的统一 capability 注册表，只暴露路由能力。 */
+  capabilityRegistry?: AgentCapabilityResolver
+  /**
+   * 统一 deadline 管理器（per-submit）。
+   * capability 调用 candidateJudge 等下游 LLM 调用时应透传此 deadline，
+   * 由下游实现从剩余预算中推导 stage timeout。
+   * 未传时下游沿用默认 timeout（向后兼容）。
+   */
+  deadline?: AgentDeadline
 }
 
 /**
@@ -730,7 +853,13 @@ export interface AgentCandidateJudgeInput {
 }
 
 export interface AgentCandidateJudge {
-  selectBestCandidate(input: AgentCandidateJudgeInput): Promise<AgentCandidateDecision>
+  /**
+   * 在候选节目中做决策，返回选中候选 + 决策理由 + 决策类型。
+   * @param input - 候选决策输入（候选列表、上下文、顺播证据等）
+   * @param deadline - 可选的统一 deadline 管理器，用于从剩余预算中推导 stage timeout
+   *                   未传时沿用实现内部默认 timeout（向后兼容）
+   */
+  selectBestCandidate(input: AgentCandidateJudgeInput, deadline?: AgentDeadline): Promise<AgentCandidateDecision>
 }
 
 export interface AgentTraceRecorder {

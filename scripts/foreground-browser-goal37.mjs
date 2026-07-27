@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module'
-import { existsSync } from 'node:fs'
+import { existsSync, appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
@@ -8,7 +8,32 @@ import { fileURLToPath } from 'node:url'
 const require = createRequire(import.meta.url)
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
+const loadCanonicalScheduleProducts = (count) => {
+  const products = JSON.parse(readFileSync(path.join(rootDir, 'src/mock/data/finishedProducts.json'), 'utf8'))
+  const selected = products.filter((item) => (
+    item
+    && typeof item.productId === 'string'
+    && typeof item.programCode === 'string'
+    && typeof item.title === 'string'
+    && item.duration === 1800
+  )).slice(0, count)
+  if (selected.length < count) {
+    throw new Error(`data_fixture_missing: expected ${count} canonical 30-minute finished products, got ${selected.length}`)
+  }
+  return selected
+}
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const goal37LogPath = path.join(rootDir, 'goal37-run.log')
+const goal37Log = (message) => {
+  const line = `[${new Date().toISOString()}] ${message}\n`
+  try {
+    appendFileSync(goal37LogPath, line, 'utf8')
+  } catch {
+    // ignore
+  }
+}
 
 const resolvePlaywright = async () => {
   const candidates = [
@@ -130,10 +155,35 @@ const plannerResponse = (value) => JSON.stringify(value)
 const installBrowserLlmMock = async (page) => {
   await page.addInitScript(() => {
     const plannerResponse = (value) => JSON.stringify(value)
+    const formalReactTask = (objective, queries = []) => ({
+      objective,
+      maxTurns: 3,
+      batchSize: 2,
+      stopCondition: '完成候选与约束核验后逐批决定，不能决定时停止并保留 checkpoint',
+      nextActions: [
+        { type: 'research_check', purpose: 'candidate_precheck', queries },
+        { type: 'validate' },
+      ],
+    })
     const extractUserInput = (messages) => {
       const joined = messages.map((message) => message.content).join('\n')
       const userJson = [...joined.matchAll(/"userInput"\s*:\s*"([^"]*)"/g)].at(-1)?.[1]
       return userJson ? userJson.replace(/\\u([\dA-Fa-f]{4})/g, (_, code) => String.fromCharCode(Number.parseInt(code, 16))) : joined
+    }
+
+    /**
+     * 从前台上下文包 prompt 中探测当前是否存在指定类型的待确认 review。
+     * 用于处理“确认重新编排”“确认删除”等依赖 pending 状态的简短回复。
+     */
+    const hasPendingReview = (promptText, kinds) => {
+      try {
+        const pendingMatch = promptText.match(/"pendingReview"\s*:\s*(\{[\s\S]*?\})/)
+        if (!pendingMatch) return false
+        const pending = JSON.parse(pendingMatch[1].replace(/,\s*\}/g, '}'))
+        return kinds.includes(pending.kind)
+      } catch {
+        return false
+      }
     }
 
     window.__goal37LlmCalls = []
@@ -182,6 +232,55 @@ const installBrowserLlmMock = async (page) => {
         }))
       }
 
+      if (options?.traceLabel === 'agent_react_synthesize') {
+        return markReturn('我先查了当前草案段和素材库，静安寺、商圈现场这类素材比较贴近这个方向。能定位到草案段时我会直接更新草案；正式播单不会被写入。')
+      }
+
+      if (options?.traceLabel === 'formal_orchestration_decide' && promptText.includes('ReAct审批测试')) {
+        window.__goal37FormalApprovalDecideCount = (window.__goal37FormalApprovalDecideCount ?? 0) + 1
+        if (window.__goal37FormalApprovalDecideCount === 1) {
+          return markReturn(plannerResponse({
+            kind: 'continue',
+            reason: '素材和目标节目已经核验，删除属于敏感写入，先等待编排员明确确认。',
+            nextActions: [{
+              type: 'atomic_command',
+              intent: 'delete',
+              targetItemId: 'react-delete-target',
+              targetProgramName: '待删除测试节目',
+              mutationPolicy: 'pending_only',
+            }],
+          }))
+        }
+        return markReturn(plannerResponse({
+          kind: 'complete',
+          reason: '已按编排员的明确确认完成删除并复核现场。',
+        }))
+      }
+
+      if (userInput.includes('执行ReAct审批测试')) {
+        return markReturn(plannerResponse({
+          mode: 'react',
+          actions: [{
+            type: 'formal_orchestration', mode: 'partial_generate', taskKind: 'local_refill',
+            useLayoutDraft: true, confirmExistingRebuild: true,
+          }],
+          reactTask: {
+            objective: 'ReAct审批测试：核验后删除指定节目',
+            maxTurns: 3,
+            batchSize: 2,
+            stopCondition: '删除经用户明确确认并完成现场复核后结束',
+            nextActions: [{
+              type: 'research_check',
+              purpose: 'candidate_precheck',
+              semanticLabel: '待删除测试节目',
+              queries: ['待删除测试节目'],
+            }],
+          },
+          assistantReplyDraft: '我先核验目标节目，涉及删除时会停下来等你明确确认。',
+          reasoning: '浏览器回归验证正式 ReAct 审批中断和显式恢复。',
+        }))
+      }
+
       if (userInput.includes('继续') && promptText.includes('activeReactTask') && promptText.includes('世界杯亚洲球队素材')) {
         return markReturn(plannerResponse({
           mode: 'react',
@@ -200,8 +299,8 @@ const installBrowserLlmMock = async (page) => {
               queries: ['世界杯 亚洲球队 介绍', '中国队 日本队 韩国队 足球介绍'],
             }],
           },
-          assistantReplyDraft: '我接着上一轮任务先核素材库；能定位到草案段就直接更新草案，不会写入正式轮播单。',
-          reasoning: '前台上下文里存在 activeReactTask，用户说继续，应续跑查证任务。',
+          assistantReplyDraft: '我接着上一轮任务先核素材库；canonical 数据已具备，可定位到草案段后更新，不会写入正式轮播单。',
+          reasoning: '前台上下文里存在 activeReactTask，用户说继续，应续跑查证任务；候选事实来自 canonical 数据源。',
         }))
       }
 
@@ -213,8 +312,55 @@ const installBrowserLlmMock = async (page) => {
         return markReturn('可以把同类新闻内容稍微分散，把专题节目放在更适合停留观看的时段。要不要我把这个建议整理成草案调整方向？')
       }
 
-      if (options?.traceLabel === 'agent_react_synthesize') {
-        return markReturn('我先查了当前草案段和素材库，静安寺、商圈现场这类素材比较贴近这个方向。能定位到草案段时我会直接更新草案；正式播单不会被写入。')
+      if (userInput === '上午以新闻和民生内容为主') {
+        return markReturn(plannerResponse({
+          actions: [{ type: 'clarify', question: '我记下了这个编排目标。你希望创建电视播单还是轮播单？' }],
+          assistantReplyDraft: '我记下了这个编排目标。你希望创建电视播单还是轮播单？',
+          reasoning: '用户先说明编排目标，但尚未指定播单类型。',
+        }))
+      }
+
+      if (userInput === '就按刚才讨论的目标，新建电视播单，然后按当前版面开始全天编排') {
+        return markReturn(plannerResponse({
+          mode: 'react',
+          actions: [
+            { type: 'create_playlist', playlistType: 'tv' },
+            { type: 'formal_orchestration', mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: true },
+          ],
+          reactTask: {
+            objective: '创建电视播单后按当前版面完成全天编排',
+            maxTurns: 4,
+            batchSize: 4,
+            stopCondition: '全天编排完成或暴露不可恢复问题',
+            nextActions: [
+              { type: 'create_playlist', playlistType: 'tv' },
+              { type: 'formal_orchestration', mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: true },
+            ],
+          },
+          assistantReplyDraft: '我先创建电视播单，再根据创建后的版面现场继续编排。',
+          reasoning: '正式编排依赖新播单工作区，需要逐轮观察。',
+        }))
+      }
+
+      if (userInput === '请先整理版面草案再新建电视播单') {
+        return markReturn(plannerResponse({
+          actions: [],
+          assistantReplyDraft: '我先整理版面草案，再创建电视播单。',
+          reasoning: '模型没有返回合法创建动作。',
+        }))
+      }
+
+      if (userInput === '新建电视播单' || userInput === '新建轮播单') {
+        const playlistType = userInput.includes('轮播') ? 'rotation' : 'tv'
+        return markReturn(plannerResponse({
+          actions: [{
+            type: 'create_playlist',
+            playlistType,
+            ...(playlistType === 'rotation' ? { rotationStrategy: 'content_match' } : {}),
+          }],
+          assistantReplyDraft: playlistType === 'rotation' ? '我先新建一张轮播单。' : '我先新建一张电视播单。',
+          reasoning: '用户明确要求创建新的播单工作区。',
+        }))
       }
 
       if (userInput.includes('看东方后继续插入一个看东方节目')) {
@@ -355,6 +501,14 @@ const installBrowserLlmMock = async (page) => {
             reasoning: '用户给出了插入时间和节目线索。',
           }))
         }
+        if (options?.traceLabel === 'agent.candidate_judge') {
+          return markReturn(JSON.stringify({
+            candidateId: '',
+            reasoning: '《看东方》候选有多个期数且无顺播基线，需要用户确认具体期数或版本。',
+            considerations: ['候选期数不唯一', '无顺播基线'],
+            decisionType: 'needs_clarification',
+          }))
+        }
         return markReturn(plannerResponse({
           actions: [{ type: 'atomic_command' }],
           assistantReplyDraft: '我理解你要在9点插入《看东方》，我会先核对候选，确认后再写入播单。',
@@ -365,8 +519,8 @@ const installBrowserLlmMock = async (page) => {
       if (userInput.includes('9点插入电视剧生命树第5集')) {
         return markReturn(plannerResponse({
           actions: [{ type: 'atomic_command' }],
-          assistantReplyDraft: '我理解你要在9点插入《生命树》第5集，我会先核对候选，符合规则后再处理。',
-          reasoning: '用户给出了明确时间和具体剧集，属于精准原子插入，不需要 ReAct。',
+          assistantReplyDraft: '我理解你要在9点插入《生命树》第5集，我会先从 canonical 节目库核对候选，符合规则后再处理。',
+          reasoning: '用户给出了明确时间和具体剧集，属于精准原子插入，不需要 ReAct；候选事实由 canonical 数据源提供。',
         }))
       }
 
@@ -497,6 +651,41 @@ const installBrowserLlmMock = async (page) => {
         }))
       }
 
+      if (userInput.includes('把4点到10点全部节目删掉')) {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'batch_delete',
+            confidence: 0.97,
+            slots: {
+              rangeStart: '04:00:00',
+              rangeEnd: '10:00:00',
+            },
+            taskPlanDraft: {
+              isComposite: true,
+              goal: '删除当前电视播单04:00到10:00时段内的全部节目',
+              stages: [{
+                type: 'batch_atomic',
+                action: 'delete',
+                target: {
+                  rangeStart: '04:00:00',
+                  rangeEnd: '10:00:00',
+                  scope: 'time_range',
+                },
+                requiresConfirmation: true,
+                summary: '分批删除04:00到10:00时段内的全部节目',
+              }],
+            },
+            assistantFeedback: '我会先列出04:00到10:00的影响范围，确认后分批删除。',
+            reasoning: '用户明确给出时间范围和全部删除要求，应形成受确认保护的分批任务。',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command' }],
+          assistantReplyDraft: '我会先核对04:00到10:00的节目范围，确认后再分批删除。',
+          reasoning: '范围删除交给原子能力编译为有上限的复合任务。',
+        }))
+      }
+
       if (userInput.includes('当前播单有什么节目') || userInput.includes('这张编单整体风格怎么样') || userInput.includes('那怎么优化')) {
         if (options?.traceLabel === 'agent.intent_interpreter') {
           return markReturn(plannerResponse({
@@ -510,15 +699,36 @@ const installBrowserLlmMock = async (page) => {
           }))
         }
         return markReturn(plannerResponse({
+          pendingAction: 'start_new_task',
           actions: [{ type: 'read_only_analysis', analysisKind: userInput.includes('优化') ? 'optimization_suggestion' : 'playlist_analysis' }],
           assistantReplyDraft: '我先只看当前编单内容，不会改动播单。',
           reasoning: '用户是在询问当前编单情况或优化建议。',
         }))
       }
 
+      if (userInput.includes('晚上18点到20点补新闻')) {
+        if (!promptText.includes('"completeness":{"status":"partial"')) {
+          throw new Error('goal37 expected planner prompt to include partial layout-draft completeness')
+        }
+        return markReturn(plannerResponse({
+          actions: [{
+            type: 'refine_layout_draft',
+            ignoreExistingLayout: false,
+            segments: [
+              { start: '18:00:00', end: '20:00:00', semanticLabel: '晚间新闻', programTypeHint: 'news' },
+              { start: '20:00:00', end: '22:00:00', semanticLabel: '黄金剧场', programTypeHint: 'drama' },
+            ],
+          }],
+          assistantReplyDraft: '我会在现有白天草案后补上晚间新闻和黄金剧场，只更新草案，不写正式播单。',
+          reasoning: 'foregroundContext 显示当前电视草案只覆盖到18点，用户明确要求续补晚间草案。',
+        }))
+      }
+
       if (userInput.includes('帮我全天编排')) {
         return markReturn(plannerResponse({
-          actions: [{ type: 'formal_orchestration', mode: 'full_generate', useLayoutDraft: true }],
+          mode: 'react',
+          actions: [{ type: 'formal_orchestration', mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: true, searchKeywords: [] }],
+          reactTask: formalReactTask('按当前草案重新编排全天电视播单'),
           assistantReplyDraft: '我会先确认是否会覆盖当前正式播单，再继续全天编排。',
           reasoning: '用户要求对已有电视播单做全天编排。',
         }))
@@ -526,7 +736,9 @@ const installBrowserLlmMock = async (page) => {
 
       if (userInput.includes('按这个开始编排') || userInput.includes('参考草案编排')) {
         return markReturn(plannerResponse({
-          actions: [{ type: 'formal_orchestration', mode: 'full_generate', useLayoutDraft: true }],
+          mode: 'react',
+          actions: [{ type: 'formal_orchestration', mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: true, searchKeywords: [] }],
+          reactTask: formalReactTask('按当前草案开始正式编排'),
           assistantReplyDraft: '我会按当前草案进入正式编排；如果草案不完整，会先提醒你补齐。',
           reasoning: '用户确认草案进入正式编排。',
         }))
@@ -549,7 +761,9 @@ const installBrowserLlmMock = async (page) => {
 
       if (userInput.includes('帮我排完整这张轮播单')) {
         return markReturn(plannerResponse({
-          actions: [{ type: 'formal_orchestration', mode: 'full_generate', useLayoutDraft: true }],
+          mode: 'react',
+          actions: [{ type: 'formal_orchestration', mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: true, searchKeywords: [] }],
+          reactTask: formalReactTask('按轮播草案编排完整轮播单'),
           assistantReplyDraft: '我先检查这张轮播单的草案。没有草案时，我不能直接排完整单；你可以先告诉我总时长和主要内容，我帮你整理草案。',
           reasoning: '用户要整体编排轮播单，轮播单整体编排必须有草案。',
         }))
@@ -669,8 +883,8 @@ const installBrowserLlmMock = async (page) => {
               queries: ['世界杯 亚洲球队 介绍'],
             }],
           },
-          assistantReplyDraft: '我先建一张1小时轮播单和草案，再把素材核验作为下一步任务。确认前不会写入正式节目。',
-          reasoning: '用户要求创建工作区后先查证素材再决定。',
+          assistantReplyDraft: '我先建一张1小时轮播单和草案，再用 canonical 素材库核验素材方向。确认前不会写入正式节目。',
+          reasoning: '用户要求创建工作区后先查证素材再决定；实体来自 canonical 数据源。',
         }))
       }
 
@@ -724,6 +938,53 @@ const installBrowserLlmMock = async (page) => {
           }],
           assistantReplyDraft: '我把草案重写成两段：第一小时新闻，第二小时电视剧生命树；仍然不会写入正式播单。',
           reasoning: '用户明确要求重写草案。',
+        }))
+      }
+
+      // 以下分支处理依赖 pending review 状态的简短确认类回复，必须放在 fallback 之前。
+      if (userInput === '确认重新编排') {
+        return markReturn(plannerResponse({
+          mode: 'react',
+          actions: [{ type: 'formal_orchestration', mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: true, searchKeywords: [], confirmExistingRebuild: true }],
+          reactTask: formalReactTask('用户确认后按当前版面草案重新编排正式播单'),
+          assistantReplyDraft: '我已收到确认，现在开始按当前版面草案重新编排正式播单。',
+          reasoning: '用户确认了对已有电视播单的正式重编请求。',
+        }))
+      }
+
+      if (userInput === '确认') {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'delete',
+            confidence: 0.98,
+            pendingAction: 'confirm',
+            slots: {},
+            assistantFeedback: '我理解你在确认执行当前待处理的删除任务。',
+            reasoning: '当前上下文包含待确认删除任务，用户明确确认。',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command', intent: 'batch_delete', pendingAction: 'confirm' }],
+          assistantReplyDraft: '我已收到确认，现在执行这条待确认操作。',
+          reasoning: '用户确认了当前待执行的原子或复合操作。',
+        }))
+      }
+
+      if (userInput === '继续') {
+        if (options?.traceLabel === 'agent.intent_interpreter') {
+          return markReturn(plannerResponse({
+            intent: 'delete',
+            confidence: 0.96,
+            pendingAction: 'confirm',
+            slots: {},
+            assistantFeedback: '我理解你要继续重试上一批未写入成功的删除任务。',
+            reasoning: '当前上下文保留了可重试的删除批次，用户要求继续。',
+          }))
+        }
+        return markReturn(plannerResponse({
+          actions: [{ type: 'atomic_command', intent: 'batch_delete', pendingAction: 'confirm' }],
+          assistantReplyDraft: '我会继续重试上一批未写入成功的删除任务。',
+          reasoning: '用户要求继续当前可恢复的原子任务。',
         }))
       }
 
@@ -794,6 +1055,11 @@ const seedTvSchedule = async (page, items) => {
   }, items)
 }
 
+const seedTvLayoutDraft = async (page, draft) => {
+  await waitForPageHarness(page)
+  await page.evaluate((seedDraft) => window.__AIBIANDAN_PAGE_HARNESS__.seedTvLayoutDraft(seedDraft), draft)
+}
+
 const seedRotationSchedule = async (page, items, options) => {
   await waitForPageHarness(page)
   await page.evaluate(({ seedItems, seedOptions }) => {
@@ -809,6 +1075,168 @@ const failNextAtomicReplaceAllItems = async (page, message) => {
 }
 
 const scenarios = [
+  {
+    id: 'planner-no-action-create-feedback-visible',
+    description: 'planner 没有返回创建动作时，执行语气被转换为可见的无写入终态',
+    userInput: '请先整理版面草案再新建电视播单',
+    expectedDecision: '显示尚未创建播单的结构化澄清，空工作区保持不变',
+    mustNotHappen: '按正文中的“版面草案”隐藏终态、只留下冻结进度或伪造创建动作',
+    verification: '页面显示“还没有创建播单”，playlistType 与 currentPlaylistId 均为空',
+    run: async (page) => {
+      await sendMessage(page, '请先整理版面草案再新建电视播单')
+      await waitForText(page, ['还没有创建播单', '模型没有返回有效的创建动作'])
+
+      const state = await page.evaluate(() => window.__AIBIANDAN_PAGE_HARNESS__.getState())
+      if (state.playlistType !== 'none' || state.currentPlaylistId) {
+        throw new Error(`Planner reply without action unexpectedly created a playlist: ${JSON.stringify(state)}.`)
+      }
+      const text = await page.locator('body').innerText()
+      if (!text.includes('还没有创建播单')) {
+        throw new Error('No-action planner terminal feedback is not visible to the user.')
+      }
+
+      return {
+        evidence: (await bodyLines(page, /还没有创建播单|版面草案|创建动作|等待创建/)).slice(-16),
+        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
+  {
+    id: 'tv-react-create-preserves-conversation',
+    description: '无播单会话中的目标保持可见，ReAct 多动作首轮真实创建电视播单且不展示协议文案',
+    userInput: '就按刚才讨论的目标，新建电视播单，然后按当前版面开始全天编排',
+    expectedDecision: '先创建真实电视播单并保留会话目标，后续正式编排等待 observation 后继续 decide',
+    mustNotHappen: '只展示命令序列、隐藏创建前对话、出现完整接收/结构校验气泡或跳过建单',
+    verification: '页面 workspace=tv 且 playlistId 存在，创建前目标仍可见，内部协议文案不可见',
+    run: async (page) => {
+      await sendMessage(page, '上午以新闻和民生内容为主')
+      await waitForText(page, ['我记下了这个编排目标', '电视播单还是轮播单'])
+
+      await sendMessage(page, '就按刚才讨论的目标，新建电视播单，然后按当前版面开始全天编排')
+      await waitForText(page, ['当前工作区 · 电视播单', '已新建电视播单', '上午以新闻和民生内容为主'])
+
+      const state = await page.evaluate(() => window.__AIBIANDAN_PAGE_HARNESS__.getState())
+      if (state.playlistType !== 'tv' || !state.currentPlaylistId) {
+        throw new Error(`Ordered ReAct plan did not create a real TV playlist: ${JSON.stringify(state)}.`)
+      }
+      const text = await page.locator('body').innerText()
+      if (text.includes('完整接收') || text.includes('结构校验')) {
+        throw new Error('Internal structured-complete protocol text leaked into the user conversation.')
+      }
+      if (!text.includes('上午以新闻和民生内容为主')) {
+        throw new Error('Pre-creation conversation disappeared after the playlist workspace was created.')
+      }
+
+      return {
+        evidence: (await bodyLines(page, /上午|民生|电视播单|全天编排|工作区/)).slice(-20),
+        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
+  {
+    id: 'tv-partial-layout-suggest-refine',
+    description: '电视部分草案先阻拦全天编排，再由 planner 续补晚间多段且不改正式播单',
+    userInput: '草案只到下午，晚上18点到20点补新闻，20点到22点补剧场',
+    expectedDecision: 'planner 读取 partial 完整度并返回 refine_layout_draft，多段续补保留白天草案',
+    mustNotHappen: '前台本地猜测续接、丢弃既有白天草案、启动正式编排或写入正式节目',
+    verification: '先明确提示草案只覆盖部分时段；续补后草案含白天/晚间新闻/黄金剧场三段，itemCount 仍为 0',
+    run: async (page) => {
+      await seedTvLayoutDraft(page, {
+        id: 'goal37-partial-tv-draft',
+        channelId: 'dragon',
+        date: '2026-03-25',
+        version: 1,
+        source: 'generated',
+        userIntent: '白天版面草案',
+        coverage: { start: '06:00:00', end: '18:00:00' },
+        layoutReference: {
+          id: 'goal37-partial-tv-layout',
+          name: '白天版面草案',
+          slots: [{
+            id: 'goal37-slot-daytime', channelId: 'dragon',
+            startTime: '2026-03-25T06:00:00+08:00', endTime: '2026-03-25T18:00:00+08:00',
+            columnId: 'goal37-column-daytime',
+          }],
+        },
+        columns: [{
+          columnId: 'goal37-column-daytime', columnName: '白天综合版面', channelId: 'dragon',
+          defaultProgramType: 'news_magazine', semanticLabel: '白天综合版面', source: 'generated',
+        }],
+      })
+      await waitForText(page, ['当前工作区 · 电视播单', '白天综合版面'])
+
+      await sendMessage(page, '帮我全天编排')
+      await waitForText(page, ['这份草案只写了一部分', '缺的时段'])
+
+      await sendMessage(page, '草案只到下午，晚上18点到20点补新闻，20点到22点补剧场')
+      await waitForText(page, ['已按你的要求更新当前版面草案', '晚间新闻', '黄金剧场'])
+
+      const state = await page.evaluate(() => window.__AIBIANDAN_PAGE_HARNESS__.getState())
+      const expectedLabels = ['白天综合版面', '晚间新闻', '黄金剧场']
+      if (JSON.stringify(state.layoutDraftLabels) !== JSON.stringify(expectedLabels)) {
+        throw new Error(`Partial draft continuation lost or reordered segments: ${JSON.stringify(state.layoutDraftLabels)}.`)
+      }
+      if (state.layoutDraftCoverage?.start !== '06:00:00' || state.layoutDraftCoverage?.end !== '22:00:00') {
+        throw new Error(`Partial draft coverage was not extended correctly: ${JSON.stringify(state.layoutDraftCoverage)}.`)
+      }
+      if (state.itemCount !== 0) {
+        throw new Error(`Draft refinement unexpectedly wrote the formal playlist; itemCount=${state.itemCount}.`)
+      }
+
+      const calls = await page.evaluate(() => window.__goal37LlmCalls ?? [])
+      const refineCall = calls.find((call) => call.userInput.includes('晚上18点到20点补新闻'))
+      if (!refineCall?.responsePreview?.includes('refine_layout_draft')) {
+        throw new Error('Partial draft continuation was not decided by planner refine_layout_draft action.')
+      }
+      const lines = await bodyLines(page, /部分|补草案|白天综合|晚间新闻|黄金剧场|正式播单/)
+      return {
+        evidence: lines.slice(-22),
+        llmCalls: calls,
+        runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
+  {
+    id: 'formal-react-explicit-approval-resume',
+    description: '正式 ReAct 敏感删除进入独立审批条，显式确认后沿 checkpoint 恢复写入',
+    userInput: '执行ReAct审批测试',
+    expectedDecision: 'research observation 后进入 waiting_user，确认按钮调用 confirm_pending 并完成删除',
+    mustNotHappen: '自动批准删除、把确认按钮转成自然语言、确认前删除节目或递归创建第二个 run',
+    verification: '审批条可见且目标节目仍在；点击确认后审批条消失、目标节目删除、无页面错误',
+    run: async (page) => {
+      await seedTvSchedule(page, [
+        {
+          id: 'react-delete-target', startTime: '19:00:00', endTime: '19:30:00',
+          programName: '待删除测试节目', durationSeconds: 1800, programType: 'news_magazine',
+        },
+      ])
+      await waitForText(page, ['当前工作区 · 电视播单', '待删除测试节目'])
+
+      await sendMessage(page, '执行ReAct审批测试')
+      await waitForText(page, ['等待确认', '确认后从已保存的检查点继续', '确认执行'])
+      let state = await page.evaluate(() => window.__AIBIANDAN_PAGE_HARNESS__.getState())
+      if (state.itemCount !== 1) {
+        throw new Error(`Pending ReAct deletion mutated before confirmation; itemCount=${state.itemCount}.`)
+      }
+
+      await page.getByRole('button', { name: '确认执行', exact: true }).click()
+      await page.waitForFunction(() => window.__AIBIANDAN_PAGE_HARNESS__.getState().itemCount === 0, null, { timeout: 60_000 })
+      await page.waitForFunction(() => !document.body.innerText.includes('确认后从已保存的检查点继续'), null, { timeout: 60_000 })
+      state = await page.evaluate(() => window.__AIBIANDAN_PAGE_HARNESS__.getState())
+      if (state.itemCount !== 0) {
+        throw new Error(`Confirmed ReAct deletion did not update the formal playlist; itemCount=${state.itemCount}.`)
+      }
+
+      const lines = await bodyLines(page, /ReAct|审批|等待确认|确认执行|待删除测试节目|正式编排/)
+      return {
+        evidence: lines.slice(-20),
+        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
   {
     id: 'rotation-gate-draft-refine',
     description: '轮播无草案整体编排先阻拦，再生成草案，再局部改草案',
@@ -828,6 +1256,49 @@ const scenarios = [
       const lines = await bodyLines(page, /轮播|草案|世界杯|中国队|正式|整体编排/)
       return {
         evidence: lines.slice(-16),
+        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
+  {
+    id: 'rotation-upload-layout-xls',
+    description: '轮播工作区真实上传 xlsx 后激活独立轮播草案，确认前不写正式播单',
+    userInput: '上传这个轮播草案，按它来排',
+    expectedDecision: '文件导入形成 source=uploaded、strategyProfile.kind=carousel 的当前草案，正式播单保持为空',
+    mustNotHappen: '把上传版面当成电视默认草案、上传后立即启动正式编排、制造测试业务实体或写正式节目',
+    verification: 'Playwright 向真实 file input 上传固定 xlsx；页面显示导入成功，草案有时段，itemCount=0',
+    run: async (page) => {
+      await page.getByRole('button', { name: '新建轮播单' }).click()
+      await waitForText(page, ['当前工作区 · 轮播单'])
+
+      const fixturePath = path.join(rootDir, 'test-fixtures/browser/smg-weekday-layout.xlsx')
+      if (!existsSync(fixturePath)) {
+        throw new Error(`data_fixture_missing: ${fixturePath}`)
+      }
+      await page.locator('input.layout-file-input').setInputFiles(fixturePath)
+      await page.waitForFunction(() => {
+        const state = window.__AIBIANDAN_PAGE_HARNESS__?.getState?.()
+        return state?.layoutDraftSource === 'uploaded' && state.layoutDraftSegments > 0
+      }, null, { timeout: 60_000 })
+
+      const state = await page.evaluate(() => window.__AIBIANDAN_PAGE_HARNESS__.getState())
+      if (state.layoutDraftSource !== 'uploaded') {
+        throw new Error(`Uploaded rotation draft source should be uploaded, got ${state.layoutDraftSource}.`)
+      }
+      if (state.layoutDraftStrategyKind !== 'carousel') {
+        throw new Error(`Uploaded rotation draft should use carousel strategy, got ${state.layoutDraftStrategyKind}.`)
+      }
+      if (state.layoutDraftSegments < 1) {
+        throw new Error('Uploaded rotation draft did not expose any parsed layout segments.')
+      }
+      if (state.itemCount !== 0) {
+        throw new Error(`Uploading a rotation draft unexpectedly wrote formal items; itemCount=${state.itemCount}.`)
+      }
+
+      const lines = await bodyLines(page, /轮播|上传|导入|草案|smg-weekday-layout|正式播单/)
+      return {
+        evidence: lines.slice(-24),
         llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
         runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
       }
@@ -913,11 +1384,17 @@ const scenarios = [
         call.traceLabel === 'agent.intent_interpreter' && call.userInput.includes('9点插入看东方')
       )
       if (insertCalls.length !== 1) {
-        throw new Error(`Expected one intent-interpreter call for precise TV insert, got ${insertCalls.length}.`)
+        throw new Error(`Expected one intent-interpreter call for TV insert, got ${insertCalls.length}.`)
+      }
+      const judgeCalls = calls.filter((call) =>
+        call.traceLabel === 'agent.candidate_judge' && call.userInput.includes('9点插入看东方')
+      )
+      if (judgeCalls.length !== 1) {
+        throw new Error(`Expected one candidate-judge call for ambiguous TV insert, got ${judgeCalls.length}.`)
       }
       const detailsText = await openLatestDetailsAndRead(page)
-      if (!detailsText.includes('本轮轨迹') || !detailsText.includes('模型 1 次') || !detailsText.includes('未写入')) {
-        throw new Error('Precise insert details should show one-call trace and non-write status.')
+      if (!detailsText.includes('本轮轨迹') || !detailsText.includes('未写入')) {
+        throw new Error('Insert recommendation details should show non-write status.')
       }
 
       const lines = await bodyLines(page, /电视播单|看东方|9点|候选|补充|直接选/)
@@ -999,7 +1476,7 @@ const scenarios = [
   },
   {
     id: 'pending-new-topic-expires',
-    description: '正式重编待确认时，用户改问当前播单内容，旧 pending 自然失效',
+    description: '正式重编待确认时，LLM 显式开始新查询任务，旧 pending 不得执行',
     run: async (page) => {
       await seedTvSchedule(page, [
         { startTime: '07:00:00', endTime: '08:00:00', programName: '看东方 第112期', durationSeconds: 3600 },
@@ -1011,7 +1488,7 @@ const scenarios = [
       await waitForText(page, ['待确认重新编排', '确认重新编排'])
 
       await sendMessage(page, '当前播单有什么节目')
-      await waitForText(page, ['上一条待确认操作已失效', '现在只是分析，没有改动播单'])
+      await waitForText(page, ['现在只是分析，没有改动播单'])
 
       const lines = await bodyLines(page, /失效|分析|没有改动|看东方|待确认|播单/)
       return {
@@ -1150,6 +1627,11 @@ const scenarios = [
   {
     id: 'recoverable-llm-retry-succeeds',
     description: '一次模型失败后，用户说继续，系统重试并成功落草案',
+    goals: [38],
+    userInput: '模拟一次失败后继续',
+    expectedDecision: '第一次暴露可恢复 LLM 失败，用户重试后成功生成草案',
+    mustNotHappen: 'LLM 失败后假装完成、自动写入或让 Goal 38 重复执行整套 Goal 37 场景',
+    verification: 'Goal 38 只执行本场景，首次不改现场，第二次出现恢复后的草案',
     run: async (page) => {
       await page.getByRole('button', { name: '新建轮播单' }).click()
       await waitForText(page, ['当前工作区 · 轮播单'])
@@ -1173,7 +1655,7 @@ const scenarios = [
     description: 'ReAct 预置查证任务在用户说继续时接着原任务核验素材，不从头开始',
     run: async (page) => {
       await sendMessage(page, '新建一个1小时轮播单，先查世界杯亚洲球队素材再决定草案')
-      await waitForText(page, ['当前工作区 · 轮播单', '世界杯亚洲球队素材', '素材核验作为下一步任务'])
+      await waitForText(page, ['当前工作区 · 轮播单', '世界杯亚洲球队素材', 'canonical 素材库核验素材方向'])
 
       await sendMessage(page, '继续')
       await waitForText(page, ['素材库', '已把“世界杯亚洲球队素材”更新到左侧草案的第 1 段', '正式播单还没有开始编排'])
@@ -1346,6 +1828,62 @@ const scenarios = [
     },
   },
   {
+    id: 'tv-delete-time-range-large',
+    description: '电视播单按大时间范围删除时分批确认，首批完成后保留剩余现场并继续',
+    userInput: '把4点到10点全部节目删掉',
+    expectedDecision: 'LLM 返回 time_range batch_delete 复合计划；本地首批最多10条，剩余2条沿 pending 继续',
+    mustNotHappen: '确认前写入、一次性删除12条、删除范围外节目、继续时重复首批或失败后自动回滚',
+    verification: '影响范围先进入确认；确认后 itemCount=2 且显示剩余2条；继续后 itemCount=0',
+    run: async (page) => {
+      const canonicalProducts = loadCanonicalScheduleProducts(12)
+      const scheduleItems = canonicalProducts.map((product, index) => {
+        const startMinutes = 4 * 60 + index * 30
+        const endMinutes = startMinutes + 30
+        const toClock = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}:00`
+        return {
+          id: product.productId,
+          programCode: product.programCode,
+          code18: product.programCode,
+          programName: product.title,
+          instanceName: product.title,
+          startTime: toClock(startMinutes),
+          endTime: toClock(endMinutes),
+          durationSeconds: product.duration,
+        }
+      })
+      await seedTvSchedule(page, scheduleItems)
+      await waitForText(page, ['当前工作区 · 电视播单', canonicalProducts[0].title, canonicalProducts[11].title])
+
+      await sendMessage(page, '把4点到10点全部节目删掉')
+      await waitForText(page, ['04:00:00-10:00:00', '第 1 批', '确认后'])
+      let state = await page.evaluate(() => window.__AIBIANDAN_PAGE_HARNESS__.getState())
+      if (state.itemCount !== 12) {
+        throw new Error(`Time-range delete mutated before confirmation; itemCount=${state.itemCount}.`)
+      }
+
+      await sendMessage(page, '确认')
+      await waitForText(page, ['已先删除 10 条', '还剩 2 条'])
+      state = await page.evaluate(() => window.__AIBIANDAN_PAGE_HARNESS__.getState())
+      if (state.itemCount !== 2) {
+        throw new Error(`First time-range batch should leave 2 items, got ${state.itemCount}.`)
+      }
+
+      await sendMessage(page, '继续')
+      await waitForText(page, ['已删除 2 条', '已经没有这些目标节目'])
+      state = await page.evaluate(() => window.__AIBIANDAN_PAGE_HARNESS__.getState())
+      if (state.itemCount !== 0) {
+        throw new Error(`Second time-range batch did not finish the scoped task; itemCount=${state.itemCount}.`)
+      }
+
+      const lines = await bodyLines(page, /04:00|10:00|删除|第 1 批|剩 2 条|确认|继续|没有这些目标节目/)
+      return {
+        evidence: lines.slice(-28),
+        llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []),
+        runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []),
+      }
+    },
+  },
+  {
     id: 'batch-delete-failure-can-retry',
     description: '批量删除写入失败后保留任务上下文，用户说继续可重试这一批',
     run: async (page) => {
@@ -1390,7 +1928,46 @@ const scenarios = [
   },
 ]
 
+const clearBrowserStorage = async (page) => {
+  await page.evaluate(() => {
+    try {
+      window.localStorage.clear()
+      window.sessionStorage.clear()
+    } catch {
+      // ignore
+    }
+  })
+  try {
+    await page.evaluate(() => {
+      return new Promise((resolve) => {
+        try {
+          const request = window.indexedDB.open('aibiandan-runtime-store')
+          request.onsuccess = () => {
+            const db = request.result
+            Array.from(db.objectStoreNames).forEach((name) => {
+              try {
+                db.transaction(name, 'readwrite').objectStore(name).clear()
+              } catch {
+                // ignore
+              }
+            })
+            resolve(undefined)
+          }
+          request.onerror = () => resolve(undefined)
+          request.onblocked = () => resolve(undefined)
+        } catch {
+          resolve(undefined)
+        }
+      })
+    })
+  } catch {
+    // ignore
+  }
+}
+
 const runScenario = async ({ chromium, url, scenario, executablePath }) => {
+  const startTime = Date.now()
+  goal37Log(`starting scenario: ${scenario.id}`)
   const launchOptions = {
     headless: true,
   }
@@ -1398,7 +1975,8 @@ const runScenario = async ({ chromium, url, scenario, executablePath }) => {
     launchOptions.executablePath = executablePath
   }
   const browser = await chromium.launch(launchOptions)
-  const page = await browser.newPage({ viewport: { width: 1500, height: 960 } })
+  const context = await browser.newContext({ viewport: { width: 1500, height: 960 } })
+  const page = await context.newPage()
   const consoleEvents = []
   const pageErrors = []
   page.on('console', (message) => {
@@ -1413,7 +1991,9 @@ const runScenario = async ({ chromium, url, scenario, executablePath }) => {
   try {
     await installBrowserLlmMock(page)
     await page.goto(url, { waitUntil: 'networkidle' })
+    await clearBrowserStorage(page)
     const result = await scenario.run(page)
+    goal37Log(`scenario passed: ${scenario.id} (${Date.now() - startTime}ms)`)
     return {
       id: scenario.id,
       description: scenario.description,
@@ -1423,7 +2003,7 @@ const runScenario = async ({ chromium, url, scenario, executablePath }) => {
       ...result,
     }
   } catch (error) {
-    return {
+    const failurePayload = {
       id: scenario.id,
       description: scenario.description,
       status: 'failed',
@@ -1434,6 +2014,13 @@ const runScenario = async ({ chromium, url, scenario, executablePath }) => {
       llmCalls: await page.evaluate(() => window.__goal37LlmCalls ?? []).catch(() => []),
       runtimeTrace: await page.evaluate(() => window.__AIBIANDAN_RUNTIME_TRACE__ ?? []).catch(() => []),
     }
+    try {
+      writeFileSync(path.join(rootDir, `goal37-debug-${scenario.id}.json`), JSON.stringify(failurePayload, null, 2), 'utf8')
+    } catch {
+      // ignore
+    }
+    goal37Log(`scenario failed: ${scenario.id} (${Date.now() - startTime}ms): ${error instanceof Error ? error.message : String(error)}`)
+    return failurePayload
   } finally {
     await browser.close()
   }
@@ -1443,11 +2030,14 @@ const main = async () => {
   const args = new Set(process.argv.slice(2))
   const summaryOnly = args.has('--summary-only')
   const selectedId = process.argv.find((item) => item.startsWith('--scenario='))?.split('=')[1]
+  const goalArg = process.argv.find((item) => item.startsWith('--goal='))?.split('=')[1]
+  const goal = Number(goalArg ?? 37)
   const portArg = process.argv.find((item) => item.startsWith('--port='))?.split('=')[1]
-  const port = Number(portArg ?? process.env.GOAL37_PORT ?? 5173)
-  const selected = selectedId ? scenarios.filter((scenario) => scenario.id === selectedId) : scenarios
+  const port = Number(portArg ?? process.env.GOAL37_PORT ?? 5199)
+  const goalScenarios = scenarios.filter((scenario) => (scenario.goals ?? [37]).includes(goal))
+  const selected = selectedId ? scenarios.filter((scenario) => scenario.id === selectedId) : goalScenarios
   if (selected.length === 0) {
-    throw new Error(`Unknown scenario: ${selectedId}`)
+    throw new Error(selectedId ? `Unknown scenario: ${selectedId}` : `Unknown or empty browser goal: ${goal}`)
   }
 
   const server = args.has('--no-server')
@@ -1471,6 +2061,7 @@ const main = async () => {
   }
 
   const summary = {
+    goal,
     server: {
       url: server.url,
       reused: server.reused,
@@ -1482,6 +2073,7 @@ const main = async () => {
   }
   if (summaryOnly) {
     console.log(JSON.stringify({
+      goal: summary.goal,
       server: summary.server,
       scenarioCount: summary.scenarioCount,
       passed: summary.passed,

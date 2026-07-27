@@ -52,6 +52,7 @@ export interface ReactTaskObservation {
 
 export interface ReactTaskRun<ActionDraft = unknown> {
   id: string
+  workspaceKey: string
   objective: string
   originalUserInput: string
   status: ReactTaskStatus

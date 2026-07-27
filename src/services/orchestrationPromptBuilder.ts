@@ -4,6 +4,15 @@ import type { GapPlanningThought } from './orchestrationStrategyService'
 import type { DialogueContext } from './dialogueContext'
 import type { InsertParams } from './paramExtractor'
 
+/**
+ * orchestration prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本，顺播规则引用标准文案核心点
+ *
+ * 本文件三个 build 函数只返回 ChatMessage[]，不直接调用 LLM；
+ * 调用方需 import 本常量并透传到 llmClient.chat 的 promptVersion 字段。
+ */
+export const ORCHESTRATION_PROMPT_BUILDER_VERSION = 'v1.0' as const
+
 export interface QueryIntentPromptInput {
   channelName: string
   channelId: string
@@ -25,10 +34,10 @@ export interface GapCandidateSelectionPromptInput {
 export function buildQueryIntentPrompt(input: QueryIntentPromptInput): ChatMessage[] {
   return [
     {
-      role: 'system',
-      content:
-        '你是电视节目编排查询参数生成器。请根据空窗和编排想法，只输出候选查询条件所需的 JSON，不要输出额外说明。',
-    },
+        role: 'system',
+        content:
+        `[prompt ${ORCHESTRATION_PROMPT_BUILDER_VERSION}] 你是电视节目编排查询参数生成器。请根据空窗和编排想法，只输出候选查询条件所需的 JSON，不要输出额外说明。`,
+      },
     {
       role: 'user',
       content:
@@ -61,7 +70,7 @@ export function buildGapCandidateSelectionPrompt(
     {
       role: 'system',
       content:
-        '你是一名经验丰富的电视节目编排人员。请模拟资深编排的判断过程，只从给定候选里选择一个最适合当前空窗的节目实例，并只输出 JSON。若候选不满足硬性意图、会造成时间重叠、顺播倒序、跳集或重复集数，请返回 none 或 clarify。',
+        `[prompt ${ORCHESTRATION_PROMPT_BUILDER_VERSION}] 你是一名经验丰富的电视节目编排人员。请模拟资深编排的判断过程，只从给定候选里选择一个最适合当前空窗的节目实例，并只输出 JSON。若候选不满足硬性意图、会造成时间重叠、顺播倒序、跳集或重复集数，请返回 none 或 clarify。顺播期数选择是候选决策最高优先级硬规则：有基线选期望下一集，无基线选最早一期，同一期多版本返回 clarify；不能跳集、倒序、重复。`,
     },
     {
       role: 'user',
@@ -75,6 +84,7 @@ export function buildGapCandidateSelectionPrompt(
         `策略：主优先=${primary}; fallback=${fallback}; requiresPreviousSchedule=${Boolean(input.planningThought?.selectionPolicy?.requiresPreviousSchedule)}\n` +
         `策略判断口径：${strategyGuide}\n` +
         `当前已排节目：\n${currentSchedule}\n` +
+        '顺播硬规则：有基线选期望下一集，无基线选最早一期，不能跳集、倒序、重复。\n' +
         '上下文规则：9 点已有第1集时，不应回填 8 点第2集；节目编号前缀、去掉集数后的节目名称、所属栏目相同只是判断上下节目的经验线索，不是绝对规则，必须综合标题、栏目、历史进度、当前节目单和播出风险判断。\n' +
         `候选列表：\n${candidateList}\n` +
         '请输出 JSON，例如：{"decision":"select","selectedCandidateId":"...","confidence":0.9,"reasoning":"...","matchedRequirements":["..."],"missingRequirements":[],"riskFlags":[]}',
@@ -84,7 +94,7 @@ export function buildGapCandidateSelectionPrompt(
 
 function formatStrategyGuide(primary: string): string {
   if (primary === 'sequence') {
-    return '电视频道顺播优先读取历史和当前编排上下文，按同系列下一集/期选择，避免跳集、倒序和回填后续集。'
+    return '电视频道顺播优先读取历史和当前编排上下文，按同系列下一集/期选择，避免跳集、倒序和回填后续集；无基线时选最早一期。'
   }
   if (primary === 'rating') {
     return '收视率优先只以候选的 estimatedRating 等统计数据为主要取舍依据，但仍必须先满足硬关键词、时长和上下文约束。'
@@ -105,7 +115,7 @@ export function buildInsertCandidateSelectionPrompt(
 ): ChatMessage[] {
   const targetProgramText = params.programName ?? params.rawProgramText ?? params.semanticLabel ?? '未明确节目名'
   const insertDecisionRules =
-    '插入编排判断规则：明确节目名、主题、栏目、地点、集数/期数或功能要求未命中时返回 none；候选接近但可能造成时间重叠、顺播倒序、跳集、重复集数或播出上下文风险时返回 clarify；节目编号前缀、去掉集数后的节目名称、所属栏目相同只是经验线索，不是绝对规则，必须综合标题、栏目、当前进度和播出风险判断。'
+    '插入编排判断规则：顺播期数选择是最高优先级硬规则——有基线选期望下一集，无基线选最早一期；明确节目名、主题、栏目、地点、集数/期数或功能要求未命中时返回 none；候选接近但可能造成时间重叠、顺播倒序、跳集、重复集数或播出上下文风险时返回 clarify；节目编号前缀、去掉集数后的节目名称、所属栏目相同只是经验线索，不是绝对规则，必须综合标题、栏目、当前进度和播出风险判断。'
   const insertScheduleContext = [
     context.scheduleSummary,
     `目标时间附近节目：${context.nearbyScheduleSummary}`,
@@ -119,7 +129,7 @@ export function buildInsertCandidateSelectionPrompt(
     {
       role: 'system',
       content:
-        '你是电视节目插入候选选择器。请按经验丰富的编排人员方式判断候选是否真的适合插入，只输出 JSON。硬性节目名或上下文不匹配时返回 none，存在顺播风险时返回 clarify。',
+        `[prompt ${ORCHESTRATION_PROMPT_BUILDER_VERSION}] 你是电视节目插入候选选择器。请按经验丰富的编排人员方式判断候选是否真的适合插入，只输出 JSON。硬性节目名或上下文不匹配时返回 none，存在顺播风险时返回 clarify。顺播硬规则优先于时长考量。`,
     },
     {
       role: 'user',

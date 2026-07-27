@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { buildDialogueContext } from '@/services/dialogueContext'
-import { ParamExtractor } from '@/services/paramExtractor'
+import { ParamExtractor, PARAM_EXTRACTOR_PROMPT_VERSION } from '@/services/paramExtractor'
 
 const createScheduleState = () => ({
   channelId: 'dragon',
@@ -169,5 +169,105 @@ describe('ParamExtractor', () => {
       offsetSeconds: 600,
     })
     expect(chat).toHaveBeenCalled()
+  })
+})
+
+describe('ParamExtractor promptVersion 透传', () => {
+  /**
+   * case c10-param-extractor-passes-version
+   * - expectedDecision: 4 个 extract 方法调用 LLM 时均透传 promptVersion
+   * - mustNotHappen: 任一 options 缺失 promptVersion
+   * - verification: 每次调用 chat.mock.calls[N][1] 含 promptVersion: 'v1.0'
+   */
+  it('c10-param-extractor-insert-passes-version: extractInsertParams 透传 promptVersion', async () => {
+    const chat = vi.fn(async () => ({
+      content: '{"targetTime":"9:00","programName":"东方新闻","rawProgramText":"东方新闻","semanticLabel":"新闻","programTypeHint":"news","expectedDurationSeconds":1800}',
+    }))
+    const extractor = new ParamExtractor({ chat } as never)
+
+    await extractor.extractInsertParams(
+      buildDialogueContext({
+        scheduleState: createScheduleState(),
+        userInput: '9点插入东方新闻',
+        currentSchedule: [],
+      }),
+    )
+
+    expect(chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        promptVersion: PARAM_EXTRACTOR_PROMPT_VERSION,
+        traceLabel: 'atomic_insert_params',
+      }),
+    )
+  })
+
+  it('c10-param-extractor-move-passes-version: extractMoveParams 透传 promptVersion', async () => {
+    const chat = vi.fn(async () => ({
+      content: '{"targetTime":"9:00","direction":"forward","offsetSeconds":1800}',
+    }))
+    const extractor = new ParamExtractor({ chat } as never)
+
+    await extractor.extractMoveParams(
+      buildDialogueContext({
+        scheduleState: createScheduleState(),
+        userInput: '9点后移30分钟',
+        currentSchedule,
+      }),
+    )
+
+    expect(chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        promptVersion: PARAM_EXTRACTOR_PROMPT_VERSION,
+        traceLabel: 'atomic_move_params',
+      }),
+    )
+  })
+
+  it('c10-param-extractor-delete-passes-version: extractDeleteParams 透传 promptVersion', async () => {
+    const chat = vi.fn(async () => ({
+      content: '{"targetTime":"9:00","programName":"看东方"}',
+    }))
+    const extractor = new ParamExtractor({ chat } as never)
+
+    await extractor.extractDeleteParams(
+      buildDialogueContext({
+        scheduleState: createScheduleState(),
+        userInput: '删除9点的节目',
+        currentSchedule,
+      }),
+    )
+
+    expect(chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        promptVersion: PARAM_EXTRACTOR_PROMPT_VERSION,
+        traceLabel: 'atomic_delete_params',
+      }),
+    )
+  })
+
+  it('c10-param-extractor-replace-passes-version: extractReplaceParams 透传 promptVersion', async () => {
+    const chat = vi.fn(async () => ({
+      content: '{"targetTime":"9:00","replacementProgramName":"午间30"}',
+    }))
+    const extractor = new ParamExtractor({ chat } as never)
+
+    await extractor.extractReplaceParams(
+      buildDialogueContext({
+        scheduleState: createScheduleState(),
+        userInput: '把9点的节目换成午间30',
+        currentSchedule,
+      }),
+    )
+
+    expect(chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        promptVersion: PARAM_EXTRACTOR_PROMPT_VERSION,
+        traceLabel: 'atomic_replace_params',
+      }),
+    )
   })
 })

@@ -3,6 +3,7 @@ import type { LayoutDraft, LayoutDraftSpec } from '@/types/orchestration'
 export interface LayoutDraftValidationIssue {
   level: 'error' | 'warning'
   code:
+    | 'invalid_spec'
     | 'empty_segments'
     | 'invalid_coverage'
     | 'invalid_segment'
@@ -34,9 +35,33 @@ const clockToSeconds = (clock: string): number | null => {
 
 const isoToClock = (value: string): string => value.split('T')[1]?.slice(0, 8) ?? value
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null
+
 export class LayoutDraftValidator {
-  validateSpec(spec: LayoutDraftSpec): LayoutDraftValidationResult {
+  validateSpec(spec: LayoutDraftSpec | null | undefined): LayoutDraftValidationResult {
     const issues: LayoutDraftValidationIssue[] = []
+    if (
+      !isRecord(spec)
+      || !isRecord(spec.coverage)
+      || typeof spec.coverage.start !== 'string'
+      || typeof spec.coverage.end !== 'string'
+      || !Array.isArray(spec.segments)
+      || spec.segments.some((segment) => (
+        !isRecord(segment)
+        || typeof segment.label !== 'string'
+        || typeof segment.startTime !== 'string'
+        || typeof segment.endTime !== 'string'
+        || typeof segment.programType !== 'string'
+      ))
+    ) {
+      return this.buildResult([{
+        level: 'error',
+        code: 'invalid_spec',
+        message: '模型返回的版面草案结构不完整，本轮未生成或修改草案。',
+      }])
+    }
+
     const coverageStart = clockToSeconds(spec.coverage.start)
     const coverageEnd = clockToSeconds(spec.coverage.end)
 

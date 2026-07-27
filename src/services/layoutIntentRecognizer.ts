@@ -2,6 +2,13 @@ import type { ChatMessage } from '@/types/llm'
 import type { LayoutDraft, LayoutIntentSegment, ScheduleState } from '@/types/orchestration'
 import type { LLMClient } from './llm/llmClient'
 import { cleanLayoutDraftSemanticLabel } from './layoutDraftSemanticCleaner'
+import { STAGE_TIMEOUT_BUDGET } from '@/services/agent/agentDeadline'
+
+/**
+ * layoutIntentRecognizer prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本
+ */
+export const LAYOUT_INTENT_RECOGNIZER_PROMPT_VERSION = 'v1.0' as const
 
 export type LayoutIntentMode = 'layout_prepare' | 'layout_refine' | 'layout_commit' | 'layout_analysis' | 'atomic_fallback' | 'clarify'
 
@@ -66,9 +73,10 @@ export class LayoutIntentRecognizer {
       const response = await this.llmClient.chat(this.buildPrompt(input), {
         temperature: 0.1,
         maxTokens: 400,
-        timeout: 8000,
+        timeout: STAGE_TIMEOUT_BUDGET.intent_parse,
         maxRetries: 1,
         traceLabel: 'layout_intent',
+        promptVersion: LAYOUT_INTENT_RECOGNIZER_PROMPT_VERSION,
       })
       const parsed = this.parseResponse(response.content)
       if (!parsed) {
@@ -92,7 +100,7 @@ export class LayoutIntentRecognizer {
   private buildPrompt(input: LayoutIntentRecognizerInput): ChatMessage[] {
     const currentDraftSummary = summarizeDraft(input.currentLayoutDraft)
     const systemPrompt = [
-      '你是广播节目版面意图识别器，主要负责识别版面草案相关意图。',
+      `[prompt ${LAYOUT_INTENT_RECOGNIZER_PROMPT_VERSION}] 你是广播节目版面意图识别器，主要负责识别版面草案相关意图。`,
       '如果输入明显更像在调整具体节目条目，但信息不足以直接形成插入、删除、移动、替换命令，请返回 atomic_fallback。',
       '请只在以下模式中选择一个：layout_prepare、layout_refine、layout_commit、layout_analysis、atomic_fallback、clarify。',
       '业务短语是开放的，不要把“下午剧场”“新闻栏目”“城市剧场”这类短语硬套成固定词表，请尽量原样保留到 semanticLabel。',

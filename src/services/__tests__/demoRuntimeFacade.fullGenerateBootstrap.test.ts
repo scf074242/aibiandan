@@ -6,9 +6,10 @@ import type { LayoutDraft } from '@/types/orchestration'
 const mockLayoutRecognize = vi.fn()
 const mockGenerateSpec = vi.fn()
 const mockRefineSpec = vi.fn()
+const mockLlmChat = vi.fn()
 
 vi.mock('@/services/llm/llmClient', () => ({
-  getLLMClient: () => ({}),
+  getLLMClient: () => ({ chat: mockLlmChat }),
 }))
 
 vi.mock('@/services/llm/taskClassifier', () => ({
@@ -70,6 +71,8 @@ vi.mock('@/services/layoutDraftFeasibilityService', () => ({
 import { DemoRuntimeFacade } from '@/services/runtime/demoRuntimeFacade'
 
 const createScheduleState = (): ScheduleState => ({
+  playlistId: 'tv-dragon-2026-03-25',
+  playlistType: 'tv',
   channelId: 'dragon',
   channelName: '东方卫视',
   date: '2026-03-25',
@@ -156,12 +159,44 @@ const createCompleteRotationDurationDraft = (overrides: Partial<LayoutDraft> = {
   ...overrides,
 })
 
+const mockFormalPlanner = (input: {
+  action: 'commit_layout_draft' | 'formal_orchestration'
+  mode: 'full_generate' | 'partial_generate'
+  taskKind: 'full_day' | 'overall_refill' | 'local_refill'
+  useLayoutDraft: boolean
+  query: string
+}) => {
+  mockLlmChat.mockResolvedValueOnce({
+    content: JSON.stringify({
+      mode: 'react',
+      actions: [input.action === 'commit_layout_draft'
+        ? { type: input.action, mode: input.mode, useLayoutDraft: input.useLayoutDraft }
+        : { type: input.action, mode: input.mode, taskKind: input.taskKind, useLayoutDraft: input.useLayoutDraft, searchKeywords: [input.query] }],
+      reactTask: {
+        objective: input.query,
+        maxTurns: 5,
+        batchSize: 3,
+        nextActions: [{ type: 'research_check', purpose: 'candidate_precheck', queries: [input.query] }],
+      },
+      assistantReplyDraft: '我会先查节目库，再逐批完成正式编排。',
+      reasoning: '用户明确要求进入正式长流程。',
+    }),
+  })
+}
+
 describe('DemoRuntimeFacade full generate bootstrap', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
   it('显式参考草案的空表全天编排会复用频道草案进入正式编排，不走 refineSpec', async () => {
+    mockFormalPlanner({
+      action: 'commit_layout_draft',
+      mode: 'full_generate',
+      taskKind: 'full_day',
+      useLayoutDraft: true,
+      query: '当前频道版面草案',
+    })
     mockLayoutRecognize.mockResolvedValue({
       mode: 'layout_prepare',
       confidence: 0.93,
@@ -179,6 +214,9 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
       userInput: '参考草案帮我填充全天节目',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_commit')
@@ -192,12 +230,22 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
   })
 
   it('轮播单工作区直接发起全天编排会被阻拦并引导补充草案', async () => {
+    mockFormalPlanner({
+      action: 'formal_orchestration',
+      mode: 'full_generate',
+      taskKind: 'full_day',
+      useLayoutDraft: false,
+      query: '轮播单全天编排',
+    })
     const facade = new DemoRuntimeFacade()
     const result = await facade.submitInstruction({
       scheduleState: createRotationScheduleState(),
       userInput: '帮我全天编排',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('message')
@@ -219,6 +267,13 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
   })
 
   it('轮播单已有完整激活草案时可按草案进入整体补排请求', async () => {
+    mockFormalPlanner({
+      action: 'commit_layout_draft',
+      mode: 'partial_generate',
+      taskKind: 'overall_refill',
+      useLayoutDraft: true,
+      query: '当前轮播草案',
+    })
     const rotationDraft = createCompleteRotationDurationDraft()
     const facade = new DemoRuntimeFacade()
     const result = await facade.submitInstruction({
@@ -232,6 +287,9 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
       currentSchedule: [],
       currentLayoutDraft: rotationDraft,
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_commit')
@@ -291,6 +349,13 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
   })
 
   it('电视播单草案完全为空时会阻拦全天编排', async () => {
+    mockFormalPlanner({
+      action: 'formal_orchestration',
+      mode: 'full_generate',
+      taskKind: 'full_day',
+      useLayoutDraft: true,
+      query: '电视播单全天编排',
+    })
     const facade = new DemoRuntimeFacade()
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState(),
@@ -298,6 +363,9 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
       currentSchedule: [],
       currentLayoutDraft: createEmptyLayoutDraft(),
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('message')
@@ -319,6 +387,13 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
   })
 
   it('电视播单只有部分草案时会引导继续补充草案信息', async () => {
+    mockFormalPlanner({
+      action: 'formal_orchestration',
+      mode: 'full_generate',
+      taskKind: 'full_day',
+      useLayoutDraft: true,
+      query: '电视播单全天编排',
+    })
     const facade = new DemoRuntimeFacade()
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState(),
@@ -326,6 +401,9 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
       currentSchedule: [],
       currentLayoutDraft: createPartialLayoutDraft(),
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('message')
@@ -396,12 +474,22 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
   })
 
   it('电视播单有频道默认草案时全天编排会携带草案参考', async () => {
+    mockFormalPlanner({
+      action: 'formal_orchestration',
+      mode: 'full_generate',
+      taskKind: 'full_day',
+      useLayoutDraft: true,
+      query: '当前频道版面草案',
+    })
     const facade = new DemoRuntimeFacade()
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState(),
       userInput: '帮我全天编排',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('orchestration')

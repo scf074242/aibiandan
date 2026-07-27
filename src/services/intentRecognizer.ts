@@ -1,5 +1,12 @@
-﻿import type { LLMClient } from './llm/llmClient'
+import type { LLMClient } from './llm/llmClient'
 import type { DialogueContext } from './dialogueContext'
+import { STAGE_TIMEOUT_BUDGET } from '@/services/agent/agentDeadline'
+
+/**
+ * intentRecognizer prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本
+ */
+export const INTENT_RECOGNIZER_PROMPT_VERSION = 'v1.0' as const
 
 export type MicroEditIntentType =
   | 'insert'
@@ -25,7 +32,7 @@ export class IntentRecognizer {
           {
             role: 'system',
             content:
-              '你是广播节目串联单的微调意图识别器。只识别 insert、move、delete、replace、unsupported、clarify 六类意图，并且只返回 JSON。请结合当前编单候选和目标时间附近节目理解用户指代，不要凭空假设不存在的节目。',
+              `[prompt ${INTENT_RECOGNIZER_PROMPT_VERSION}] 你是广播节目串联单的微调意图识别器。只识别 insert、move、delete、replace、unsupported、clarify 六类意图，并且只返回 JSON。请结合当前编单候选和目标时间附近节目理解用户指代，不要凭空假设不存在的节目。`,
           },
           {
             role: 'user',
@@ -40,7 +47,7 @@ export class IntentRecognizer {
               '输出格式: {"type":"delete","confidence":0.95,"reasoning":"..."}',
           },
         ],
-        { temperature: 0.1, maxTokens: 200, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_intent' },
+        { temperature: 0.1, maxTokens: 200, timeout: STAGE_TIMEOUT_BUDGET.intent_parse, maxRetries: 1, traceLabel: 'atomic_intent', promptVersion: INTENT_RECOGNIZER_PROMPT_VERSION },
       )
 
       const parsed = this.parseIntentResponse(response.content)

@@ -221,4 +221,30 @@ describe('DemoRuntimeFacade fast system intent', () => {
     expect(mockLayoutRecognize).not.toHaveBeenCalled()
     expect(mockTaskClassify).not.toHaveBeenCalled()
   })
+
+  /**
+   * A9 回归 case：buildClarifyFeedback 不再用本地正则猜测"你像是在调整具体节目"或"在描述编排需求"，
+   * 而是返回中性"我还没稳定理解"暴露失败。
+   *
+   * 直接测试私有方法 buildClarifyFeedback，避免完整 submitInstruction 链路被 Agent Core 等前置路径拦截。
+   *
+   * 修复前行为：用本地正则猜测用户意图（"这句话更像是在调整具体节目"），违反 LLM-only 原则
+   * 修复后行为：诚实说明"我还没稳定理解"，提供示例引导重试或补充
+   */
+  it('buildClarifyFeedback 返回中性澄清，不本地猜测用户意图', async () => {
+    const facade = new DemoRuntimeFacade() as unknown as {
+      buildClarifyFeedback: (input: { userInput: string }, explanation?: string) => { content: string }
+    }
+
+    // 用一个含"删除"关键词的输入，验证旧逻辑会猜测"更像是在调整具体节目"但新逻辑不会
+    const result = facade.buildClarifyFeedback({ userInput: '删掉那个东西' }, 'classifier未识别')
+
+    // 不应包含本地正则猜测的意图描述
+    expect(result.content).not.toContain('更像是在调整具体节目')
+    expect(result.content).not.toContain('更像是在描述编排需求')
+    // 应包含中性暴露失败的引导
+    expect(result.content).toContain('我还没稳定理解')
+    // 仍提供示例引导用户重试
+    expect(result.content).toMatch(/下午改成新闻栏目|重试|换一种说法/)
+  })
 })

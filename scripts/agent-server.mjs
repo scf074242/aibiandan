@@ -162,6 +162,8 @@ const handlePost = async (request, response, url) => {
   const sessionContinueMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/tasks\/([^/]+)\/continue$/)
   const sessionStopMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/tasks\/([^/]+)\/stop$/)
   const sessionExecutionStopMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/execution\/stop$/)
+  const sessionInstructionStopMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/instruction\/stop$/)
+  const sessionOrchestrationRecoveryMatch = url.pathname.match(/^\/api\/agent\/sessions\/([^/]+)\/orchestration\/recover$/)
 
   if (url.pathname === '/api/agent/llm-config/import') {
     const result = importLlmConfig(body?.config ?? body)
@@ -178,6 +180,12 @@ const handlePost = async (request, response, url) => {
 
   if (url.pathname === '/api/agent/submit') {
     const result = await runtime.submitInstruction(unwrapInput(body), body.sessionId)
+    json(request, response, 200, result)
+    return
+  }
+
+  if (url.pathname === '/api/agent/orchestration') {
+    const result = await runtime.executeReactOrchestration(body.request, unwrapInput(body), body.sessionId)
     json(request, response, 200, result)
     return
   }
@@ -204,6 +212,26 @@ const handlePost = async (request, response, url) => {
   if (url.pathname === '/api/agent/pending/insert-recommendation') {
     const result = await runtime.resolvePendingInsertRecommendation(unwrapInput(body), body.sessionId)
     json(request, response, 200, result)
+    return
+  }
+
+  if (sessionInstructionStopMatch) {
+    const [, sessionId] = sessionInstructionStopMatch
+    const result = runtime.stopActiveInstruction(sessionId, body?.workspaceKey ?? '')
+    const status = result.reason === 'not_found'
+      ? 404
+      : result.reason === 'workspace_mismatch' || result.reason === 'not_stoppable'
+        ? 409
+        : 200
+    json(request, response, status, result)
+    return
+  }
+
+  if (sessionOrchestrationRecoveryMatch) {
+    const [, sessionId] = sessionOrchestrationRecoveryMatch
+    const result = await runtime.recoverReactOrchestration(body, sessionId)
+    const status = result.result?.status === 'rejected' ? 409 : 200
+    json(request, response, status, result)
     return
   }
 
@@ -308,6 +336,8 @@ const server = http.createServer(async (request, response) => {
           'POST /api/agent/sessions/:sessionId/tasks/:taskId/continue',
           'POST /api/agent/sessions/:sessionId/tasks/:taskId/stop',
           'POST /api/agent/sessions/:sessionId/execution/stop',
+          'POST /api/agent/sessions/:sessionId/instruction/stop',
+          'POST /api/agent/sessions/:sessionId/orchestration/recover',
           'GET /api/agent/llm-config/status',
           'POST /api/agent/llm-config/import',
           'GET /api/agent/sessions/:sessionId/events',

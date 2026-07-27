@@ -1,12 +1,17 @@
 /**
  * 系统 Prompt 定义
+ *
+ * 版本号管理（对齐 AGENTS.md Prompt 版本管理门禁）：
+ * 每个 prompt 常量声明独立版本号，调用方需 import 并透传到 llmClient.chat 的 promptVersion 字段。
+ * 修订 prompt 时必须同步升版本号，并在 commit message 注明 vX.Y → vA.B。
  */
 
 /**
  * 编排专家角色 Prompt
  * 用于 Phase 1-3 的编排流程
  */
-export const ORCHESTRATION_EXPERT_PROMPT = `你是广电节目编排专家，负责为电视频道生成每日串联单。
+export const ORCHESTRATION_EXPERT_PROMPT_VERSION = 'v1.0' as const
+export const ORCHESTRATION_EXPERT_PROMPT = `[prompt ${ORCHESTRATION_EXPERT_PROMPT_VERSION}] 你是广电节目编排专家，负责为电视频道生成每日串联单。
 
 你的职责：
 1. 根据频道属性、版面参考、历史数据制定编排计划
@@ -46,7 +51,8 @@ export const ORCHESTRATION_EXPERT_PROMPT = `你是广电节目编排专家，负
  * 对话助手角色 Prompt
  * 用于对话微调模式
  */
-export const DIALOGUE_ASSISTANT_PROMPT = `你是广电编排助手，帮助用户通过自然语言修改串联单。
+export const DIALOGUE_ASSISTANT_PROMPT_VERSION = 'v1.0' as const
+export const DIALOGUE_ASSISTANT_PROMPT = `[prompt ${DIALOGUE_ASSISTANT_PROMPT_VERSION}] 你是广电编排助手，帮助用户通过自然语言修改串联单。
 
 你的职责：
 1. 理解用户的自然语言意图
@@ -89,7 +95,7 @@ export const DIALOGUE_ASSISTANT_PROMPT = `你是广电编排助手，帮助用�
 {
   "action": "clarification",
   "data": {
-    "question": "您提到的\"早间新闻\"是指\"朝闻天下\"还是\"第一时间\"？",
+    "question": "您提到的"早间新闻"是指"朝闻天下"还是"第一时间"？",
     "options": ["朝闻天下", "第一时间", "其他"]
   }
 }`
@@ -98,7 +104,8 @@ export const DIALOGUE_ASSISTANT_PROMPT = `你是广电编排助手，帮助用�
  * 候选查询专家 Prompt
  * 用于 Phase 2 阶段1的候选查询
  */
-export const CANDIDATE_QUERY_EXPERT_PROMPT = `你是节目库查询专家，负责为给定的空窗时段推荐合适的节目候选。
+export const CANDIDATE_QUERY_EXPERT_PROMPT_VERSION = 'v1.0' as const
+export const CANDIDATE_QUERY_EXPERT_PROMPT = `[prompt ${CANDIDATE_QUERY_EXPERT_PROMPT_VERSION}] 你是节目库查询专家，负责为给定的空窗时段推荐合适的节目候选。
 
 你的职责：
 1. 分析空窗时段的特征（时长、时段类型、前后节目）
@@ -134,7 +141,8 @@ export const CANDIDATE_QUERY_EXPERT_PROMPT = `你是节目库查询专家，负�
  * 节目选择专家 Prompt
  * 用于 Phase 2 阶段2的节目选择
  */
-export const PROGRAM_SELECTOR_PROMPT = `你是节目选择专家，负责从候选节目中为特定时段选择最合适的节目。
+export const PROGRAM_SELECTOR_PROMPT_VERSION = 'v1.0' as const
+export const PROGRAM_SELECTOR_PROMPT = `[prompt ${PROGRAM_SELECTOR_PROMPT_VERSION}] 你是节目选择专家，负责从候选节目中为特定时段选择最合适的节目。
 
 你的职责：
 1. 分析时段特征（时段类型、前后节目、目标受众）
@@ -171,7 +179,8 @@ export const PROGRAM_SELECTOR_PROMPT = `你是节目选择专家，负责从候�
  * 错误修复专家 Prompt
  * 用于 Phase 3 的修补模式
  */
-export const REPAIR_EXPERT_PROMPT = `你是串联单校验修复专家，负责自动修复编排中的错误。
+export const REPAIR_EXPERT_PROMPT_VERSION = 'v1.0' as const
+export const REPAIR_EXPERT_PROMPT = `[prompt ${REPAIR_EXPERT_PROMPT_VERSION}] 你是串联单校验修复专家，负责自动修复编排中的错误。
 
 你的职责：
 1. 分析校验错误列表

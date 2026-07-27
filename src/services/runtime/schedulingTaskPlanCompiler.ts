@@ -536,7 +536,7 @@ export const observeBatchDeleteSchedulingTask = <T extends RuntimeScheduleItem>(
 export const normalizeSchedulingTaskProgramName = (value: string): string =>
   value
     .replace(/\s+/g, '')
-    .replace(/[《》“”"'：:（）()【】\[\]、，,。.!！?？]/g, '')
+    .replace(/[《》“”"'：:（）()【】[\]、，,。.!！?？]/g, '')
     .replace(/节目$/u, '')
     .trim()
 

@@ -5,6 +5,10 @@ import { evaluateAgentLlmIntentCases } from '@/services/agent/llmIntentEvaluatio
 import { evaluateAgentLlmRuntimeCases, evaluateAgentLlmRuntimeConversationCases } from '@/services/agent/llmRuntimeEvaluation'
 import { LlmAgentIntentInterpreter } from '@/services/agent/llmAgentIntentInterpreter'
 import { LLMClient } from '@/services/llm/llmClient'
+import { AgentDeadline } from '@/services/agent/agentDeadline'
+import { LlmFormalOrchestrationDecider } from '@/services/agent/formalOrchestrationDecider'
+import { FormalOrchestrationRuntime } from '@/services/runtime/formalOrchestrationRuntime'
+import type { AgentPlannerAction } from '@/services/llm/agentPlanner'
 import { isPlaceholderApiKey } from '@/services/llm/localDemoLlm'
 import { buildAgentRealLlmEvaluationCases } from './fixtures/agentRealLlmEvaluationCases'
 import {
@@ -46,6 +50,9 @@ const baseURL = envValue('VITE_CODE_PLAN_LLM_BASE_URL') || envValue('OPENAI_BASE
 const model = envValue('VITE_CODE_PLAN_LLM_MODEL') || 'deepseek-ai/DeepSeek-V4-Flash'
 const reportPath = resolveAgentRealLlmEvaluationReportPath(envValue('AGENT_LLM_EVAL_REPORT_PATH'))
 const sections: AgentRealLlmEvaluationSection[] = []
+const REAL_LLM_MATRIX_TIMEOUT_MS = 15 * 60_000
+const REAL_LLM_SCENARIO_TIMEOUT_MS = 10 * 60_000
+const createSubmitDeadline = () => new AgentDeadline()
 const skipReason = !shouldRunRealLlm
   ? 'RUN_AGENT_REAL_LLM_EVAL is not set to 1.'
   : !hasConfiguredApiKey
@@ -100,11 +107,11 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
     })
     const cases = await buildAgentRealLlmEvaluationCases()
 
-    const report = await evaluateAgentLlmIntentCases(interpreter, cases)
+    const report = await evaluateAgentLlmIntentCases(interpreter, cases, { createDeadline: createSubmitDeadline })
     sections.push(toIntentEvaluationSection(report, 0.85))
 
     expect(report.passRate, JSON.stringify(report.results, null, 2)).toBeGreaterThanOrEqual(0.85)
-  }, 180000)
+  }, REAL_LLM_MATRIX_TIMEOUT_MS)
 
   it('drives runtime preview, confirmation, blocking, query, and validation outcomes from real LLM interpretation', async () => {
     const llmClient = new LLMClient({
@@ -120,7 +127,7 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
     })
     const cases = await buildAgentRealLlmRuntimeEvaluationCases()
 
-    const report = await evaluateAgentLlmRuntimeCases(interpreter, cases)
+    const report = await evaluateAgentLlmRuntimeCases(interpreter, cases, { createDeadline: createSubmitDeadline })
     sections.push(toRuntimeEvaluationSection(report, 0.8))
 
     expect(report.passRate, JSON.stringify(report.results.map((result) => ({
@@ -130,7 +137,7 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
       interpretation: result.result.input.interpretation,
       issues: result.result.decision.constraintReport?.issues,
     })), null, 2)).toBeGreaterThanOrEqual(0.8)
-  }, 180000)
+  }, REAL_LLM_SCENARIO_TIMEOUT_MS)
 
   it('continues real multi-turn scheduling conversations through pending context', async () => {
     const llmClient = new LLMClient({
@@ -146,7 +153,7 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
     })
     const cases = buildAgentRealLlmConversationEvaluationCases()
 
-    const report = await evaluateAgentLlmRuntimeConversationCases(interpreter, cases)
+    const report = await evaluateAgentLlmRuntimeConversationCases(interpreter, cases, { createDeadline: createSubmitDeadline })
     sections.push(toConversationEvaluationSection(report, 0.8))
 
     expect(report.passRate, JSON.stringify(report.results.map((result) => ({
@@ -155,7 +162,91 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
       statuses: result.results.map((turnResult) => turnResult.status),
       interpretations: result.results.map((turnResult) => turnResult.input.interpretation),
     })), null, 2)).toBeGreaterThanOrEqual(0.8)
-  }, 180000)
+  }, REAL_LLM_SCENARIO_TIMEOUT_MS)
+
+  /**
+   * case formal-react-real-llm-multi-turn-decide
+   * - userInput: 先检索候选，再完成最终校验后结束
+   * - expectedDecision: 真实 LLM 在第一轮 observation 后返回 validate，第二轮 observation 后返回 complete
+   * - mustNotHappen: 使用本地规则补 decide、一次性串行执行、把 mock 当成真实模型、调用失败后假装完成
+   * - verification: checkpoint decision 为 continue/complete，LLM trace 至少两次且全部成功
+   */
+  it('runs a real multi-turn formal ReAct decide loop from observations', async () => {
+    const llmClient = new LLMClient({
+      apiKey: apiKey!,
+      baseURL,
+      model,
+      temperature: 0,
+      maxTokens: 1200,
+      timeout: 90_000,
+    })
+    const deadline = new AgentDeadline({ overallDeadlineMs: 3 * 60_000 })
+    const decider = new LlmFormalOrchestrationDecider({ llmClient, deadline })
+    const runtime = new FormalOrchestrationRuntime<AgentPlannerAction>({
+      actor: async (action) => {
+        if (action.type === 'research_check') {
+          return {
+            type: 'asset_search',
+            summary: '素材检索已经完成；任务尚未完成。下一步唯一合法动作是 validate，完成 validate 前禁止 complete。',
+            data: { candidateCount: 2, noMutation: true },
+          }
+        }
+        if (action.type === 'validate') {
+          return {
+            type: 'validation',
+            summary: '最终校验已经完成，所有硬约束均通过，任务目标和停止条件已经满足，没有剩余动作。',
+            data: { validationPassed: true, noMutation: true },
+          }
+        }
+        throw new Error(`真实 ReAct 评估收到非预期 action：${action.type}`)
+      },
+      decide: (input) => decider.decide(input),
+    })
+
+    const result = await runtime.run({
+      originalUserInput: '先检索候选，再完成最终校验后结束',
+      plannerTask: {
+        objective: '必须先完成 research_check，再执行且仅执行一次 validate；只有 validate observation 明确通过后才能 complete。',
+        maxTurns: 3,
+        batchSize: 1,
+        stopCondition: 'validate observation 明确通过',
+        nextActions: [{ type: 'research_check', queries: ['新闻候选'] }],
+      },
+      deadline,
+    })
+    const traces = llmClient.getRecentRequestTraces().filter((trace) => trace.label === 'formal_orchestration_decide')
+    const passed = result.status === 'completed'
+      && result.checkpoints.length >= 2
+      && result.checkpoints[0]?.decision.kind === 'continue'
+      && result.checkpoints.at(-1)?.decision.kind === 'complete'
+      && traces.length >= 2
+      && traces.every((trace) => trace.success)
+    sections.push({
+      id: 'formal_react_loop',
+      title: 'Formal ReAct observation and decide loop',
+      status: passed ? 'passed' : 'failed',
+      threshold: 1,
+      total: 1,
+      passed: passed ? 1 : 0,
+      failed: passed ? 0 : 1,
+      passRate: passed ? 1 : 0,
+      llmCallsAttempted: traces.length,
+      llmCallsSucceeded: traces.filter((trace) => trace.success).length,
+      llmCallsFailed: traces.filter((trace) => !trace.success).length,
+      tagCoverage: [],
+      failures: passed ? [] : [{
+        id: 'formal-react-real-llm-multi-turn-decide',
+        failures: [`status=${result.status}`, `decisions=${result.checkpoints.map((checkpoint) => checkpoint.decision.kind).join(',')}`, `traces=${traces.length}`],
+      }],
+    })
+
+    expect(passed, JSON.stringify({
+      status: result.status,
+      decisions: result.checkpoints.map((checkpoint) => checkpoint.decision),
+      traces,
+      failure: result.failure,
+    }, null, 2)).toBe(true)
+  }, 240000)
 })
 
 const buildUnavailableSections = (reason: string): AgentRealLlmEvaluationSection[] =>

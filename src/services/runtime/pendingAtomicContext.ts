@@ -11,8 +11,10 @@ import type {
   RuntimePendingTargetSelection,
   RuntimeScheduleItem,
 } from './demoRuntimeFacade'
+import type { MutationPolicy } from '@/services/agent/mutationPolicy'
 
 export type RuntimeAtomicAction = 'insert' | 'move' | 'delete' | 'replace'
+export type RuntimePendingAtomicOwner = 'layout_draft' | 'formal_playlist'
 export type RuntimePendingAtomicPhase = 'clarifying' | 'selecting_target' | 'recommending_insert' | 'draft_research_confirmation' | 'formal_rebuild_confirmation'
 export type RuntimeAtomicMissingField =
   | 'target_time'
@@ -87,6 +89,10 @@ export interface RuntimeFormalRebuildConfirmation {
 
 export interface RuntimePendingAtomicContext {
   pendingId?: string
+  owner?: RuntimePendingAtomicOwner
+  workspaceKey?: string
+  mutationId?: string
+  mutationPolicy?: MutationPolicy
   action: RuntimeAtomicAction | null
   phase: RuntimePendingAtomicPhase
   summary: string
@@ -142,8 +148,8 @@ export const buildPendingAtomicContextFromClarification = (
   source?: RuntimePendingAtomicContextSource,
 ): RuntimePendingAtomicContext => {
   const mergedSlots: RuntimeAtomicSlotBag = {
-    ...(source?.slots ?? {}),
-    ...(pending.slots ?? {}),
+    ...source?.slots,
+    ...pending.slots,
   }
 
   if (!mergedSlots.targetTimeHint && pending.targetTimeHint) {
@@ -221,7 +227,7 @@ export const buildPendingAtomicContextFromTargetSelection = (
   originalUserInput: source?.originalUserInput ?? pending.summary,
   collectedUserInput: source?.collectedUserInput ?? pending.summary,
   slots: {
-    ...(source?.slots ?? {}),
+    ...source?.slots,
     targetTime: pending.targetTime,
     programName: pending.programName,
     direction: pending.moveConfig?.direction,
@@ -250,7 +256,7 @@ export const buildPendingAtomicContextFromInsertRecommendation = (
   originalUserInput: source?.originalUserInput ?? pending.originalUserInput,
   collectedUserInput: source?.collectedUserInput ?? pending.collectedUserInput,
   slots: {
-    ...(source?.slots ?? {}),
+    ...source?.slots,
     targetTime: pending.targetTime,
     rawProgramText: pending.rawProgramText,
     semanticLabel: pending.semanticLabel,
@@ -275,7 +281,7 @@ export const mergeRuntimeAtomicSlots = (
   patch?: Partial<RuntimeAtomicSlotBag>,
 ): RuntimeAtomicSlotBag => ({
   ...base,
-  ...(patch ?? {}),
+  ...patch,
 })
 
 export const deriveAtomicMissingFieldsFromSlots = (

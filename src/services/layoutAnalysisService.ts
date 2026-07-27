@@ -4,7 +4,7 @@ import { getLLMClient } from '@/services/llm/llmClient'
 import type { RuntimeLayoutEntry } from '@/services/orchestration/runtimeLayoutRegistry'
 import { getEffectiveColumnDefinition } from '@/services/orchestration/runtimeLayoutRegistry'
 
-import { buildLayoutAnalysisPrompt } from './layoutAnalysisPromptBuilder'
+import { buildLayoutAnalysisPrompt, LAYOUT_ANALYSIS_PROMPT_VERSION } from './layoutAnalysisPromptBuilder'
 
 const PROGRAM_TYPE_LABELS: Record<string, string> = {
   news: '新闻',
@@ -534,6 +534,8 @@ export class LayoutAnalysisService {
       const response = await this.llmClient.chat(buildLayoutAnalysisPrompt(context), {
         temperature: 0.5,
         maxTokens: 1800,
+        traceLabel: 'layout_analysis',
+        promptVersion: LAYOUT_ANALYSIS_PROMPT_VERSION,
       })
       const normalized = normalizeAnalysisText(response.content)
       if (normalized) {

@@ -569,6 +569,14 @@
           </div>
         </div>
         <div class="ai-sidebar-content">
+          <FormalOrchestrationApprovalBar
+            v-if="reactApproval"
+            :approval="reactApproval"
+            :current="reactApprovalIsCurrent"
+            :busy="orchestratorRuntime.isRunning.value"
+            @confirm="confirmReactApproval"
+            @cancel="cancelReactApproval"
+          />
           <ChatPanel
             :current-schedule="chatScheduleItems"
             :channel-id="currentChannelId"
@@ -716,6 +724,7 @@ import { getDataService } from '@/services/orchestration/dataService'
 import type { GapProcessingStatus } from '@/types/orchestration'
 import type { DraftFeasibilityReport, LayoutDraft, PlaylistType, RotationPlaylistStrategy, ValidationReport, ValidationIssue } from '@/types/orchestration'
 import ChatPanel from '@/components/dialogue/ChatPanel.vue'
+import FormalOrchestrationApprovalBar from './components/FormalOrchestrationApprovalBar.vue'
 import LLMConfigPanel from '@/components/llm/LLMConfigPanel.vue'
 import { isHttpAgentRuntimeEnabled } from '@/services/runtime/agentRuntimeClient'
 import { getScheduleValidationService } from '@/services/scheduleValidationService'
@@ -1433,7 +1442,7 @@ const createBrowserHarnessScheduleItem = (
   }
 }
 
-const seedBrowserHarnessSchedule = (
+const seedBrowserHarnessSchedule = async (
   type: BrowserHarnessPlaylistType,
   items: BrowserHarnessScheduleItem[],
   options?: { rotationDurationSeconds?: number },
@@ -1443,6 +1452,7 @@ const seedBrowserHarnessSchedule = (
   playlistType.value = type
   rotationStrategy.value = type === 'rotation' ? 'content_match' : rotationStrategy.value
   rotationTargetDurationSeconds.value = type === 'rotation' ? options?.rotationDurationSeconds ?? null : null
+  await nextTick()
   scheduleItems.value = items.map((item, index) => createBrowserHarnessScheduleItem(item, index, type))
   currentLayoutDraft.value = type === 'tv' ? resolveCurrentTvLayoutDraft() : createEmptyRotationLayoutDraft()
   currentLayoutDraftFeasibility.value = null
@@ -1461,18 +1471,46 @@ const seedBrowserHarnessSchedule = (
   updateScrollMetrics()
 }
 
+const seedBrowserHarnessTvLayoutDraft = async (draft: LayoutDraft) => {
+  persistCurrentPlaylistDocument()
+  currentPlaylistId.value = createLocalPlaylistId('tv')
+  playlistType.value = 'tv'
+  scheduleItems.value = []
+  await nextTick()
+  currentLayoutDraft.value = {
+    ...draft,
+    channelId: currentChannelId.value,
+    date: scheduleDate.value,
+    layoutReference: {
+      ...draft.layoutReference,
+      slots: draft.layoutReference.slots.map((slot) => ({
+        ...slot,
+        channelId: currentChannelId.value,
+      })),
+    },
+  }
+  currentLayoutDraftFeasibility.value = null
+  activeWorkspaceTab.value = 'draft'
+  void syncCurrentBroadcastWindow()
+  syncPageItemsToAtomic()
+  persistCurrentPlaylistDocument()
+  updateScrollMetrics()
+}
+
 const installBrowserHarness = () => {
   if (!import.meta.env.DEV || typeof window === 'undefined') return
   const harnessWindow = window as Window & {
     __AIBIANDAN_PAGE_HARNESS__?: {
-      seedTvSchedule: (items: BrowserHarnessScheduleItem[]) => void
-      seedRotationSchedule: (items: BrowserHarnessScheduleItem[], options?: { rotationDurationSeconds?: number }) => void
+      seedTvSchedule: (items: BrowserHarnessScheduleItem[]) => Promise<void>
+      seedTvLayoutDraft: (draft: LayoutDraft) => Promise<void>
+      seedRotationSchedule: (items: BrowserHarnessScheduleItem[], options?: { rotationDurationSeconds?: number }) => Promise<void>
       failNextAtomicReplaceAllItems: (message?: string) => void
       getState: () => Record<string, unknown>
     }
   }
   harnessWindow.__AIBIANDAN_PAGE_HARNESS__ = {
     seedTvSchedule: (items) => seedBrowserHarnessSchedule('tv', items),
+    seedTvLayoutDraft: (draft) => seedBrowserHarnessTvLayoutDraft(draft),
     seedRotationSchedule: (items, options) => seedBrowserHarnessSchedule('rotation', items, options),
     failNextAtomicReplaceAllItems: (message) => failNextAtomicReplaceAllItemsForHarness(message),
     getState: () => ({
@@ -1480,6 +1518,13 @@ const installBrowserHarness = () => {
       currentPlaylistId: currentPlaylistId.value,
       itemCount: scheduleItems.value.length,
       layoutDraftSegments: currentLayoutDraft.value?.layoutReference.slots.length ?? 0,
+      layoutDraftCoverage: currentLayoutDraft.value?.coverage ?? null,
+      layoutDraftSource: currentLayoutDraft.value?.source ?? null,
+      layoutDraftStrategyKind: currentLayoutDraft.value?.strategyProfile?.kind ?? null,
+      layoutDraftLabels: currentLayoutDraft.value?.layoutReference.slots.map((slot) => {
+        const column = currentLayoutDraft.value?.columns.find((item) => item.columnId === slot.columnId)
+        return column?.semanticLabel ?? column?.columnName ?? slot.columnId
+      }) ?? [],
       activeWorkspaceTab: activeWorkspaceTab.value,
     }),
   }
@@ -1869,6 +1914,10 @@ const gapSummaryLabel = computed(() => playlistType.value === 'rotation' ? 'ๆ—ถ้
 
 const {
   orchestratorRuntime,
+  reactApproval,
+  reactApprovalIsCurrent,
+  confirmReactApproval,
+  cancelReactApproval,
   handleCancelOrchestration,
   handleChatCommandExecuted,
   handleChatOrchestrateRequested,
@@ -1889,6 +1938,27 @@ const {
   },
   focusRuntime,
   normalizeClockText,
+  buildRuntimeSubmitInput: (userInput) => ({
+    scheduleState: {
+      playlistId: currentPlaylistId.value ?? undefined,
+      playlistType: playlistType.value,
+      channelId: currentChannelId.value,
+      channelName: currentChannelName.value,
+      date: scheduleDate.value,
+      isEmpty: chatScheduleItems.value.length === 0,
+      itemCount: chatScheduleItems.value.length,
+      gapCount: displayGapCount.value,
+      hasSelectedTimeRange: false,
+      rotationStrategy: playlistType.value === 'rotation' ? rotationStrategy.value : undefined,
+      rotationDurationSeconds: playlistType.value === 'rotation' ? rotationTargetDurationSeconds.value ?? undefined : undefined,
+    },
+    userInput,
+    currentSchedule: chatScheduleItems.value,
+    currentLayoutDraft: currentLayoutDraft.value,
+    history: [],
+    agentCoreEnabled: true,
+    layoutDraftEnabled: true,
+  }),
 })
 
 const getGapEntryStatusText = (status: GapProcessingStatus) => {

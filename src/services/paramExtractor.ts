@@ -1,5 +1,12 @@
-﻿import type { LLMClient } from './llm/llmClient'
+import type { LLMClient } from './llm/llmClient'
 import type { DialogueContext } from './dialogueContext'
+import { STAGE_TIMEOUT_BUDGET } from '@/services/agent/agentDeadline'
+
+/**
+ * paramExtractor prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
+ * - v1.0：初始版本（4 段内联 system prompt 共享同一版本基线）
+ */
+export const PARAM_EXTRACTOR_PROMPT_VERSION = 'v1.0' as const
 
 export interface InsertParams {
   targetTime: string
@@ -38,7 +45,7 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime，以及可选的 programName、rawProgramText、semanticLabel、programTypeHint、expectedDurationSeconds，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。用户明确说30分钟、半小时、1小时等时长时，expectedDurationSeconds 必须换算为秒。',
+              `[prompt ${PARAM_EXTRACTOR_PROMPT_VERSION}] 你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime，以及可选的 programName、rawProgramText、semanticLabel、programTypeHint、expectedDurationSeconds，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。用户明确说30分钟、半小时、1小时等时长时，expectedDurationSeconds 必须换算为秒。`,
           },
           {
             role: 'user',
@@ -48,7 +55,7 @@ export class ParamExtractor {
               '输出格式: {"targetTime":"09:00:00","programName":"看东方","rawProgramText":"看东方","semanticLabel":"新闻资讯","programTypeHint":"news_magazine","expectedDurationSeconds":1800}',
           },
         ],
-        { temperature: 0, maxTokens: 120, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_insert_params' },
+        { temperature: 0, maxTokens: 120, timeout: STAGE_TIMEOUT_BUDGET.intent_parse, maxRetries: 1, traceLabel: 'atomic_insert_params', promptVersion: PARAM_EXTRACTOR_PROMPT_VERSION },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
@@ -82,7 +89,7 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime、direction 和 offsetSeconds，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。',
+              `[prompt ${PARAM_EXTRACTOR_PROMPT_VERSION}] 你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime、direction 和 offsetSeconds，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。`,
           },
           {
             role: 'user',
@@ -92,7 +99,7 @@ export class ParamExtractor {
               '输出格式: {"targetTime":"22:00:00","direction":"forward","offsetSeconds":3600}',
           },
         ],
-        { temperature: 0, maxTokens: 120, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_move_params' },
+        { temperature: 0, maxTokens: 120, timeout: STAGE_TIMEOUT_BUDGET.intent_parse, maxRetries: 1, traceLabel: 'atomic_move_params', promptVersion: PARAM_EXTRACTOR_PROMPT_VERSION },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
@@ -122,7 +129,7 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和可选 programName，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。',
+              `[prompt ${PARAM_EXTRACTOR_PROMPT_VERSION}] 你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和可选 programName，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。`,
           },
           {
             role: 'user',
@@ -132,7 +139,7 @@ export class ParamExtractor {
               '输出格式: {"targetTime":"12:00:00","programName":"午间30"}',
           },
         ],
-        { temperature: 0, maxTokens: 120, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_delete_params' },
+        { temperature: 0, maxTokens: 120, timeout: STAGE_TIMEOUT_BUDGET.intent_parse, maxRetries: 1, traceLabel: 'atomic_delete_params', promptVersion: PARAM_EXTRACTOR_PROMPT_VERSION },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)
@@ -161,7 +168,7 @@ export class ParamExtractor {
           {
             role: 'system',
             content:
-              '你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和 replacementProgramName，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。',
+              `[prompt ${PARAM_EXTRACTOR_PROMPT_VERSION}] 你是广播电视节目串联单命令参数提取器。请结合当前编单候选和目标时间附近节目，从用户输入中提取 targetTime 和 replacementProgramName，并且只返回 JSON。如果用户没有明确提到时间，不要猜测 targetTime。`,
           },
           {
             role: 'user',
@@ -171,7 +178,7 @@ export class ParamExtractor {
               '输出格式: {"targetTime":"10:00:00","replacementProgramName":"中国考古报道"}',
           },
         ],
-        { temperature: 0, maxTokens: 120, timeout: 6000, maxRetries: 1, traceLabel: 'atomic_replace_params' },
+        { temperature: 0, maxTokens: 120, timeout: STAGE_TIMEOUT_BUDGET.intent_parse, maxRetries: 1, traceLabel: 'atomic_replace_params', promptVersion: PARAM_EXTRACTOR_PROMPT_VERSION },
       )
 
       const match = response.content.match(/\{[\s\S]*\}/)

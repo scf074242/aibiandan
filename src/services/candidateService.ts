@@ -1,7 +1,16 @@
 import {
   orchestrationDemoCandidates,
 } from '@/mock/orchestrationMock'
+import { candidateSearchRetryMockCandidates } from '@/mock/candidateSearchRetryMock'
 import { getAtomicCapabilities } from './atomicCapabilities'
+import {
+  getCandidateSearchRetryService,
+  DEFAULT_TV_RETRY_CONFIG,
+  type CandidateKeywordStrategy,
+  type CandidateSearchAttempt,
+  type CandidateSearchRetryConfig,
+  type CandidateSearchRetryPlan,
+} from './agent/candidateSearchRetryService'
 import {
   getEffectiveColumnDefinition,
   getEffectiveProgramsByColumn,
@@ -95,7 +104,18 @@ export class CandidateService {
 
   constructor(config?: Partial<CandidateServiceConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config }
-    this.candidates = orchestrationDemoCandidates.map((item) => ({ ...item }))
+    // 合并 orchestrationDemoCandidates 与 candidateSearchRetryMockCandidates，按 programCode 去重
+    const mergedByCode = new Map<string, ProgramCandidate>()
+    orchestrationDemoCandidates.forEach((item) => {
+      mergedByCode.set(item.programCode || item.id, { ...item })
+    })
+    candidateSearchRetryMockCandidates.forEach((item) => {
+      const key = item.programCode || item.id
+      if (!mergedByCode.has(key)) {
+        mergedByCode.set(key, { ...item })
+      }
+    })
+    this.candidates = Array.from(mergedByCode.values())
     this.candidateByProgramCode = new Map(
       this.candidates.map((item) => [item.programCode, item]),
     )
@@ -175,6 +195,29 @@ export class CandidateService {
       fallbackToBroadQuery,
       currentScheduleOverridesHistory: sequenceState?.currentScheduleOverridesHistory ?? false,
     })
+
+    // dev 环境下候选检索为空时输出诊断日志，定位 channelId/columnId/programType 哪层过滤为空
+    if (sorted.length === 0 && import.meta.env.DEV) {
+      console.warn('[candidateService] 候选检索为空', {
+        gapId: gap.id,
+        channelId: criteria.channelId,
+        columnId: criteria.columnId,
+        programTypePreference: criteria.programTypePreference,
+        searchKeywords: criteria.searchKeywords,
+        layerCounts: {
+          sourcePool: sourcePool.length,
+          columnMatched: columnMatched.length,
+          durationMatched: durationMatched.length,
+          typeMatched: typeMatched.length,
+          usageMatched: usageMatched.length,
+          historyMatched: filtered.length,
+          keywordMatched: keywordMatched.length,
+          finalCandidate: sorted.length,
+        },
+        sequenceContextRejected,
+        fallbackToBroadQuery,
+      })
+    }
 
     const result: CandidateQueryResult = {
       gapId: gap.id,
@@ -326,6 +369,164 @@ export class CandidateService {
       channelId: params.channelId,
       keyword,
     }).slice(0, limit)
+  }
+
+  /**
+   * 带重试的候选查询（阶段 3 引入）。
+   *
+   * 在 queryCandidates 基础上叠加多轮关键词组合重试：
+   * - 接收意图解析阶段 LLM 一次性生成的 keywordStrategies
+   * - 调 candidateSearchRetryService.executeRetryLoop 按策略优先级本地轮询 queryCandidates
+   * - 合并去重候选，记录 searchRetryPlan 透传到结果
+   *
+   * 设计约束（AGENTS.md）：
+   * - 重试阶段不再调 LLM（escape hatch 除外，本阶段不接入）
+   * - 按策略优先级 original → typo_fix → decompose → paraphrase → column_demote → broaden 依次检索
+   * - 默认 3 次，最大 5 次
+   * - 不改变现有 queryCandidates 行为
+   *
+   * @param gap 时段信息
+   * @param criteria 查询条件（首轮使用，重试阶段会替换 searchKeywords）
+   * @param options 重试选项（含 keywordStrategies 与 retryConfig）
+   * @returns 候选查询结果，含 searchRetryPlan 透传字段
+   */
+  async queryCandidatesWithRetry(
+    gap: GapInfo,
+    criteria: CandidateQueryCriteria,
+    options?: {
+      keywordStrategies?: CandidateKeywordStrategy[]
+      retryConfig?: Partial<CandidateSearchRetryConfig>
+      onAttempt?: (attempt: CandidateSearchAttempt) => void
+      onAttemptStart?: (attempt: CandidateSearchAttempt) => void
+    },
+  ): Promise<CandidateQueryResult & { searchRetryPlan?: CandidateSearchRetryPlan }> {
+    // 无 keywordStrategies 时直接走原 queryCandidates，行为完全一致
+    if (!options?.keywordStrategies || options.keywordStrategies.length === 0) {
+      const result = await this.queryCandidates(gap, criteria)
+      return { ...result }
+    }
+
+    const retryConfig: CandidateSearchRetryConfig = {
+      ...DEFAULT_TV_RETRY_CONFIG,
+      ...options.retryConfig,
+      // 硬上限 5 次，不可被配置覆盖
+      maxRound: Math.min(options.retryConfig?.maxRound ?? DEFAULT_TV_RETRY_CONFIG.maxRound, 5),
+    }
+
+    const retryService = getCandidateSearchRetryService()
+    // 注入 queryCandidates 作为底层检索函数（避免循环依赖）
+    const queryFn = async (gapArg: GapInfo, criteriaArg: CandidateQueryCriteria): Promise<ProgramCandidate[]> => {
+      const result = await this.queryCandidates(gapArg, criteriaArg)
+      return result.candidates
+    }
+
+    const { candidates, searchRetryPlan } = await retryService.executeRetryLoop(
+      gap,
+      criteria,
+      options.keywordStrategies,
+      retryConfig,
+      queryFn,
+      options.onAttempt,
+      options.onAttemptStart,
+    )
+
+    // 合并去重后的候选按原排序逻辑重新排序截断
+    const sorted = this.sortCandidates(candidates, {
+      channelId: criteria.channelId,
+      columnId: criteria.columnId,
+      gap,
+      criteria,
+    }).slice(0, this.config.defaultLimit)
+
+    const result: CandidateQueryResult & { searchRetryPlan?: CandidateSearchRetryPlan } = {
+      gapId: gap.id,
+      candidates: sorted,
+      totalCount: sorted.length,
+      queryTime: new Date().toISOString(),
+      diagnostics: this.buildQueryDiagnostics({
+        criteria,
+        sourcePoolCount: this.candidates.filter((c) => c.channelId === criteria.channelId).length,
+        columnMatchedCount: sorted.length,
+        durationMatchedCount: sorted.length,
+        typeMatchedCount: sorted.length,
+        usageMatchedCount: sorted.length,
+        historyMatchedCount: sorted.length,
+        keywordMatchedCount: sorted.length,
+        finalCandidateCount: sorted.length,
+        hardKeywordRequired: false,
+        explicitSequenceRequired: false,
+        functionalKeywordRequired: false,
+        sequenceContextRejected: false,
+        fallbackToBroadQuery: false,
+        currentScheduleOverridesHistory: false,
+      }),
+      searchRetryPlan,
+    }
+
+    return result
+  }
+
+  /**
+   * 带关键词扩展的节目名检索（阶段 3 引入，用于 UI 直查路径）。
+   *
+   * 在 searchPrograms 基础上叠加多轮关键词组合重试：
+   * - 接收意图解析阶段 LLM 一次性生成的 keywordStrategies
+   * - 调 candidateSearchRetryService.executeRetryLoop 按策略优先级本地轮询 searchPrograms
+   * - 合并去重候选
+   *
+   * @param params 节目检索参数（首轮使用）
+   * @param options 重试选项（含 keywordStrategies 与 retryConfig）
+   * @returns 合并去重后的候选列表
+   */
+  async searchProgramsWithKeywordExpansion(
+    params: ProgramSearchParams,
+    options?: {
+      keywordStrategies?: CandidateKeywordStrategy[]
+      retryConfig?: Partial<CandidateSearchRetryConfig>
+    },
+  ): Promise<ProgramCandidate[]> {
+    // 无 keywordStrategies 时直接走原 searchPrograms，行为完全一致
+    if (!options?.keywordStrategies || options.keywordStrategies.length === 0) {
+      return this.searchPrograms(params)
+    }
+
+    const retryConfig: CandidateSearchRetryConfig = {
+      ...DEFAULT_TV_RETRY_CONFIG,
+      ...options.retryConfig,
+      maxRound: Math.min(options.retryConfig?.maxRound ?? DEFAULT_TV_RETRY_CONFIG.maxRound, 5),
+    }
+
+    const limit = Math.min(params.limit ?? this.config.defaultLimit, this.config.maxLimit)
+
+    // 按策略优先级排序后依次检索（searchPrograms 签名与 queryCandidates 不同，手动实现重试循环）
+    const sortedStrategies = [...options.keywordStrategies].sort((left, right) => {
+      const priority: Record<string, number> = {
+        original: 0, typo_fix: 1, decompose: 2, paraphrase: 3, column_demote: 4, broaden: 5,
+      }
+      return (priority[left.strategy] ?? 99) - (priority[right.strategy] ?? 99)
+    })
+
+    const merged = new Map<string, ProgramCandidate>()
+    const seenKeywords = new Set<string>()
+    let round = 0
+
+    for (const strategy of sortedStrategies) {
+      if (round >= retryConfig.maxRound) break
+      if (merged.size >= retryConfig.minCandidateThreshold) break
+
+      for (const keyword of strategy.keywords) {
+        if (seenKeywords.has(keyword)) continue
+        seenKeywords.add(keyword)
+        const hitCandidates = await this.searchPrograms({ ...params, programName: keyword })
+        hitCandidates.forEach((candidate) => {
+          const key = candidate.id || candidate.programCode || candidate.programId || candidate.programName
+          if (!merged.has(key)) merged.set(key, candidate)
+        })
+      }
+      round += 1
+    }
+
+    return Array.from(merged.values()).slice(0, limit)
   }
 
   private filterProgramSearchCandidates(

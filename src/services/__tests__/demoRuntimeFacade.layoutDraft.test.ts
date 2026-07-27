@@ -56,7 +56,6 @@ import { DemoRuntimeFacade } from '@/services/runtime/demoRuntimeFacade'
 afterEach(() => {
   clearRuntimeLayout('dragon', '2026-03-25')
 })
-
 beforeEach(() => {
   llmClientChatMock.mockReset()
   llmClientChatMock.mockImplementation(mockLayoutDraftLlmResponse)
@@ -219,6 +218,48 @@ const mockLayoutDraftLlmResponse = async (messages: Array<{ content?: unknown }>
   return { content: JSON.stringify(buildMockLayoutDraftSpec({ start: '13:00:00', end: '18:00:00' }, [
     { label: '测试草案', programType: 'news_magazine', queryHints: ['测试草案'] },
   ])) }
+}
+
+const mockPlannerDraftAction = (action: Record<string, unknown> = { type: 'prepare_layout_draft' }) => {
+  llmClientChatMock.mockResolvedValueOnce({
+    content: JSON.stringify({
+      mode: 'single',
+      actions: [action],
+      assistantReplyDraft: '我会先整理版面草案，确认前不写入正式播单。',
+      reasoning: 'LLM planner 明确判断本轮只处理草案。',
+    }),
+  })
+}
+
+const mockPlannerFormalAction = (input: {
+  action?: 'commit_layout_draft' | 'formal_orchestration'
+  mode: 'full_generate' | 'partial_generate'
+  taskKind: 'full_day' | 'overall_refill' | 'local_refill'
+  useLayoutDraft: boolean
+  targetTimeRange?: { start: string; end: string }
+  searchKeywords?: string[]
+}) => {
+  const action = input.action ?? 'formal_orchestration'
+  llmClientChatMock.mockResolvedValueOnce({
+    content: JSON.stringify({
+      mode: 'react',
+      actions: [action === 'commit_layout_draft'
+        ? { type: action, mode: input.mode, useLayoutDraft: input.useLayoutDraft }
+        : { type: action, ...input }],
+      reactTask: {
+        objective: '按当前用户目标执行正式编排',
+        maxTurns: 5,
+        batchSize: 3,
+        nextActions: [{
+          type: 'research_check',
+          purpose: 'candidate_precheck',
+          queries: input.searchKeywords?.length ? input.searchKeywords : ['当前播单编排需求'],
+        }],
+      },
+      assistantReplyDraft: '我会先核对节目库与当前播单，再逐批执行。',
+      reasoning: 'LLM planner 明确判断本轮进入正式编排。',
+    }),
+  })
 }
 
 const createLayoutDraft = (): LayoutDraft => ({
@@ -428,10 +469,24 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       noMutation: true,
       recoverableUserInput: '这张轮播单按前面想法继续策划一下',
     })
+    // 验证失败信封数据流已打通（A18）
+    const envelope = (result.feedback.details as Record<string, unknown>).recoverableFailureEnvelope as Record<string, unknown> | undefined
+    expect(envelope).toBeDefined()
+    expect(envelope?.kind).toBe('llm_timeout')
+    expect(envelope?.noMutation).toBe(true)
+    expect(Array.isArray(envelope?.quickReplies)).toBe(true)
+    expect(envelope?.quickReplies).toContainEqual(expect.objectContaining({ label: '重试' }))
     expect(result.layoutDraft).toBeUndefined()
   })
 
   it('routes explicit time-range scheduling intent to formal orchestration unless the user asks for a draft', async () => {
+    mockPlannerFormalAction({
+      mode: 'partial_generate',
+      taskKind: 'local_refill',
+      useLayoutDraft: false,
+      targetTimeRange: { start: '12:45:00', end: '13:00:00' },
+      searchKeywords: ['生命树电视剧'],
+    })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -440,6 +495,8 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       currentSchedule: [],
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('orchestration')
@@ -453,6 +510,12 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('still creates a layout draft when an explicit time-range request asks for a draft', async () => {
+    mockPlannerDraftAction({
+      type: 'prepare_layout_draft',
+      targetTimeRange: { start: '12:45:00', end: '13:00:00' },
+      semanticLabel: '生命树电视剧',
+      programTypeHint: 'drama',
+    })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -461,6 +524,8 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       currentSchedule: [],
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     if (result.kind !== 'layout_draft') {
@@ -474,6 +539,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('routes rotation gap filling to formal orchestration only when a draft exists', async () => {
+    mockPlannerFormalAction({ mode: 'partial_generate', taskKind: 'overall_refill', useLayoutDraft: true })
     const facade = new DemoRuntimeFacade()
     const currentLayoutDraft = createRotationDurationDraft()
 
@@ -492,6 +558,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       agentCoreEnabled: true,
       layoutDraftEnabled: true,
       preferDraftFirstFormalOrchestration: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('orchestration')
@@ -506,6 +573,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('blocks rotation formal orchestration when there is no draft but still leaves atomic commands to the atomic path', async () => {
+    mockPlannerFormalAction({ mode: 'partial_generate', taskKind: 'overall_refill', useLayoutDraft: false })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -522,6 +590,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       agentCoreEnabled: true,
       layoutDraftEnabled: true,
       preferDraftFirstFormalOrchestration: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('message')
@@ -535,6 +604,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('blocks rotation all-day orchestration without a draft', async () => {
+    mockPlannerFormalAction({ mode: 'full_generate', taskKind: 'full_day', useLayoutDraft: false })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -551,6 +621,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       agentCoreEnabled: true,
       layoutDraftEnabled: true,
       preferDraftFirstFormalOrchestration: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('message')
@@ -604,6 +675,13 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('attaches the current draft only when formal orchestration explicitly references the draft', async () => {
+    mockPlannerFormalAction({
+      action: 'commit_layout_draft',
+      mode: 'partial_generate',
+      taskKind: 'local_refill',
+      useLayoutDraft: true,
+      targetTimeRange: { start: '13:00:00', end: '18:00:00' },
+    })
     const facade = new DemoRuntimeFacade()
     const currentLayoutDraft = createLayoutDraft()
 
@@ -620,6 +698,8 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       currentLayoutDraftMode: 'full_generate',
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_commit')
@@ -634,6 +714,13 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('does not attach the current draft when partial scheduling does not reference the draft', async () => {
+    mockPlannerFormalAction({
+      mode: 'partial_generate',
+      taskKind: 'local_refill',
+      useLayoutDraft: false,
+      targetTimeRange: { start: '13:00:00', end: '18:00:00' },
+      searchKeywords: ['电视剧'],
+    })
     const facade = new DemoRuntimeFacade()
     const currentLayoutDraft = createLayoutDraft()
     taskClassifierClassifyMock.mockResolvedValueOnce({
@@ -654,6 +741,8 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       currentLayoutDraft,
       history: [],
       layoutDraftEnabled: true,
+      agentCoreEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('orchestration')
@@ -877,6 +966,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('front foreground mode blocks layout drafts and asks for atomic scheduling details', async () => {
+    mockPlannerDraftAction({ type: 'prepare_layout_draft' })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -886,6 +976,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       history: [],
       agentCoreEnabled: true,
       layoutDraftEnabled: false,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('message')
@@ -904,6 +995,19 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('splits multiple explicit time ranges before creating the layout draft', async () => {
+    mockPlannerDraftAction({
+      type: 'prepare_layout_draft',
+      segments: [
+        { start: '09:00:00', end: '12:00:00', semanticLabel: '品质剧场：纵有疾风起', programTypeHint: 'drama', sequential: true },
+        { start: '12:00:00', end: '12:30:00', semanticLabel: '午间新闻', programTypeHint: 'news' },
+      ],
+    })
+    llmClientChatMock.mockResolvedValueOnce({
+      content: JSON.stringify(buildMockLayoutDraftSpec({ start: '09:00:00', end: '12:30:00' }, [
+        { label: '品质剧场：纵有疾风起', startTime: '09:00:00', endTime: '12:00:00', programType: 'drama', queryHints: ['品质剧场：纵有疾风起', '纯电视频道', '顺播', '接昨天'], sequential: true },
+        { label: '午间新闻', startTime: '12:00:00', endTime: '12:30:00', programType: 'news', queryHints: ['午间新闻'] },
+      ])),
+    })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -911,6 +1015,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput: '生成版面草案：按纯电视频道，09:00到12:00继续播品质剧场：纵有疾风起，接昨天进度顺播；12:00到12:30安排午间新闻',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -941,6 +1048,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('keeps explicit range drafts on the TV channel strategy inside a TV playlist', async () => {
+    mockPlannerDraftAction({ type: 'prepare_layout_draft' })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -951,6 +1059,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput: '生成9点到12点的版面草案，编排东方剧场',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -964,6 +1075,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('marks outdoor live carousel drafts as content-match-first when the user asks for matching content', async () => {
+    mockPlannerDraftAction({ type: 'prepare_layout_draft' })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -971,6 +1083,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput: '我准备在静安寺进行户外直播，准备一个14:00到15:00的轮播版面草案，内容匹配优先',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -992,6 +1107,12 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('cleans explicit range carousel labels and keeps searchable outdoor live hints', async () => {
+    mockPlannerDraftAction({
+      type: 'prepare_layout_draft',
+      targetTimeRange: { start: '14:00:00', end: '15:00:00' },
+      semanticLabel: '静安寺户外直播',
+      programTypeHint: 'news_magazine',
+    })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -999,6 +1120,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput: '我准备在静安寺进行户外直播，准备一个14:00到15:00的轮播版面草案',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -1021,6 +1145,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('marks carousel drafts as rating-first when the user asks for rating priority', async () => {
+    mockPlannerDraftAction({ type: 'prepare_layout_draft' })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -1028,6 +1153,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput: '14:00到15:00做一版轮播版面草案，优先选择高收视率节目',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -1073,6 +1201,7 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('marks carousel drafts as trending-first when the user asks for currently hot programs', async () => {
+    mockPlannerDraftAction({ type: 'prepare_layout_draft' })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -1080,6 +1209,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput: '14:00到15:00做一版轮播版面草案，优先选择当前热播节目',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -1100,6 +1232,19 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('marks pure TV channel drafts as sequence-first and requiring previous-day schedule context', async () => {
+    mockPlannerDraftAction({
+      type: 'prepare_layout_draft',
+      targetTimeRange: { start: '09:30:00', end: '10:15:00' },
+      semanticLabel: '品质剧场：纵有疾风起',
+      programTypeHint: 'drama',
+      segments: [{
+        start: '09:30:00',
+        end: '10:15:00',
+        semanticLabel: '品质剧场：纵有疾风起',
+        programTypeHint: 'drama',
+        sequential: true,
+      }],
+    })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -1107,6 +1252,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput: '生成版面草案：按纯电视频道编排，09:30到10:15品质剧场顺着昨天继续播',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -1130,6 +1278,19 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
   })
 
   it('treats middle-gap episode fill wording as pure TV sequence context', async () => {
+    mockPlannerDraftAction({
+      type: 'prepare_layout_draft',
+      targetTimeRange: { start: '09:45:00', end: '10:30:00' },
+      semanticLabel: '品质剧场：纵有疾风起',
+      programTypeHint: 'drama',
+      segments: [{
+        start: '09:45:00',
+        end: '10:30:00',
+        semanticLabel: '品质剧场：纵有疾风起',
+        programTypeHint: 'drama',
+        sequential: true,
+      }],
+    })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -1137,6 +1298,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput: '生成版面草案：按纯电视频道，09:45到10:30继续播品质剧场：纵有疾风起，顺着当前版面补中间集',
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -1171,6 +1335,11 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       label: '民生新闻',
     },
   ])('routes daypart segment intent to a layout draft from LLM-structured output: $userInput', async ({ userInput, coverage, label }) => {
+    mockPlannerDraftAction({
+      type: 'prepare_layout_draft',
+      targetTimeRange: coverage,
+      semanticLabel: label,
+    })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -1178,6 +1347,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput,
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -1210,6 +1382,12 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       programType: 'news_magazine',
     },
   ])('routes relative event scheduling intent to a layout draft from LLM-structured output: $userInput', async ({ userInput, coverage, label, programType }) => {
+    mockPlannerDraftAction({
+      type: 'prepare_layout_draft',
+      targetTimeRange: coverage,
+      semanticLabel: label,
+      programTypeHint: programType,
+    })
     const facade = new DemoRuntimeFacade()
 
     const result = await facade.submitInstruction({
@@ -1217,6 +1395,9 @@ describe('DemoRuntimeFacade explicit range layout routing', () => {
       userInput,
       currentSchedule: [],
       history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
     })
 
     expect(result.kind).toBe('layout_draft')

@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   buildWorkspaceScopedRuntimeHistory,
   buildForegroundWorkspaceIdentity,
-  isForegroundWorkspaceMessageVisible,
+  isForegroundConversationMessageVisible,
+  rebindUnscopedConversationToWorkspace,
   resolveForegroundWorkspaceKey,
   resolveForegroundWorkspaceTransition,
 } from '@/services/runtime/foregroundWorkspaceState'
@@ -150,18 +151,50 @@ describe('foreground workspace state', () => {
     expect(history.at(-1)).toBe('助手：第10轮')
   })
 
-  it('shows only messages that belong to the active foreground workspace', () => {
-    expect(isForegroundWorkspaceMessageVisible({
+  it('keeps the conversation thread visible while workspace facts remain separately scoped', () => {
+    const testCase = {
+      id: 'foreground-conversation-remains-visible-across-workspace-switch',
+      userInput: '新建电视播单',
+      expectedDecision: '创建前后的对话在同一会话线程中连续可见',
+      mustNotHappen: '切换 workspaceKey 后隐藏创建前对话，造成用户误以为动作未执行',
+      verification: '不同 workspaceKey 与 none 消息均保持可见，业务 pending 仍由独立工作区门禁管理',
+    }
+    expect(isForegroundConversationMessageVisible({
       workspaceKey: 'tv:playlist-tv-1',
     }, 'tv:playlist-tv-1')).toBe(true)
-    expect(isForegroundWorkspaceMessageVisible({
+    expect(isForegroundConversationMessageVisible({
       workspaceKey: 'tv:playlist-tv-1',
-    }, 'rotation:playlist-rotation-1')).toBe(false)
-    expect(isForegroundWorkspaceMessageVisible({
+    }, 'rotation:playlist-rotation-1')).toBe(true)
+    expect(isForegroundConversationMessageVisible({
       workspaceKey: null,
-    }, 'rotation:playlist-rotation-1')).toBe(false)
-    expect(isForegroundWorkspaceMessageVisible({
+    }, 'rotation:playlist-rotation-1')).toBe(true)
+    expect(isForegroundConversationMessageVisible({
       workspaceKey: null,
     }, 'none')).toBe(true)
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+  })
+
+  it('binds only the initial unscoped conversation to a newly created playlist workspace', () => {
+    const testCase = {
+      id: 'foreground-create-playlist-preserves-precreation-context',
+      userInput: '就按刚才讨论的目标，新建电视播单',
+      expectedDecision: 'none 工作区内的创建前目标成为新播单的起始会话上下文',
+      mustNotHappen: '迁移其他电视或轮播工作区消息，或复用其 pending、快照和素材证据',
+      verification: '仅 workspaceKey=none/null 的消息被重绑，已有工作区消息保持原 key',
+    }
+    const messages = [
+      { role: 'user' as const, content: '上午以新闻和民生内容为主', workspaceKey: 'none' },
+      { role: 'assistant' as const, content: '我记下了这个目标', workspaceKey: null },
+      { role: 'user' as const, content: '另一张轮播单的目标', workspaceKey: 'rotation:playlist-rotation-1' },
+    ]
+
+    rebindUnscopedConversationToWorkspace(messages, 'tv:playlist-tv-1')
+
+    expect(messages.map((message) => message.workspaceKey)).toEqual([
+      'tv:playlist-tv-1',
+      'tv:playlist-tv-1',
+      'rotation:playlist-rotation-1',
+    ])
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
   })
 })

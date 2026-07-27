@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomicCapabilities'
 import { DemoRuntimeFacade, type RuntimeScheduleItem } from '@/services/runtime/demoRuntimeFacade'
-import type { ScheduleState } from '@/types/orchestration'
+import type { LayoutDraft, ScheduleState } from '@/types/orchestration'
 
 const createScheduleState = (patch: Partial<ScheduleState> = {}): ScheduleState => ({
   playlistId: 'playlist-tv-composite',
@@ -31,15 +31,179 @@ const createItem = (
   programType: 'tv',
 })
 
+const createTvLayoutDraft = (): LayoutDraft => ({
+  id: 'draft-tv-composite',
+  channelId: 'dragon-tv',
+  date: '2026-03-25',
+  version: 1,
+  source: 'generated',
+  userIntent: '按东方卫视日常版面补齐空窗',
+  coverage: { start: '06:00:00', end: '23:59:59' },
+  layoutReference: {
+    id: 'layout-tv-composite',
+    name: '东方卫视日常版面',
+    slots: [{
+      id: 'slot-daytime',
+      channelId: 'dragon-tv',
+      startTime: '06:00:00',
+      endTime: '23:59:59',
+      columnId: 'col-daytime',
+    }],
+  },
+  columns: [{
+    columnId: 'col-daytime',
+    columnName: '日间综合',
+    channelId: 'dragon-tv',
+    defaultProgramType: 'tv',
+    semanticLabel: '日间综合节目',
+    source: 'generated',
+  }],
+})
+
+const createFacadeWithStructuredPendingPlanner = (): DemoRuntimeFacade => {
+  const facade = new DemoRuntimeFacade()
+  let activeSubmitInput: { pendingAtomicContext?: unknown } | undefined
+  const planner = (facade as unknown as {
+    agentPlanner: { plan: (input: { userInput: string; contextPackage?: unknown }, deadline?: unknown) => Promise<unknown> }
+  }).agentPlanner
+  const originalPlan = planner.plan.bind(planner)
+  const llmClient = (facade as unknown as {
+    llmClient: { chat: (messages: unknown[], options?: { traceLabel?: string }) => Promise<unknown> }
+  }).llmClient
+  const originalChat = llmClient.chat.bind(llmClient)
+
+  vi.spyOn(llmClient, 'chat').mockImplementation(async (messages, options) => {
+    if (options?.traceLabel !== 'agent.intent_interpreter') {
+      return await originalChat(messages, options)
+    }
+    const userInput = activeSubmitInput && 'userInput' in activeSubmitInput
+      ? String((activeSubmitInput as { userInput: string }).userInput)
+      : ''
+    if (userInput.includes('按草案补齐空窗')) {
+      return {
+        content: JSON.stringify({
+          intent: 'batch_delete',
+          confidence: 0.98,
+          slots: { targetProgramName: '看东方' },
+          taskPlanDraft: {
+            isComposite: true,
+            goal: '删除全部看东方，再按草案补齐空窗',
+            stages: [{
+              type: 'batch_atomic',
+              action: 'delete',
+              target: { programName: '看东方', scope: 'current_playlist' },
+              requiresConfirmation: true,
+              summary: '先删除全部看东方节目',
+            }, {
+              type: 'draft_refill',
+              requiresLayoutDraft: true,
+              layoutDraftReferenced: true,
+              requiresConfirmation: true,
+              summary: '下一步再按草案补齐空窗',
+            }],
+          },
+          assistantFeedback: '我会先删除目标节目，下一步再按草案补齐空窗。',
+        }),
+      }
+    }
+    if (userInput.includes('已有节目就后移') || userInput.includes('其余节目可以后移')) {
+      const programName = userInput.includes('东方新闻') ? '东方新闻' : '宣传片'
+      return {
+        content: JSON.stringify({
+          intent: 'insert',
+          confidence: 0.98,
+          slots: { targetTime: '09:00:00', programHint: programName, durationSeconds: 1800 },
+          taskPlanDraft: {
+            isComposite: true,
+            goal: `09:00:00 插入《${programName}》，已有节目顺延`,
+            stages: [{
+              type: 'batch_atomic',
+              action: 'move',
+              target: { targetTime: '09:00:00', scope: 'time_range' },
+              requiresConfirmation: true,
+              summary: '先把9点起受影响节目后移30分钟',
+            }, {
+              type: 'atomic',
+              action: 'insert',
+              target: { targetTime: '09:00:00', programName, durationSeconds: 1800 },
+              requiresConfirmation: true,
+              summary: `再在9点插入${programName}`,
+            }, {
+              type: 'verify',
+              requiresConfirmation: false,
+              summary: '检查顺延后的时间轴',
+            }],
+          },
+          assistantFeedback: `我会先核对${programName}候选，再生成插入并顺延计划。`,
+        }),
+      }
+    }
+    return await originalChat(messages, options)
+  })
+
+  vi.spyOn(planner, 'plan').mockImplementation(async (input, deadline) => {
+    const userInput = input.userInput.trim()
+    const context = JSON.stringify(activeSubmitInput?.pendingAtomicContext ?? input.contextPackage ?? {})
+    if (userInput === '确认' || userInput === '继续') {
+      const pendingAction = (activeSubmitInput?.pendingAtomicContext as { action?: string } | undefined)?.action
+      const intent = pendingAction === 'move'
+        ? 'move'
+        : pendingAction === 'insert' || context.includes('insert_with_shift')
+          ? 'insert'
+          : 'batch_delete'
+      return {
+        mode: 'single',
+        pendingAction: 'confirm',
+        actions: [{ type: 'atomic_command', intent, pendingAction: 'confirm', mutationPolicy: 'formal_write' }],
+        assistantReplyDraft: '确认执行当前待处理任务。',
+        reasoning: '用户确认当前结构化 pending。',
+      }
+    }
+    if (userInput === '第二个') {
+      return {
+        mode: 'single',
+        pendingAction: 'select_candidate',
+        actions: [{ type: 'atomic_command', intent: 'insert', pendingAction: 'select_candidate', candidateId: 'candidate-promo-b', mutationPolicy: 'formal_write' }],
+        assistantReplyDraft: '选择第二个候选。',
+        reasoning: '用户选择当前候选列表中的第二项。',
+      }
+    }
+    if (userInput.includes('按草案补齐空窗') || userInput.includes('已有节目就后移') || userInput.includes('其余节目可以后移')) {
+      return {
+        mode: 'single',
+        actions: [{ type: 'atomic_command' }],
+        assistantReplyDraft: '我先把这项复合修改拆成可校验步骤。',
+        reasoning: '该请求需要由原子能力编译为复合任务计划。',
+      }
+    }
+    return await originalPlan(input, deadline)
+  })
+
+  const originalSubmitInstruction = facade.submitInstruction.bind(facade)
+  ;(facade as unknown as { submitInstruction: typeof facade.submitInstruction }).submitInstruction = async (input) => {
+    activeSubmitInput = input
+    const isPlannerTurn = ['确认', '继续', '第二个'].includes(input.userInput.trim())
+      || input.userInput.includes('按草案补齐空窗')
+      || input.userInput.includes('已有节目就后移')
+      || input.userInput.includes('其余节目可以后移')
+    return await originalSubmitInstruction({
+      ...input,
+      inputSource: isPlannerTurn ? 'user' : input.inputSource,
+    })
+  }
+
+  return facade
+}
+
 describe('DemoRuntimeFacade composite scheduling tasks', () => {
   beforeEach(async () => {
-    vi.clearAllMocks()
+    vi.restoreAllMocks()
     resetAtomicCapabilities()
     await getAtomicCapabilities().clearAll()
   })
 
   it('splits delete-all programme requests into a confirmed task plan and verifies no programme remains', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const currentSchedule = [
       createItem('item-east-1', '看东方', '2026-03-25T07:00:00+08:00', '2026-03-25T09:00:00+08:00'),
       createItem('item-news', '东方新闻', '2026-03-25T18:30:00+08:00', '2026-03-25T19:00:00+08:00'),
@@ -81,7 +245,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
   })
 
   it('keeps a failed batch delete recoverable and retries the same batch on continue', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const currentSchedule = [
       createItem('item-east-1', '看东方', '2026-03-25T07:00:00+08:00', '2026-03-25T09:00:00+08:00'),
       createItem('item-news', '东方新闻', '2026-03-25T18:30:00+08:00', '2026-03-25T19:00:00+08:00'),
@@ -150,7 +314,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
   })
 
   it('compacts a rotation playlist queue after confirmed batch deletion', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const currentSchedule = [
       createItem('item-east-1', '看东方', '2026-03-25T00:00:00+08:00', '2026-03-25T00:30:00+08:00'),
       createItem('item-guide', '城市导视', '2026-03-25T00:30:00+08:00', '2026-03-25T01:00:00+08:00'),
@@ -207,7 +371,8 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
   })
 
   it('keeps draft-refill as a separate stage after a delete stage so full scheduling rules stay separate', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
+    const currentLayoutDraft = createTvLayoutDraft()
     const currentSchedule = [
       createItem('item-east-1', '看东方', '2026-03-25T07:00:00+08:00', '2026-03-25T09:00:00+08:00'),
       createItem('item-east-2', '看东方', '2026-03-25T10:00:00+08:00', '2026-03-25T11:00:00+08:00'),
@@ -217,6 +382,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
       scheduleState: createScheduleState({ itemCount: currentSchedule.length, gapCount: 0 }),
       userInput: '把所有看东方删掉，然后按草案补齐空窗',
       currentSchedule,
+      currentLayoutDraft,
       history: [],
       agentCoreEnabled: true,
       layoutDraftEnabled: true,
@@ -235,6 +401,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
       scheduleState: createScheduleState({ itemCount: currentSchedule.length, gapCount: 0 }),
       userInput: '确认',
       currentSchedule,
+      currentLayoutDraft,
       history: ['把所有看东方删掉，然后按草案补齐空窗'],
       pendingAtomicContext: first.pendingAtomicContext,
       agentCoreEnabled: true,
@@ -243,12 +410,12 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
 
     expect(confirmed.kind).toBe('agent_execution')
     if (confirmed.kind !== 'agent_execution') throw new Error('expected composite execution')
-    expect(confirmed.feedback.content).toContain('补排阶段先停下')
+    expect(confirmed.feedback.content).toContain('接下来可以按草案补齐')
     expect(confirmed.result.executionResult?.scheduleItems).toEqual([])
   })
 
   it('continues large batch deletes in chunks after each confirmed execution', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const currentSchedule = Array.from({ length: 12 }, (_, index) => {
       const hour = 6 + index
       return createItem(
@@ -308,7 +475,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
   })
 
   it('splits time-range delete requests into confirmed chunks and continues after user approval', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const currentSchedule = Array.from({ length: 12 }, (_, index) => {
       const hour = 4 + index
       return createItem(
@@ -379,7 +546,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
   })
 
   it('stops a composite task when the loop limit is reached', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const currentSchedule = [
       createItem('item-east-1', '看东方', '2026-03-25T07:00:00+08:00', '2026-03-25T09:00:00+08:00'),
       createItem('item-east-2', '看东方 午间版', '2026-03-25T22:00:00+08:00', '2026-03-25T22:30:00+08:00'),
@@ -424,7 +591,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
   })
 
   it('builds a confirmed insert-with-shift plan and verifies the final time axis', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([{
       id: 'candidate-east-news',
       programId: 'candidate-east-news',
@@ -483,7 +650,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
   })
 
   it('understands force-insert wording with affected programmes shifted back', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     const searchPrograms = vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([{
       id: 'candidate-promo-30m',
       programId: 'candidate-promo-30m',
@@ -525,7 +692,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
   })
 
   it('keeps insert-with-shift duration as a hard candidate constraint', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([{
       id: 'candidate-promo-15m',
       programId: 'candidate-promo-15m',
@@ -560,7 +727,7 @@ describe('DemoRuntimeFacade composite scheduling tasks', () => {
   })
 
   it('pauses insert-with-shift for candidate selection when several duration-matched candidates exist', async () => {
-    const facade = new DemoRuntimeFacade()
+    const facade = createFacadeWithStructuredPendingPlanner()
     vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([
       {
         id: 'candidate-promo-a',

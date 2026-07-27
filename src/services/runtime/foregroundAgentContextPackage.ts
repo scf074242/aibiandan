@@ -7,10 +7,7 @@ import { evaluateLayoutDraftCompleteness, type LayoutDraftCompleteness } from '@
 
 export type ForegroundAgentScenario =
   | 'atomic'
-  | 'full_generate'
-  | 'partial_generate'
   | 'layout_reference'
-  | 'layout_draft_switch'
   | 'review'
   | 'general'
 
@@ -24,11 +21,28 @@ export type PendingReviewKind =
 
 export interface PendingReviewSnapshot {
   kind: PendingReviewKind
+  owner: 'layout_draft' | 'formal_playlist'
+  phase?: RuntimePendingAtomicContext['phase']
+  pendingId?: string
   action: string
   riskLevel: 'low' | 'medium' | 'high'
   allowedResponses: Array<'confirm' | 'cancel' | 'select' | 'clarify'>
-  expiresOnNextNonAnswer: true
+  expiresOnNextNonAnswer: boolean
   summary: string
+  formalRebuild?: {
+    actionKind: 'commit_layout_draft' | 'formal_orchestration'
+    mode: 'full_generate' | 'partial_generate'
+    useLayoutDraft: boolean
+  }
+}
+
+export interface PendingContextSnapshot {
+  owner: 'layout_draft' | 'formal_playlist'
+  phase: RuntimePendingAtomicContext['phase']
+  pendingId?: string
+  action: string
+  summary: string
+  missingFields: RuntimePendingAtomicContext['missingFields']
 }
 
 export interface ForegroundAgentContextPackage {
@@ -73,6 +87,7 @@ export interface ForegroundAgentContextPackage {
     }>
   }
   review: PendingReviewSnapshot | null
+  pending: PendingContextSnapshot | null
   reactTask: {
     active: boolean
     id?: string
@@ -144,13 +159,6 @@ export interface ResolvePendingReviewLifecycleInput {
   pendingAtomicContext?: RuntimePendingAtomicContext | null
 }
 
-const ATOMIC_VERB_PATTERN = /(插入|插个|插一|插播|加播|添加|补点|填入|排入|放入|安排到|插到|排到|删除|删掉|移除|去掉|移动|移到|调到|调整到|放到|挪到|后移|前移|顺延|推迟|延迟|延后|提前|替换|换成|换播|改成|改为|查询|校验)/u
-const FULL_GENERATE_PATTERN = /(全天|整天|全日).*(编排|排播|补排|生成)|帮我全天编排|全天编排/u
-const PARTIAL_GENERATE_PATTERN = /(补齐|补全|填充).*(空窗|空档|缺口)|局部补排|补排/u
-const FORMAL_DAYPART_GENERATE_PATTERN = /(上午|中午|午间|下午|晚间|晚上|夜间|黄金时段|黄金档|七点档|八点档).*(安排|编排|排入|排播|排满|铺满|补排|填充|改成|改为|统一成|调整为|主打|为主)/u
-const FORMAL_TIME_RANGE_GENERATE_PATTERN = /\d{1,2}(?:点|时|:\d{2}|：\d{2})?(?:到|至|-|—|~)\d{1,2}(?:点|时|:\d{2}|：\d{2})?.*(安排|编排|排入|排播|排满|铺满|补排|填充|改成|改为|统一成|调整为|主打|为主)/u
-const DRAFT_REFERENCE_PATTERN = /(参考|参照|依据|基于|按照|按|照|使用|用).*(草案|版面)|(?:当前|这个|该|刚才的|原来的).*(草案|版面).*(编排|补排|补齐|填充|生成正式编排单|开始编排)/u
-const DRAFT_SWITCH_PATTERN = /(?:切换|切到|切回|换成|改用|启用|恢复).*(版面|草案)|(?:使用|用).*(上传|导入|默认|频道|固定|当前频道).*(版面|草案)/u
 const PROMPT_PREFIX = '【统一前台上下文包】\n'
 const SUMMARY_FIELD_LIMIT = 80
 
@@ -158,15 +166,20 @@ export const buildForegroundAgentContextPackage = (
   input: BuildForegroundAgentContextPackageInput,
 ): ForegroundAgentContextPackage => {
   const review = buildPendingReviewSnapshot(input.pendingCommand, input.pendingAtomicContext)
+  const pending = buildPendingContextSnapshot(input.pendingAtomicContext)
   const activeReactTaskRun = input.activeReactTaskRun ?? null
   const lastObservation = activeReactTaskRun?.observations.at(-1)
-  const scenario = inferScenario(input.latestUserInput, review, input.pendingAtomicContext)
-  const normalizedInput = normalizeText(input.latestUserInput)
-  const referencedByCurrentTask = DRAFT_REFERENCE_PATTERN.test(normalizedInput)
-    || (scenario === 'layout_draft_switch')
+  const scenario = resolveContextScenario(review, input.pendingAtomicContext, input.currentLayoutDraft)
+  // 上下文包不能替 LLM 判断“是否按草案执行”；这里只记录客观可用性。
+  const referencedByCurrentTask = false
   const draft = input.currentLayoutDraft ?? null
   const draftCompleteness = evaluateLayoutDraftCompleteness(draft)
-  const profile = resolveInjectionProfile(scenario, draftCompleteness.status)
+  const profile = resolveInjectionProfile(
+    scenario,
+    draftCompleteness.status,
+    Boolean(draft),
+    input.scheduleState.playlistType ?? 'none',
+  )
   const workspaceSummary = buildScheduleWorkspaceSummary(input.scheduleState)
   const latestUserInput = compactText(input.latestUserInput, profile.latestUserInputLimit)
   const includedScheduleItems = input.currentSchedule.slice(0, profile.scheduleItemLimit)
@@ -236,6 +249,7 @@ export const buildForegroundAgentContextPackage = (
       segments: layoutSegments,
     },
     review,
+    pending,
     reactTask: activeReactTaskRun
       ? {
           active: !['completed', 'failed', 'cancelled'].includes(activeReactTaskRun.status),
@@ -266,7 +280,7 @@ export const buildForegroundAgentContextPackage = (
       : {
           active: false,
         },
-    allowedActions: resolveAllowedActions(input.scheduleState.playlistType ?? 'none', scenario, draftCompleteness.status),
+    allowedActions: resolveAllowedActions(input.scheduleState.playlistType ?? 'none', scenario),
     injectionProfile: profile,
   }
 
@@ -299,6 +313,8 @@ export const formatForegroundAgentContextForPrompt = (
 
 const buildBusinessContextForPrompt = (contextPackage: ForegroundAgentContextPackage) => ({
   latestUserInput: contextPackage.latestUserInput,
+  // scenario 仅表示客观现场状态，不是本轮用户意图或 taskKind。
+  // 用户意图、action、是否正式写入必须由 LLM 返回并经过结果校验。
   scenario: contextPackage.scenario,
   workspace: {
     playlistId: contextPackage.workspace.playlistId,
@@ -333,6 +349,7 @@ const buildBusinessContextForPrompt = (contextPackage: ForegroundAgentContextPac
         summary: contextPackage.review.summary,
       }
     : null,
+  pendingContext: contextPackage.pending,
   activeReactTask: contextPackage.reactTask.active || contextPackage.reactTask.recovery?.canRetry
     ? contextPackage.reactTask
     : null,
@@ -367,24 +384,6 @@ export const resolvePendingReviewLifecycle = (
     }
   }
 
-  if (input.pendingAtomicContext?.agentPendingTask) {
-    return {
-      hasPendingReview: true,
-      canUsePendingReview: true,
-      shouldExpire: false,
-    }
-  }
-
-  const scenario = inferScenario(input.latestUserInput, review)
-  if (scenario !== 'review') {
-    return {
-      hasPendingReview: true,
-      canUsePendingReview: false,
-      shouldExpire: true,
-      expireReason: 'next_non_answer',
-    }
-  }
-
   return {
     hasPendingReview: true,
     canUsePendingReview: true,
@@ -392,13 +391,12 @@ export const resolvePendingReviewLifecycle = (
   }
 }
 
-const inferScenario = (
-  latestUserInput: string,
+const resolveContextScenario = (
   review: PendingReviewSnapshot | null,
   pendingAtomicContext?: RuntimePendingAtomicContext | null,
+  currentLayoutDraft?: LayoutDraft | null,
 ): ForegroundAgentScenario => {
-  const normalized = normalizeText(latestUserInput)
-  if (review && isStrongReviewResponse(normalized, review)) return 'review'
+  if (review) return 'review'
   if (
     pendingAtomicContext
     && (
@@ -408,15 +406,7 @@ const inferScenario = (
       || Boolean(pendingAtomicContext.agentPendingTask)
     )
   ) return 'atomic'
-  if (DRAFT_SWITCH_PATTERN.test(normalized) && /版面|草案/u.test(normalized)) return 'layout_draft_switch'
-  if (DRAFT_REFERENCE_PATTERN.test(normalized)) return 'layout_reference'
-  if (FULL_GENERATE_PATTERN.test(normalized)) return 'full_generate'
-  if (
-    PARTIAL_GENERATE_PATTERN.test(normalized)
-    || FORMAL_DAYPART_GENERATE_PATTERN.test(normalized)
-    || FORMAL_TIME_RANGE_GENERATE_PATTERN.test(normalized)
-  ) return 'partial_generate'
-  if (ATOMIC_VERB_PATTERN.test(normalized)) return 'atomic'
+  if (currentLayoutDraft) return 'layout_reference'
   return 'general'
 }
 
@@ -427,61 +417,104 @@ const buildPendingReviewSnapshot = (
   if (pendingCommand) {
     return {
       kind: 'command',
+      owner: 'formal_playlist',
       action: pendingCommand.command.action,
       riskLevel: pendingCommand.command.action === 'delete' || pendingCommand.command.action === 'replace' ? 'high' : 'medium',
       allowedResponses: ['confirm', 'cancel'],
-      expiresOnNextNonAnswer: true,
+      expiresOnNextNonAnswer: false,
       summary: pendingCommand.summary,
     }
   }
 
   if (!pendingAtomicContext) return null
   if (pendingAtomicContext.formalRebuildConfirmation || pendingAtomicContext.phase === 'formal_rebuild_confirmation') {
+    const confirmation = pendingAtomicContext.formalRebuildConfirmation
     return {
       kind: 'formal_rebuild',
+      owner: 'formal_playlist',
+      phase: pendingAtomicContext.phase,
+      pendingId: pendingAtomicContext.pendingId,
       action: 'formal_rebuild',
       riskLevel: 'high',
       allowedResponses: ['confirm', 'cancel'],
-      expiresOnNextNonAnswer: true,
+      expiresOnNextNonAnswer: false,
       summary: pendingAtomicContext.summary,
+      formalRebuild: confirmation
+        ? {
+            actionKind: confirmation.actionKind,
+            mode: confirmation.mode,
+            useLayoutDraft: confirmation.useLayoutDraft === true,
+          }
+        : undefined,
     }
   }
   if (pendingAtomicContext.layoutDraftSuggestion) {
     return {
       kind: 'layout_draft_update',
+      owner: 'layout_draft',
+      phase: pendingAtomicContext.phase,
+      pendingId: pendingAtomicContext.pendingId,
       action: 'update_layout_draft',
       riskLevel: 'low',
       allowedResponses: ['confirm', 'cancel'],
-      expiresOnNextNonAnswer: true,
+      expiresOnNextNonAnswer: false,
       summary: pendingAtomicContext.summary,
     }
   }
   if (pendingAtomicContext.compositeTaskRun?.status === 'waiting_confirm') {
     return {
       kind: 'command',
+      owner: 'formal_playlist',
+      phase: pendingAtomicContext.phase,
+      pendingId: pendingAtomicContext.pendingId,
       action: pendingAtomicContext.action ?? pendingAtomicContext.compositeTaskRun.stages[0]?.action ?? 'confirm',
       riskLevel: pendingAtomicContext.action === 'delete' || pendingAtomicContext.action === 'replace' ? 'high' : 'medium',
       allowedResponses: ['confirm', 'cancel'],
-      expiresOnNextNonAnswer: true,
+      expiresOnNextNonAnswer: false,
       summary: pendingAtomicContext.summary,
     }
   }
   if (pendingAtomicContext.agentPendingTask?.phase === 'needs_confirmation') {
     return {
       kind: 'command',
+      owner: 'formal_playlist',
+      phase: pendingAtomicContext.phase,
+      pendingId: pendingAtomicContext.pendingId,
       action: pendingAtomicContext.action ?? pendingAtomicContext.agentPendingTask.intent ?? 'confirm',
       riskLevel: pendingAtomicContext.action === 'delete' || pendingAtomicContext.action === 'replace' ? 'high' : 'medium',
       allowedResponses: ['confirm', 'cancel'],
-      expiresOnNextNonAnswer: true,
+      expiresOnNextNonAnswer: false,
       summary: pendingAtomicContext.summary,
     }
   }
   return null
 }
 
+const buildPendingContextSnapshot = (
+  pendingAtomicContext?: RuntimePendingAtomicContext | null,
+): PendingContextSnapshot | null => {
+  if (!pendingAtomicContext) return null
+  const owner = pendingAtomicContext.layoutDraftSuggestion || pendingAtomicContext.phase === 'draft_research_confirmation'
+    ? 'layout_draft' as const
+    : 'formal_playlist' as const
+  return {
+    owner,
+    phase: pendingAtomicContext.phase,
+    pendingId: pendingAtomicContext.pendingId,
+    action: pendingAtomicContext.action
+      ?? pendingAtomicContext.agentIntent
+      ?? pendingAtomicContext.agentPendingTask?.intent
+      ?? (owner === 'layout_draft' ? 'update_layout_draft' : 'clarify'),
+    summary: pendingAtomicContext.summary,
+    missingFields: [...pendingAtomicContext.missingFields],
+  }
+}
+
 const resolveInjectionProfile = (
   scenario: ForegroundAgentScenario,
-  draftCompletenessStatus: LayoutDraftCompleteness['status'] = 'missing',
+  _draftCompletenessStatus: LayoutDraftCompleteness['status'] = 'missing',
+  hasDraft = false,
+  playlistType: PlaylistType = 'none',
 ): ForegroundAgentContextPackage['injectionProfile'] => {
   if (scenario === 'atomic' || scenario === 'review') {
     return {
@@ -493,7 +526,7 @@ const resolveInjectionProfile = (
       reason: 'atomic and review tasks only need nearby playlist facts',
     }
   }
-  if (scenario === 'layout_reference' || scenario === 'layout_draft_switch') {
+  if (scenario === 'layout_reference' && hasDraft && playlistType === 'tv') {
     return {
       scheduleItemLimit: 12,
       layoutSegmentLimit: 12,
@@ -503,43 +536,13 @@ const resolveInjectionProfile = (
       reason: 'explicit draft tasks need draft structure plus a compact schedule summary',
     }
   }
-  if (scenario === 'full_generate') {
-    if (draftCompletenessStatus === 'partial' || draftCompletenessStatus === 'complete') {
-      return {
-        scheduleItemLimit: 12,
-        layoutSegmentLimit: 12,
-        latestUserInputLimit: 1200,
-        maxPromptChars: 12000,
-        includeLayoutSegments: true,
-        reason: 'full playlist generation needs the loaded draft structure as the all-day planning basis',
-      }
-    }
-    return {
-      scheduleItemLimit: 12,
-      layoutSegmentLimit: 0,
-      latestUserInputLimit: 1000,
-      maxPromptChars: 7000,
-      includeLayoutSegments: false,
-      reason: 'full playlist generation uses the active playlist unless the user explicitly references a draft',
-    }
-  }
-  if (scenario === 'partial_generate') {
-    return {
-      scheduleItemLimit: 12,
-      layoutSegmentLimit: 0,
-      latestUserInputLimit: 1000,
-      maxPromptChars: 7000,
-      includeLayoutSegments: false,
-      reason: 'gap filling needs current playlist and gap counts without full draft expansion',
-    }
-  }
   return {
-    scheduleItemLimit: 6,
+    scheduleItemLimit: 12,
     layoutSegmentLimit: 0,
-    latestUserInputLimit: 600,
-    maxPromptChars: 4500,
+    latestUserInputLimit: 1200,
+    maxPromptChars: 7000,
     includeLayoutSegments: false,
-    reason: 'general routing keeps context small until intent is clear',
+    reason: 'intent is decided by LLM; context includes neutral current workspace facts',
   }
 }
 
@@ -641,48 +644,9 @@ const buildContextBudget = (input: {
 const resolveAllowedActions = (
   playlistType: PlaylistType,
   scenario: ForegroundAgentScenario,
-  draftCompletenessStatus: LayoutDraftCompleteness['status'],
 ): string[] => {
   if (playlistType === 'none') return ['create_tv_playlist', 'create_rotation_playlist']
-  if (scenario === 'layout_draft_switch') return ['switch_layout_draft', 'generate_layout_draft', 'upload_layout_draft', 'cancel']
-  if (scenario === 'full_generate') {
-    if (playlistType === 'rotation') {
-      return ['create_tv_playlist', 'open_tv_playlist', 'set_rotation_duration', 'switch_rotation_strategy', 'upload_layout_draft', 'generate_layout_draft', 'cancel']
-    }
-    if (playlistType === 'tv' && (draftCompletenessStatus === 'missing' || draftCompletenessStatus === 'empty')) {
-      return ['load_channel_layout_draft', 'upload_layout_draft', 'switch_layout_draft', 'partial_generate', 'cancel']
-    }
-    if (playlistType === 'tv' && draftCompletenessStatus === 'partial') {
-      return ['continue_layout_draft', 'partial_generate', 'upload_layout_draft', 'switch_layout_draft', 'cancel']
-    }
-    return ['full_generate', 'cancel']
-  }
-  if (scenario === 'partial_generate') {
-    if (playlistType === 'rotation' && (draftCompletenessStatus === 'missing' || draftCompletenessStatus === 'empty')) {
-      return ['upload_layout_draft', 'generate_layout_draft', 'cancel']
-    }
-    return ['partial_generate', 'cancel']
-  }
   if (scenario === 'review') return ['confirm', 'cancel', 'select', 'clarify', 'start_new_task']
   const base = ['insert', 'delete', 'move', 'replace', 'query', 'validate']
-  return playlistType === 'tv'
-    ? [...base, 'prepare_layout', 'full_generate', 'partial_generate']
-    : base
+  return [...base, 'prepare_layout', 'full_generate', 'partial_generate', 'switch_layout_draft', 'generate_layout_draft', 'upload_layout_draft']
 }
-
-const isStrongReviewResponse = (normalized: string, review: PendingReviewSnapshot): boolean => {
-  if (
-    review.kind === 'formal_rebuild'
-    && /^(确认重新编排|确认重排|重新编排|重排|确认覆盖|覆盖吧|开始重新编排|开始重排|开始编排|按这个重新编排|按草案重新编排|按当前草案重新编排|按这个开始编排|可以重新编排|可以重排)$/iu.test(normalized)
-  ) return review.allowedResponses.includes('confirm')
-  if (
-    review.kind === 'layout_draft_update'
-    && /^(可以|好的|好|确认|确定|更新|更新草案|更新到草案|写入草案|改到草案|改进草案|就按这个|就这个|用这个|用这个方向|按这个方向|没问题|ok|yes)$/iu.test(normalized)
-  ) return review.allowedResponses.includes('confirm')
-  if (/^(确认|确定|执行|可以|好的|好|ok|yes)$/iu.test(normalized)) return review.allowedResponses.includes('confirm')
-  if (/^(取消|不用了|算了|先不用|no|cancel)$/iu.test(normalized)) return review.allowedResponses.includes('cancel')
-  if (/^(第?[一二三四五六七八九十123456789]|选.+|用.+)$/iu.test(normalized)) return review.allowedResponses.includes('select')
-  return false
-}
-
-const normalizeText = (value: string): string => value.replace(/\s+/g, '')

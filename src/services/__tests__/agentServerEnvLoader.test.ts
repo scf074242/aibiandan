@@ -32,7 +32,7 @@ describe('agent server env loader', () => {
       key: 'VITE_CODE_PLAN_LLM_API_KEY',
       value: 'sk-existing',
     })
-    expect(parseAgentEnvLine('export AGENT_LLM_MODEL=\"deepseek-ai/DeepSeek-V4-Flash\"')).toEqual({
+    expect(parseAgentEnvLine('export AGENT_LLM_MODEL="deepseek-ai/DeepSeek-V4-Flash"')).toEqual({
       key: 'AGENT_LLM_MODEL',
       value: 'deepseek-ai/DeepSeek-V4-Flash',
     })

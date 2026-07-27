@@ -1,5 +1,12 @@
 # aibiandan Code Wiki
 
+## 业务数据入口
+
+业务实体的唯一入口为 `src/services/agent/canonicalSchedulingData.ts`，底层数据位于
+`src/mock/data/`。`src/mock/orchestrationMock.ts` 只负责把这些数据转换成编排运行时
+所需的候选视图。测试与浏览器验收不得另建节目/素材 seed；缺失数据必须暴露
+`data_fixture_missing`，以免把 LLM 协议 mock 误认为真实数据。
+
 > 广电节目串联单 AI 自动编排前端工程的结构化技术文档。
 > 生成时间：2026-06-25
 > 适用仓库：`c:\Users\Administrator\Documents\Playground\aibiandan`（包名 `bigbiandan-ui`）
@@ -35,6 +42,7 @@ aibiandan 是一个面向电视频道 / 轮播播单的 **AI 自动编排前端�
 |--------|------|
 | 播单管理 | 电视播单（时间格子）与轮播播单（内容队列）双轨；工作区多文档切换 |
 | 自然语言编排 | LLM-first 意图理解、参数提取、原子命令执行、候选推荐确认 |
+| 复合候选续接 | 批量替换等复合任务保留结构化 pending、候选 ID 与原任务，候选选择由 planner 的 `select_candidate` 继续 |
 | 版面草案 | 自然语言生成/微调/提交版面草案；Excel 导入；可行性预检 |
 | 全量/局部编排 | 空窗驱动三阶段流水线（规划→填充→修补），广告补位 |
 | 校验与修补 | 7 条内置校验规则、顺播保护、有限轮次修补 |
@@ -43,6 +51,8 @@ aibiandan 是一个面向电视频道 / 轮播播单的 **AI 自动编排前端�
 ### 1.3 工程定位
 
 - 仍是**演示型前端工程**，业务数据来自 `src/mock/`，非生产化交付版本。
+- 长流程恢复由 `formalOrchestrationRecovery.ts` 生成结构化恢复计划，`FormalOrchestrationRuntime` 使用原 `runId` 重建 checkpoint 上下文，`AgentServerRuntime` 持久化原始请求与播单版本并提供显式 recovery API。
+- ReAct action 使用由 `runId + turn + actionIndex + action` 生成的稳定 key；半批次恢复据此跳过已完成 action，正式写入仍统一经过 `FormalPlaylistWriteAdapter`。
 - 已建立工程质量基线（vue-tsc / eslint / vitest / vite build 通过）。
 - 内置一套 **Agent Harness 工程方法**（见 `AGENTS.md`），约束 LLM-first 主路径与本地结果保护边界。
 
@@ -146,9 +156,6 @@ aibiandan/
 │   ├── agent-real-llm-eval-strict.mjs
 │   └── foreground-browser-goal37.mjs  # Playwright 浏览器测试
 │
-├── public/
-│   └── openclaw-demo-bridge.user.js
-│
 ├── test-fixtures/                # 测试夹具
 │   ├── agent-cases/
 │   └── browser/smg-weekday-layout.xlsx
@@ -187,7 +194,7 @@ aibiandan/
     │   └── icons/
     │
     ├── composables/
-    │   └── useOrchestrator.ts    # 编排引擎组合式封装
+    │   └── useOrchestrator.ts    # 正式 ReAct 组合式封装
     │
     ├── stores/counter.ts         # Pinia 示例（未实际使用）
     │
@@ -255,13 +262,20 @@ aibiandan/
         │   ├── dataService.ts
         │   ├── runtimeLayoutRegistry.ts
         │   └── interfaces/      # execute/explain/preview/read
-        ├── openclaw/            # OpenClaw 桥接
         └── validators/validationEngine.ts
 ```
 
 ---
 
 ## 4. 整体架构
+
+正式 ReAct 的原子 action 通过请求级 `CapabilityRegistry` 解析唯一 owner，再进入既有原子 capability 校验；路由冲突在执行前暴露结构化失败，避免长流程端口形成第二条 capability 分发路径。
+
+敏感删除或轮播候选写入在 capability 层返回 `needs_confirmation` 时，原子端口会把既有 `pendingTask` 封装为带 `owner/workspaceKey/mutationId/mutationPolicy` 的正式 pending mutation；该封装不执行 commit，也不替用户确认。
+
+正式 ReAct 内核检测到 pending mutation 后立即保存 `waiting_user` checkpoint 并停止当前批次。服务端返回 `waiting_user` outcome；前台独立审批条显式调用 `confirm_pending` 或 `cancel`，不重发自然语言。恢复计划复用原 run/pendingTask，把待确认 action 标为 `pendingAction: confirm + formal_write`，再走统一 capability 与 `FormalPlaylistWriteAdapter`。等待/恢复 outcome 携带最后 checkpoint 的 `scheduleItems`，页面与 session 同步快照及版本；原子输入会移除控制面 `orchestration` 字段，避免递归创建第二个 ReAct run。
+
+已有正式节目执行整批重编时，第一次确认由 Local/Agent Server 边界转换为服务端持有的 `FormalOrchestrationGrant`，前台只接收 `authorizationGrantId`。Grant 绑定 session/workspace、来源 pending、播单版本、草案可执行指纹和任务范围；ReAct 启动、恢复及正式 mutation 分别校验，范围内不重复审批，范围漂移则停止。完整 Grant 不接受客户端提交，也不由 LLM 生成。
 
 ### 4.1 分层架构
 
@@ -276,7 +290,7 @@ aibiandan/
 │ L3  对话与命令编排层   commandExecutor / insert/replace/bus         │
 │                      intentRecognizer / paramExtractor             │
 ├────────────────────────────────────────────────────────────────────┤
-│ L4  编排执行与校验层   useOrchestrator / orchestrator               │
+│ L4  编排执行与校验层   useOrchestrator / formalOrchestrationRuntime │
 │                      gapManager / materializer / validators        │
 ├────────────────────────────────────────────────────────────────────┤
 │ L5  Agent 运行时层     services/agent + services/runtime + llm      │
@@ -303,7 +317,7 @@ HTTP 客户端 (agentRuntimeClient)
         ▼
 ┌───────────────────────────────────────────────────┐
 │  AgentServerRuntime                                │
-│  - buildForegroundAgentContextPackage（7 种场景）  │
+│  - buildForegroundAgentContextPackage（客观现场状态：review / atomic / layout_reference / general）  │
 │  - submitInstruction → runtime.submitInstruction   │
 │  - syncDecision（记录事件流）                       │
 │  - executePendingCommand                           │
@@ -324,7 +338,7 @@ SessionStore  Execution   FormalPlaylist  ReactTask     MaterialEvidence
 SchedulingAgentRuntime.submit(input)
         │
         ▼
-LlmAgentIntentInterpreter（LLM-only，maxTokens 700, temp 0）
+LlmAgentIntentInterpreter（LLM-only，maxTokens 1100, temp 0）
         │  返回 AgentIntentInterpretation
         ▼
 CapabilityRegistry.resolveAll（唯一匹配校验）
@@ -347,18 +361,19 @@ AtomicCommandCapability.handle*（8 种原子命令）
 
 | 文件 | 职责 |
 |------|------|
-| [create.vue](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/create.vue) | 主页面容器：工作区 tabs、时间轴表格、AI 侧边栏、focus 高亮、DEV Harness |
-| [useBroadcastPlanEditor.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/useBroadcastPlanEditor.ts) | 编辑器 composable：弹窗与增删改接线 |
-| [useBroadcastPlanOrchestration.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/useBroadcastPlanOrchestration.ts) | 编排 composable：封装 useOrchestrator + focusRuntime |
-| [useBroadcastPlanFocus.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/useBroadcastPlanFocus.ts) | focus 运行时：高亮定位与回声 |
-| [broadcastPlanScheduleBridge.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/broadcastPlanScheduleBridge.ts) | 页面 ScheduleItem 与 atomic Snapshot 互转 |
-| [broadcastPlanGapState.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/broadcastPlanGapState.ts) | 空窗识别与展示状态 |
-| [broadcastPlanViewState.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/broadcastPlanViewState.ts) | 排序、版面参考映射、显示列表、计数 |
-| [broadcastPlanEditorHelpers.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/broadcastPlanEditorHelpers.ts) | 缺口默认值、保存前归一化、待插入修正 |
-| [broadcastPlanOrchestrationHelpers.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/broadcastPlanOrchestrationHelpers.ts) | 编排任务分类前状态组装与局部补排判断 |
-| [scheduleData.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/scheduleData.ts) | ScheduleItem 类型、频道选项、节目类型枚举（21 种） |
-| [layoutReferenceData.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/layoutReferenceData.ts) | dragon 频道版面参考（15 条） |
-| [permissions.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/views/broadcast-plan/permissions.ts) | admin/editor/viewer 三种角色权限 |
+| [create.vue](file:///./src/views/broadcast-plan/create.vue) | 主页面容器：工作区 tabs、时间轴表格、AI 侧边栏、focus 高亮、DEV Harness |
+| [useBroadcastPlanEditor.ts](file:///./src/views/broadcast-plan/useBroadcastPlanEditor.ts) | 编辑器 composable：弹窗与增删改接线 |
+| [useBroadcastPlanOrchestration.ts](file:///./src/views/broadcast-plan/useBroadcastPlanOrchestration.ts) | 正式 ReAct 编排 composable：封装 useOrchestrator + focusRuntime；缺少 reactTask 时失败暴露，不调用旧编排器 |
+| [FormalOrchestrationApprovalBar.vue](file:///./src/views/broadcast-plan/components/FormalOrchestrationApprovalBar.vue) | 正式 ReAct 等待审批展示条；只发出 confirm/cancel UI 事件，workspace/version 校验和 recovery 调用由 composable 负责 |
+| [useBroadcastPlanFocus.ts](file:///./src/views/broadcast-plan/useBroadcastPlanFocus.ts) | focus 运行时：高亮定位与回声 |
+| [broadcastPlanScheduleBridge.ts](file:///./src/views/broadcast-plan/broadcastPlanScheduleBridge.ts) | 页面 ScheduleItem 与 atomic Snapshot 互转 |
+| [broadcastPlanGapState.ts](file:///./src/views/broadcast-plan/broadcastPlanGapState.ts) | 空窗识别与展示状态 |
+| [broadcastPlanViewState.ts](file:///./src/views/broadcast-plan/broadcastPlanViewState.ts) | 排序、版面参考映射、显示列表、计数 |
+| [broadcastPlanEditorHelpers.ts](file:///./src/views/broadcast-plan/broadcastPlanEditorHelpers.ts) | 缺口默认值、保存前归一化、待插入修正 |
+| [broadcastPlanOrchestrationHelpers.ts](file:///./src/views/broadcast-plan/broadcastPlanOrchestrationHelpers.ts) | 编排任务分类前状态组装与局部补排判断 |
+| [scheduleData.ts](file:///./src/views/broadcast-plan/scheduleData.ts) | ScheduleItem 类型、频道选项、节目类型枚举（21 种） |
+| [layoutReferenceData.ts](file:///./src/views/broadcast-plan/layoutReferenceData.ts) | dragon 频道版面参考（15 条） |
+| [permissions.ts](file:///./src/views/broadcast-plan/permissions.ts) | admin/editor/viewer 三种角色权限 |
 
 **命名约定**：`broadcastPlan*.ts` = 纯 helper；`useBroadcastPlan*.ts` = 页面级 composable（含副作用）；`create.vue` = 页面容器。
 
@@ -366,155 +381,166 @@ AtomicCommandCapability.handle*（8 种原子命令）
 
 | 文件 | 职责 |
 |------|------|
-| [ChatPanel.vue](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/components/dialogue/ChatPanel.vue) | 对话主面板：消息流、待确认面板、扩展详情、候选对比、Agent 审计卡片、17 个 quickActions |
-| [chatPanelFormatting.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/components/dialogue/chatPanelFormatting.ts) | 格式化、摘要文案、programType/selectionMode 中文映射 |
-| [chatPanelDetails.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/components/dialogue/chatPanelDetails.ts) | 候选对比、风险提炼、明细摘要、各种标签映射表 |
-| [LLMConfigPanel.vue](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/components/llm/LLMConfigPanel.vue) | LLM 配置面板：http 模式显示"由服务端管理"，否则显示表单 |
-| [GapVisualizer.vue](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/components/orchestration/GapVisualizer.vue) | 空窗时间轴可视化 |
-| [OrchestrationProgress.vue](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/components/orchestration/OrchestrationProgress.vue) | 编排进度面板（phase 映射） |
-| [TaskModeSelector.vue](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/components/orchestration/TaskModeSelector.vue) | 6 种任务模式卡片选择 |
+| [ChatPanel.vue](file:///./src/components/dialogue/ChatPanel.vue) | 对话主面板：消息流、待确认面板、扩展详情、候选对比、Agent 审计卡片、17 个 quickActions；消息过滤只读结构化标签/payload/details，不按回复正文关键词隐藏终态 |
+| [chatPanelActiveRequestController.ts](file:///./src/components/dialogue/chatPanelActiveRequestController.ts) | 短链请求活动状态、5 秒可停止门槛与服务端停止接线状态 |
+| [agentLlmStreamProgress.ts](file:///./src/services/runtime/agentLlmStreamProgress.ts) | LLM 首 token/增量的业务化安全进度映射；原始结构内容与 `structured_complete` 协议事件不进入用户对话 |
+| [chatPanelFormatting.ts](file:///./src/components/dialogue/chatPanelFormatting.ts) | 格式化、摘要文案、programType/selectionMode 中文映射 |
+| [chatPanelDetails.ts](file:///./src/components/dialogue/chatPanelDetails.ts) | 候选对比、风险提炼、明细摘要、各种标签映射表 |
+| [LLMConfigPanel.vue](file:///./src/components/llm/LLMConfigPanel.vue) | LLM 配置面板：http 模式显示"由服务端管理"，否则显示表单 |
+| [GapVisualizer.vue](file:///./src/components/orchestration/GapVisualizer.vue) | 空窗时间轴可视化 |
+| [OrchestrationProgress.vue](file:///./src/components/orchestration/OrchestrationProgress.vue) | 编排进度面板（phase 映射） |
+| [TaskModeSelector.vue](file:///./src/components/orchestration/TaskModeSelector.vue) | 6 种任务模式卡片选择 |
 
 ### 5.3 编排执行与校验层
 
 | 文件 | 职责 |
 |------|------|
-| [useOrchestrator.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/composables/useOrchestrator.ts) | 编排引擎 Vue 组合式封装，暴露响应式状态与方法 |
-| [orchestrator.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/orchestrator.ts) | 编排引擎核心：三阶段流水线、事件驱动、空窗驱动填充 |
-| [gapManager.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/gapManager.ts) | 空窗生命周期管理（minGapDuration=60s） |
-| [materializer.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/materializer.ts) | 候选物化为 ScheduleItemSnapshot，处理广告破口切分 |
-| [adFillService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/adFillService.ts) | 广告插入机会识别与计划（AD_DURATIONS=[1800,900,300]） |
-| [repairManager.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/repairManager.ts) | 有限轮次修补（最多 3 轮） |
-| [fallbackManager.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/fallbackManager.ts) | 三级回退（条目级/空窗级/会话级） |
-| [validationEngine.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/validators/validationEngine.ts) | 7 条内置校验规则 |
-| [scheduleSequenceGuard.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/scheduleSequenceGuard.ts) | 顺播顺序违规检测（reverse_order/sequence_gap/duplicate_episode） |
-| [orchestrationStrategyService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/orchestrationStrategyService.ts) | 基于版面命中的栏目生成 GapPlanningThought |
-| [scheduleValidationService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/scheduleValidationService.ts) | 当前编排单校验薄封装 |
-| [scheduleTargetResolver.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/scheduleTargetResolver.ts) | 定位用户指令指向的具体条目（LLM + 本地安全校验） |
+| [useOrchestrator.ts](file:///./src/composables/useOrchestrator.ts) | 正式 ReAct Vue 组合式封装，暴露启动、恢复、中止与响应式状态；不再暴露旧 full/partial 直启入口 |
+| [orchestrator.ts](file:///./src/services/orchestrator.ts) | 编排引擎核心：三阶段流水线、事件驱动、空窗驱动填充 |
+| [gapManager.ts](file:///./src/services/gapManager.ts) | 空窗生命周期管理（minGapDuration=60s） |
+| [materializer.ts](file:///./src/services/materializer.ts) | 候选物化为 ScheduleItemSnapshot，处理广告破口切分 |
+| [adFillService.ts](file:///./src/services/adFillService.ts) | 广告插入机会识别与计划（AD_DURATIONS=[1800,900,300]） |
+| [repairManager.ts](file:///./src/services/repairManager.ts) | 有限轮次修补（最多 3 轮） |
+| [fallbackManager.ts](file:///./src/services/fallbackManager.ts) | 三级回退（条目级/空窗级/会话级） |
+| [validationEngine.ts](file:///./src/services/validators/validationEngine.ts) | 7 条内置校验规则 |
+| [scheduleSequenceGuard.ts](file:///./src/services/scheduleSequenceGuard.ts) | 顺播顺序违规检测（reverse_order/sequence_gap/duplicate_episode） |
+| [orchestrationStrategyService.ts](file:///./src/services/orchestrationStrategyService.ts) | 基于版面命中的栏目生成 GapPlanningThought |
+| [scheduleValidationService.ts](file:///./src/services/scheduleValidationService.ts) | 当前编排单校验薄封装 |
+| [scheduleTargetResolver.ts](file:///./src/services/scheduleTargetResolver.ts) | 定位用户指令指向的具体条目（LLM + 本地安全校验） |
 
 ### 5.4 对话与命令链路层
 
 | 文件 | 职责 |
 |------|------|
-| [commandExecutor.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/commandExecutor.ts) | 通用命令执行器（10 种 action） |
-| [insertCommandExecutor.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/insertCommandExecutor.ts) | 插入命令执行器 |
-| [replaceCommandExecutor.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/replaceCommandExecutor.ts) | 替换命令执行器 |
-| [scheduleCommandBus.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/scheduleCommandBus.ts) | 命令总线（按 action 分发） |
-| [intentRecognizer.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/intentRecognizer.ts) | LLM 微调意图识别（6 类，LLM-first 不兜底） |
-| [layoutIntentRecognizer.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutIntentRecognizer.ts) | 版面草案意图识别（6 种模式） |
-| [paramExtractor.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/paramExtractor.ts) | LLM 命令参数提取（insert/move/delete/replace） |
-| [atomicCapabilities.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/atomicCapabilities.ts) | 原子操作能力（每操作自动快照 + validateOrRollback） |
-| [atomicTimeParser.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/atomicTimeParser.ts) | 原子时间解析（中英文钟点/点半刻） |
-| [atomicOffsetParser.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/atomicOffsetParser.ts) | 原子偏移解析（前/后移 N 小时/分钟） |
-| [candidateService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/candidateService.ts) | 候选检索与排序（顺播/非顺播策略） |
-| [candidateSelectionService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/candidateSelectionService.ts) | 候选选择（LLM + 本地守卫 + 编辑决策） |
-| [candidateKeywordMatcher.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/candidateKeywordMatcher.ts) | 候选关键词匹配核心规则库（5 层关键词） |
-| [insertCandidateResolver.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/insertCandidateResolver.ts) | 插入候选解析（直接执行/推荐列表/追问） |
-| [dialogueContext.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/dialogueContext.ts) | 对话上下文构建 |
-| [manualCommandAdapter.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/manualCommandAdapter.ts) | 人工 UI 操作转统一编排命令 |
-| [entityLinker.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/entityLinker.ts) | 插入参数转候选检索命令与插入命令 |
-| [queryIntentService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/queryIntentService.ts) | 基于空窗生成候选查询条件 |
-| [retrievalConstraintCompiler.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/retrievalConstraintCompiler.ts) | 栏目约束转关键词 |
-| [schedulingIntentHeuristics.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/schedulingIntentHeuristics.ts) | 编排意图启发式（时间范围解析、是否编排请求） |
-| [draftSegmentLabelMatcher.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/draftSegmentLabelMatcher.ts) | 版面草案片段标签匹配 |
+| [commandExecutor.ts](file:///./src/services/commandExecutor.ts) | 通用命令执行器（10 种 action） |
+| [insertCommandExecutor.ts](file:///./src/services/insertCommandExecutor.ts) | 插入命令执行器 |
+| [replaceCommandExecutor.ts](file:///./src/services/replaceCommandExecutor.ts) | 替换命令执行器 |
+| [scheduleCommandBus.ts](file:///./src/services/scheduleCommandBus.ts) | 命令总线（按 action 分发） |
+| [intentRecognizer.ts](file:///./src/services/intentRecognizer.ts) | LLM 微调意图识别（6 类，LLM-first 不兜底） |
+| [layoutIntentRecognizer.ts](file:///./src/services/layoutIntentRecognizer.ts) | 版面草案意图识别（6 种模式） |
+| [paramExtractor.ts](file:///./src/services/paramExtractor.ts) | LLM 命令参数提取（insert/move/delete/replace） |
+| [atomicCapabilities.ts](file:///./src/services/atomicCapabilities.ts) | 原子操作能力（维护工作快照并执行校验；失败保留现场，不自动回滚） |
+| [atomicTimeParser.ts](file:///./src/services/atomicTimeParser.ts) | 原子时间解析（中英文钟点/点半刻） |
+| [atomicOffsetParser.ts](file:///./src/services/atomicOffsetParser.ts) | 原子偏移解析（前/后移 N 小时/分钟） |
+| [candidateService.ts](file:///./src/services/candidateService.ts) | 候选检索与排序（顺播/非顺播策略） |
+| [candidateSelectionService.ts](file:///./src/services/candidateSelectionService.ts) | 候选选择（LLM + 本地守卫 + 编辑决策） |
+| [candidateKeywordMatcher.ts](file:///./src/services/candidateKeywordMatcher.ts) | 候选关键词匹配核心规则库（5 层关键词） |
+| [insertCandidateResolver.ts](file:///./src/services/insertCandidateResolver.ts) | 插入候选解析（直接执行/推荐列表/追问） |
+| [dialogueContext.ts](file:///./src/services/dialogueContext.ts) | 对话上下文构建 |
+| [manualCommandAdapter.ts](file:///./src/services/manualCommandAdapter.ts) | 人工 UI 操作转统一编排命令 |
+| [entityLinker.ts](file:///./src/services/entityLinker.ts) | 插入参数转候选检索命令与插入命令 |
+| [queryIntentService.ts](file:///./src/services/queryIntentService.ts) | 基于空窗生成候选查询条件 |
+| [retrievalConstraintCompiler.ts](file:///./src/services/retrievalConstraintCompiler.ts) | 栏目约束转关键词 |
+| [schedulingIntentHeuristics.ts](file:///./src/services/schedulingIntentHeuristics.ts) | 编排意图启发式（时间范围解析、是否编排请求） |
+| [draftSegmentLabelMatcher.ts](file:///./src/services/draftSegmentLabelMatcher.ts) | 版面草案片段标签匹配 |
 
 ### 5.5 版面草案工作流层
 
 | 文件 | 职责 |
 |------|------|
-| [layoutDraftService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutDraftService.ts) | 版面草案生成与微调（LLM 驱动，生成 LayoutDraftSpec） |
-| [layoutDraftCompiler.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutDraftCompiler.ts) | LayoutDraftSpec 编译为 LayoutDraft（columns + slots） |
-| [layoutDraftValidator.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutDraftValidator.ts) | 草案校验（spec 级 + draft 级） |
-| [layoutDraftCompleteness.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutDraftCompleteness.ts) | 草案完整度评估（missing/empty/partial/complete） |
-| [layoutDraftFeasibilityService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutDraftFeasibilityService.ts) | 草案可行性预检（每栏目段能否找到候选） |
-| [layoutDraftSemanticCleaner.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutDraftSemanticCleaner.ts) | 草案语义清洗（去噪声词/动作词/时段词） |
-| [layoutImportService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutImportService.ts) | Excel 版面导入（3 种模板模式） |
-| [layoutAnalysisService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutAnalysisService.ts) | 版面编排分析（LLM 生成自然语言报告） |
-| [layoutAnalysisPromptBuilder.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/layoutAnalysisPromptBuilder.ts) | 版面分析 LLM Prompt 构建 |
-| [orchestrationPromptBuilder.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/orchestrationPromptBuilder.ts) | 编排相关 LLM Prompt 构建 |
+| [layoutDraftService.ts](file:///./src/services/layoutDraftService.ts) | 版面草案生成与微调（LLM 驱动，生成 LayoutDraftSpec） |
+| [layoutDraftCompiler.ts](file:///./src/services/layoutDraftCompiler.ts) | LayoutDraftSpec 编译为 LayoutDraft（columns + slots） |
+| [layoutDraftValidator.ts](file:///./src/services/layoutDraftValidator.ts) | 草案校验（spec 级 + draft 级）；模型 spec 缺失或畸形时返回 `invalid_spec`，不补造草案 |
+| [layoutDraftCompleteness.ts](file:///./src/services/layoutDraftCompleteness.ts) | 草案完整度评估（missing/empty/partial/complete） |
+| [layoutDraftFeasibilityService.ts](file:///./src/services/layoutDraftFeasibilityService.ts) | 草案可行性预检（每栏目段能否找到候选） |
+| [layoutDraftSemanticCleaner.ts](file:///./src/services/layoutDraftSemanticCleaner.ts) | 草案语义清洗（去噪声词/动作词/时段词） |
+| [layoutImportService.ts](file:///./src/services/layoutImportService.ts) | Excel 版面导入（3 种模板模式） |
+| [layoutAnalysisService.ts](file:///./src/services/layoutAnalysisService.ts) | 版面编排分析（LLM 生成自然语言报告） |
+| [layoutAnalysisPromptBuilder.ts](file:///./src/services/layoutAnalysisPromptBuilder.ts) | 版面分析 LLM Prompt 构建 |
+| [orchestrationPromptBuilder.ts](file:///./src/services/orchestrationPromptBuilder.ts) | 编排相关 LLM Prompt 构建 |
 
 ### 5.6 Agent 核心层（`src/services/agent/`）
 
 | 文件 | 职责 |
 |------|------|
-| [schedulingAgentRuntime.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/schedulingAgentRuntime.ts) | Agent 核心运行时入口，submit 主流程 |
-| [llmAgentIntentInterpreter.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/llmAgentIntentInterpreter.ts) | LLM-only 意图解释器（~100 条规则，maxTokens 700, temp 0） |
-| [atomicCommandCapability.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/atomicCommandCapability.ts) | 原子命令能力包（8 种 intent 的 handle/continue/confirm） |
-| [playlistPolicy.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/playlistPolicy.ts) | 8 个原子命令策略表（TV vs Rotation 分流） |
-| [capabilityRegistry.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/capabilityRegistry.ts) | 能力注册表（register/list/resolve/resolveAll） |
-| [constraintEngine.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/constraintEngine.ts) | 约束引擎（重叠/边界/顺播/锁定/禁排） |
-| [candidateJudge.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/candidateJudge.ts) | LLM 候选决策（LLM 自判 auto_select/needs_clarification/unable_to_decide，本地仅校验结构 + 顺播后置校验） |
-| [tvSequenceCandidateSelector.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/tvSequenceCandidateSelector.ts) | TV 顺播候选选择器（仅 TV） |
-| [professionalRules.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/professionalRules.ts) | 11 条专业规则（block/confirm/prefer/warn/audit/pass） |
-| [contextBundle.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/contextBundle.ts) | SchedulingContext 转 Bundle |
-| [contextFingerprint.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/contextFingerprint.ts) | FNV-1a 哈希上下文指纹 |
-| [inMemorySchedulingDataGateway.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/inMemorySchedulingDataGateway.ts) | 内存数据网关 |
-| [runtimeSchedulingDataGateway.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/runtimeSchedulingDataGateway.ts) | 运行时数据网关 |
-| [runtimeSchedulingDataAdapters.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/runtimeSchedulingDataAdapters.ts) | 5 个数据适配器接口 |
-| [searchFacets.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/searchFacets.ts) | 中文领域词典 + 噪声词剔除 |
-| [time.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/time.ts) | 时间工具 |
-| [types.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/types.ts) | Agent 核心类型定义 |
-| [agentSession.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/agentSession.ts) | 待处理任务管理 |
-| [agentTrace.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/agentTrace.ts) | Trace 记录器 |
-| [agentAuditSummary.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/agentAuditSummary.ts) | 审计摘要生成 |
-| [agentReadinessAudit.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/agentReadinessAudit.ts) | 静态/动态就绪审计 |
-| [llmContextPackage.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/llmContextPackage.ts) | LLM 证据包构建（TV/Rotation 区分） |
-| [llmIntentEvaluation.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/llmIntentEvaluation.ts) | 单轮意图识别评估 |
-| [llmRuntimeEvaluation.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/llmRuntimeEvaluation.ts) | 端到端 runtime 评估 |
+| [schedulingAgentRuntime.ts](file:///./src/services/agent/schedulingAgentRuntime.ts) | Agent 核心运行时入口，submit 主流程 |
+| [llmAgentIntentInterpreter.ts](file:///./src/services/agent/llmAgentIntentInterpreter.ts) | LLM-only 意图解释器（~100 条规则，maxTokens 1100, temp 0） |
+| [agentLlmStreaming.ts](file:///./src/services/agent/agentLlmStreaming.ts) | intent/candidate 流式事件类型与结构化完成边界；`structured_complete` 仅供内部状态机与 trace |
+| [atomicCommandCapability.ts](file:///./src/services/agent/atomicCommandCapability.ts) | 原子命令能力包（8 种 intent 的 handle/continue/confirm） |
+| [playlistPolicy.ts](file:///./src/services/agent/playlistPolicy.ts) | 8 个原子命令策略表（TV vs Rotation 分流） |
+| [capabilityRegistry.ts](file:///./src/services/agent/capabilityRegistry.ts) | 能力注册表（register/list/resolve/resolveAll） |
+| [constraintEngine.ts](file:///./src/services/agent/constraintEngine.ts) | 约束引擎（重叠/边界/顺播/锁定/禁排） |
+| [candidateJudge.ts](file:///./src/services/agent/candidateJudge.ts) | LLM 候选决策（LLM 自判 auto_select/needs_clarification/unable_to_decide，本地仅校验结构 + 顺播后置校验）。Prompt v1.3：v1.1 移除"时长适配"硬条件，v1.2 对齐顺播文案，v1.3 移除候选数量阈值；候选数量和本地编辑评分不再覆盖证据充分的 LLM 唯一选择。 |
+| [tvSequenceCandidateSelector.ts](file:///./src/services/agent/tvSequenceCandidateSelector.ts) | TV 顺播候选选择器（仅 TV） |
+| [professionalRules.ts](file:///./src/services/agent/professionalRules.ts) | 11 条专业规则（block/confirm/prefer/warn/audit/pass） |
+| [contextBundle.ts](file:///./src/services/agent/contextBundle.ts) | SchedulingContext 转 Bundle |
+| [contextFingerprint.ts](file:///./src/services/agent/contextFingerprint.ts) | FNV-1a 哈希上下文指纹 |
+| [inMemorySchedulingDataGateway.ts](file:///./src/services/agent/inMemorySchedulingDataGateway.ts) | 内存数据网关 |
+| [runtimeSchedulingDataGateway.ts](file:///./src/services/agent/runtimeSchedulingDataGateway.ts) | 运行时数据网关 |
+| [runtimeSchedulingDataAdapters.ts](file:///./src/services/agent/runtimeSchedulingDataAdapters.ts) | 5 个数据适配器接口 |
+| [searchFacets.ts](file:///./src/services/agent/searchFacets.ts) | 中文领域词典 + 噪声词剔除 |
+| [time.ts](file:///./src/services/agent/time.ts) | 时间工具 |
+| [types.ts](file:///./src/services/agent/types.ts) | Agent 核心类型定义 |
+| [agentSession.ts](file:///./src/services/agent/agentSession.ts) | 待处理任务管理 |
+| [agentTrace.ts](file:///./src/services/agent/agentTrace.ts) | Trace 记录器 |
+| [agentAuditSummary.ts](file:///./src/services/agent/agentAuditSummary.ts) | 审计摘要生成 |
+| [agentReadinessAudit.ts](file:///./src/services/agent/agentReadinessAudit.ts) | 静态/动态就绪审计 |
+| [llmContextPackage.ts](file:///./src/services/agent/llmContextPackage.ts) | LLM 证据包构建（TV/Rotation 区分） |
+| [llmIntentEvaluation.ts](file:///./src/services/agent/llmIntentEvaluation.ts) | 单轮意图识别评估 |
+| [llmRuntimeEvaluation.ts](file:///./src/services/agent/llmRuntimeEvaluation.ts) | 端到端 runtime 评估 |
 
 ### 5.7 运行时层（`src/services/runtime/`）
 
 | 文件 | 职责 |
 |------|------|
-| [schedulingAgentRuntimeFacade.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/schedulingAgentRuntimeFacade.ts) | Facade 单例，继承 DemoRuntimeFacade |
-| [demoRuntimeFacade.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/demoRuntimeFacade.ts) | 运行时核心（RuntimeDecision/RuntimePendingCommand 等类型 + 主流程） |
-| [agentServerRuntime.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/agentServerRuntime.ts) | 服务端运行时核心类 |
-| [agentServerExecutionService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/agentServerExecutionService.ts) | 服务端执行服务（检查点提取） |
-| [agentServerSessionStore.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/agentServerSessionStore.ts) | 内存会话存储 |
-| [agentServerFileSessionStore.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/agentServerFileSessionStore.ts) | 文件会话存储（schemaVersion 2） |
-| [agentRuntimeClient.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/agentRuntimeClient.ts) | 双模式客户端（Local/Http） |
-| [reactTaskRuntime.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/reactTaskRuntime.ts) | ReAct 任务运行时（maxTurns 1-5） |
-| [reactTaskTypes.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/reactTaskTypes.ts) | ReAct 任务类型 |
-| [schedulingTaskPlan.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/schedulingTaskPlan.ts) | 任务计划类型 |
-| [schedulingTaskPlanCompiler.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/schedulingTaskPlanCompiler.ts) | 任务计划编译（batch/shift） |
-| [schedulingTaskPlanConflict.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/schedulingTaskPlanConflict.ts) | 任务计划冲突检测 |
-| [formalPlaylistState.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/formalPlaylistState.ts) | 正式播单快照与 Patch 计算 |
-| [formalPlaylistWriteAdapter.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/formalPlaylistWriteAdapter.ts) | 写入边界（幂等/版本/批量保护） |
-| [foregroundAgentContextPackage.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/foregroundAgentContextPackage.ts) | 前台上下文包（7 种 scenario） |
-| [pendingAtomicContext.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/pendingAtomicContext.ts) | 待处理原子上下文（5 种 phase） |
-| [pendingAtomicContextService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/pendingAtomicContextService.ts) | 待处理上下文生命周期（TTL 10min, maxAttempts 3） |
-| [playlistPolicy.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/playlistPolicy.ts) | 运行时播单策略派生（TV/Rotation） |
-| [foregroundWorkspaceState.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/foregroundWorkspaceState.ts) | 工作区 key 与切换检测 |
-| [foregroundLayoutDraft.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/foregroundLayoutDraft.ts) | 前台版面草案状态 |
-| [agentMaterialEvidenceService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/agentMaterialEvidenceService.ts) | 素材证据收集 |
-| [agentSessionReplayPackage.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/agentSessionReplayPackage.ts) | 会话回放包 |
-| [runtimeSessionStore.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/runtimeSessionStore.ts) | 旧版会话存储 |
+| [schedulingAgentRuntimeFacade.ts](file:///./src/services/runtime/schedulingAgentRuntimeFacade.ts) | Facade 单例，继承 DemoRuntimeFacade；正式 ReAct 返回 completed/waiting_user/cancelled/failed outcome，等待与完成结果携带正式播单工作快照，失败保留 recoverable envelope。 |
+| [demoRuntimeFacade.ts](file:///./src/services/runtime/demoRuntimeFacade.ts) | 运行时核心（RuntimeDecision/RuntimePendingCommand 等类型 + 主流程） |
+| [compositeInsertCandidatePreflight.ts](file:///./src/services/runtime/compositeInsertCandidatePreflight.ts) | 复合插入计划的候选硬条件预检；时长冲突阻断，单候选绑定，多候选进入选择 pending。 |
+| [agentServerRuntime.ts](file:///./src/services/runtime/agentServerRuntime.ts) | 服务端运行时核心类；`executeReactOrchestration` 按 session/workspace 执行正式长流程，持久化逐轮 checkpoint，并将任务规划、查节目库、候选决策与可恢复失败投影到 session SSE。 |
+| [agentServerExecutionService.ts](file:///./src/services/runtime/agentServerExecutionService.ts) | 服务端执行服务（检查点提取） |
+| [agentServerSessionStore.ts](file:///./src/services/runtime/agentServerSessionStore.ts) | 内存会话存储 |
+| [agentServerFileSessionStore.ts](file:///./src/services/runtime/agentServerFileSessionStore.ts) | 文件会话存储（schemaVersion 2） |
+| [agentRuntimeClient.ts](file:///./src/services/runtime/agentRuntimeClient.ts) | 双模式客户端（Local/Http）；正式 ReAct 在 HTTP 模式先订阅 session SSE，再调用 `/api/agent/orchestration`，POST 按稳定事件 id 补回断流期间遗漏进度；Local/Http 均支持显式 checkpoint recovery，停止复用 session instruction stop。 |
+| [reactTaskRuntime.ts](file:///./src/services/runtime/reactTaskRuntime.ts) | ReAct 任务运行时（maxTurns 1-5） |
+| [formalOrchestrationRuntime.ts](file:///./src/services/runtime/formalOrchestrationRuntime.ts) | 正式编排真 ReAct 批次内核；强制 act 后 observe/decide，保存 checkpoint，失败或中止立即停止。生产请求只允许由 FormalOrchestrationCapability 携带显式 `reactTask` 接入；缺失时返回 `react_plan_invalid`，不再调用旧 Orchestrator。 |
+| [formalOrchestrationContextCompactor.ts](file:///./src/services/runtime/formalOrchestrationContextCompactor.ts) | ReAct decide 历史压缩纯函数；保留最近两轮 raw observation、全部已决动作摘要与失败原因，输出确定性压缩 trace 供 checkpoint/replay 审计。 |
+| [formalOrchestrationActionAdapter.ts](file:///./src/services/runtime/formalOrchestrationActionAdapter.ts) | ReAct action 到业务端口的执行边界；阻断控制动作递归、缺失 mutationPolicy、跨 workspace 证据和只读 mutation。 |
+| [formalOrchestrationReadPorts.ts](file:///./src/services/runtime/formalOrchestrationReadPorts.ts) | 真实 `SchedulingDataGateway` 只读端口；候选检索和约束校验形成可供下一轮 decide 的 observation，不执行 commit。 |
+| [formalOrchestrationAtomicPort.ts](file:///./src/services/runtime/formalOrchestrationAtomicPort.ts) | ReAct 原子 action 端口；复用原子 capability 校验，分别实现 preview、pending capture 与经 FormalPlaylistWriteAdapter 的正式写入。 |
+| [formalOrchestrationGrant.ts](file:///./src/services/runtime/formalOrchestrationGrant.ts) | 已有正式播单整批重编的可信任务级授权；签发并校验 session/workspace、播单版本、草案指纹、任务范围、TTL 与 intent，前台只传 grantId。 |
+| [formalOrchestrationDecider.ts](file:///./src/services/agent/formalOrchestrationDecider.ts) | 长流程 observation 后的 LLM decide 适配器；prompt `v1.4` 只读取当前 observation、`compactedHistory` 与运行时解析的最小 Grant 摘要，执行结构化动作校验、`mutationPolicy` 约束和非法响应失败暴露。 |
+| [reactTaskTypes.ts](file:///./src/services/runtime/reactTaskTypes.ts) | ReAct 任务类型 |
+| [schedulingTaskPlan.ts](file:///./src/services/runtime/schedulingTaskPlan.ts) | 任务计划类型 |
+| [schedulingTaskPlanCompiler.ts](file:///./src/services/runtime/schedulingTaskPlanCompiler.ts) | 任务计划编译（batch/shift） |
+| [schedulingTaskPlanConflict.ts](file:///./src/services/runtime/schedulingTaskPlanConflict.ts) | 任务计划冲突检测 |
+| [formalPlaylistState.ts](file:///./src/services/runtime/formalPlaylistState.ts) | 正式播单快照与 Patch 计算 |
+| [formalPlaylistWriteAdapter.ts](file:///./src/services/runtime/formalPlaylistWriteAdapter.ts) | 写入边界（幂等/版本/批量保护） |
+| [foregroundAgentContextPackage.ts](file:///./src/services/runtime/foregroundAgentContextPackage.ts) | 前台上下文包（仅提供客观现场状态，不做用户意图分类） |
+| [pendingAtomicContext.ts](file:///./src/services/runtime/pendingAtomicContext.ts) | 待处理原子上下文（5 种 phase） |
+| [pendingAtomicContextService.ts](file:///./src/services/runtime/pendingAtomicContextService.ts) | 待处理上下文生命周期（TTL 10min, maxAttempts 3） |
+| [playlistPolicy.ts](file:///./src/services/runtime/playlistPolicy.ts) | 运行时播单策略派生（TV/Rotation） |
+| [foregroundWorkspaceState.ts](file:///./src/services/runtime/foregroundWorkspaceState.ts) | 工作区 key、切换检测与首次建单会话绑定；对话线程连续可见，pending/快照/mutation 仍按工作区隔离 |
+| [foregroundLayoutDraft.ts](file:///./src/services/runtime/foregroundLayoutDraft.ts) | 前台版面草案状态 |
+| [agentMaterialEvidenceService.ts](file:///./src/services/runtime/agentMaterialEvidenceService.ts) | 素材证据收集 |
+| [agentSessionReplayPackage.ts](file:///./src/services/runtime/agentSessionReplayPackage.ts) | 会话回放包 |
+| [runtimeSessionStore.ts](file:///./src/services/runtime/runtimeSessionStore.ts) | 旧版会话存储 |
 
 ### 5.8 LLM 基础设施层（`src/services/llm/`）
 
 | 文件 | 职责 |
 |------|------|
-| [llmClient.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/llmClient.ts) | LLM 客户端（重试/超时/流式/Token/Trace/浏览器 Mock） |
-| [llmConfig.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/llmConfig.ts) | LLM 配置多源加载（默认/localStorage/Cookie/env） |
-| [llmFailure.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/llmFailure.ts) | LLM 失败归一化（timeout/network/unavailable） |
-| [localDemoLlm.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/localDemoLlm.ts) | 无 API Key 时演示回退 |
-| [promptBuilder.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/promptBuilder.ts) | 编排各阶段 Prompt 构建 |
-| [contextBuilder.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/contextBuilder.ts) | LLM 业务上下文构建 |
-| [responseParser.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/responseParser.ts) | LLM JSON 响应解析与校验 |
-| [taskClassifier.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/taskClassifier.ts) | 遗留任务分类器接口壳（LLM-only 后退化为默认模式） |
-| [agentPlanner.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/agentPlanner.ts) | Agent Planner（多动作计划，single/react） |
-| [prompts/systemPrompts.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/prompts/systemPrompts.ts) | 5 个角色系统 Prompt 常量 |
+| [llmClient.ts](file:///./src/services/llm/llmClient.ts) | LLM 客户端（重试/统一 deadline 超时/流式/JSON object 输出/Token/Trace/浏览器 Mock），不再隐藏截断调用方的 60s transport timeout。 |
+| [llmConfig.ts](file:///./src/services/llm/llmConfig.ts) | LLM 配置多源加载（默认/localStorage/Cookie/env） |
+| [llmFailure.ts](file:///./src/services/llm/llmFailure.ts) | LLM 失败归一化（timeout/network/unavailable） |
+| [localDemoLlm.ts](file:///./src/services/llm/localDemoLlm.ts) | 无 API Key 时演示回退 |
+| [promptBuilder.ts](file:///./src/services/llm/promptBuilder.ts) | 编排各阶段 Prompt 构建 |
+| [contextBuilder.ts](file:///./src/services/llm/contextBuilder.ts) | LLM 业务上下文构建 |
+| [responseParser.ts](file:///./src/services/llm/responseParser.ts) | LLM JSON 响应解析与校验 |
+| [taskClassifier.ts](file:///./src/services/llm/taskClassifier.ts) | 遗留任务分类器接口壳（LLM-only 后退化为默认模式） |
+| [agentPlanner.ts](file:///./src/services/llm/agentPlanner.ts) | Agent Planner（多动作计划，single/react） |
+| [prompts/systemPrompts.ts](file:///./src/services/llm/prompts/systemPrompts.ts) | 5 个角色系统 Prompt 常量 |
 
 ### 5.9 数据与 mock 支撑层
 
 | 文件 | 职责 |
 |------|------|
-| [orchestration/dataService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/orchestration/dataService.ts) | 编排数据访问层（频道/节目/版面/历史/固定项） |
-| [orchestration/runtimeLayoutRegistry.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/orchestration/runtimeLayoutRegistry.ts) | 运行时版面注册中心（上传版面 > 默认版面） |
-| [orchestration/interfaces/](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/orchestration/interfaces) | execute/explain/preview/read 四类接口 |
-| [orchestrationMock.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/mock/orchestrationMock.ts) | mock 数据加载与派生计算 |
-| [demoData.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/mock/demoData.ts) | demo 数据汇总入口 |
-| [types/orchestration.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/types/orchestration.ts) | 编排核心类型（~900 行） |
-| [types/llm.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/types/llm.ts) | LLM 相关类型 |
+| [orchestration/dataService.ts](file:///./src/services/orchestration/dataService.ts) | 编排数据访问层（频道/节目/版面/历史/固定项） |
+| [orchestration/runtimeLayoutRegistry.ts](file:///./src/services/orchestration/runtimeLayoutRegistry.ts) | 运行时版面注册中心（上传版面 > 默认版面） |
+| [orchestration/interfaces/](file:///./src/services/orchestration/interfaces) | execute/explain/preview/read 四类接口 |
+| [orchestrationMock.ts](file:///./src/mock/orchestrationMock.ts) | mock 数据加载与派生计算 |
+| [demoData.ts](file:///./src/mock/demoData.ts) | demo 数据汇总入口 |
+| [types/orchestration.ts](file:///./src/types/orchestration.ts) | 编排核心类型（~900 行） |
+| [types/llm.ts](file:///./src/types/llm.ts) | LLM 相关类型 |
 
 ---
 
@@ -522,9 +548,9 @@ AtomicCommandCapability.handle*（8 种原子命令）
 
 ### 6.1 编排引擎
 
-#### `Orchestrator`（[orchestrator.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/orchestrator.ts)）
+#### `Orchestrator`（历史独立实现，[orchestrator.ts](file:///./src/services/orchestrator.ts)）
 
-编排引擎核心，继承 `EventEmitter`，实现空窗驱动三阶段流水线。
+历史空窗驱动三阶段流水线，当前仅保留独立回归与迁移参照，不再由前台、`SchedulingAgentRuntimeFacade` 或 `FormalOrchestrationCapability` 生产入口调用。正式长流程统一走 `formalOrchestrationRuntime` 真 ReAct 内核；禁止重新接回下列入口作为兼容回退。
 
 | 成员 | 类型 | 说明 |
 |------|------|------|
@@ -542,14 +568,14 @@ AtomicCommandCapability.handle*（8 种原子命令）
 
 **事件**：`status-change` / `gap-start` / `gap-complete` / `gap-failed` / `command-execute` / `validation-complete` / `repair-start` / `repair-complete` / `log` / `error` / `complete`
 
-#### `useOrchestrator`（[useOrchestrator.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/composables/useOrchestrator.ts)）
+#### `useOrchestrator`（[useOrchestrator.ts](file:///./src/composables/useOrchestrator.ts)）
 
-编排引擎的 Vue 组合式封装。
+正式 ReAct 编排的 Vue 组合式封装。
 
 - **响应式状态**：`isRunning` / `session` / `currentGap` / `logs` / `progress` / `progressPercentage` / `status` / `gapStats`
-- **方法**：`initialize` / `classifyTask` / `startFullGeneration` / `startPartialGeneration` / `cancel` / `reset`
+- **方法**：`initialize` / `classifyTask` / `startReactOrchestration` / `recoverReactOrchestration` / `cancel` / `reset`
 
-#### `GapManager`（[gapManager.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/gapManager.ts)）
+#### `GapManager`（[gapManager.ts](file:///./src/services/gapManager.ts)）
 
 空窗生命周期管理。关键配置 `minGapDuration=60`、`defaultPriority=100`。
 
@@ -557,7 +583,7 @@ AtomicCommandCapability.handle*（8 种原子命令）
 - 查询：`queryRemainingGaps` / `getNextGap` / `hasRemainingGaps` / `getTotalGapDuration`
 - 更新：`onGapFilled` / `checkAndSplitGap` / `onItemDeleted` / `onItemTimeChanged`
 
-#### `ValidationEngine`（[validationEngine.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/validators/validationEngine.ts)）
+#### `ValidationEngine`（[validationEngine.ts](file:///./src/services/validators/validationEngine.ts)）
 
 7 条内置校验规则：
 
@@ -573,7 +599,7 @@ AtomicCommandCapability.handle*（8 种原子命令）
 
 ### 6.2 Agent 核心
 
-#### `SchedulingAgentRuntime`（[schedulingAgentRuntime.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/schedulingAgentRuntime.ts)）
+#### `SchedulingAgentRuntime`（[schedulingAgentRuntime.ts](file:///./src/services/agent/schedulingAgentRuntime.ts)）
 
 Agent 核心运行时入口。
 
@@ -581,16 +607,16 @@ Agent 核心运行时入口。
 - `describeCapabilities()`：能力描述
 - **LLM 失败不走本地兜底，直接返回 failed**（AGENTS.md 硬约束）
 
-#### `LlmAgentIntentInterpreter`（[llmAgentIntentInterpreter.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/llmAgentIntentInterpreter.ts)）
+#### `LlmAgentIntentInterpreter`（[llmAgentIntentInterpreter.ts](file:///./src/services/agent/llmAgentIntentInterpreter.ts)）
 
 LLM-only 意图解释器，`usesLlm=true`。
 
-- 调 `llmClient.chat`（maxTokens 700, temperature 0, timeout 30s）
+- 调 `llmClient.chat`（maxTokens 1100, temperature 0, `responseFormat: json_object`）；timeout 从同一请求级 `AgentDeadline` 的整体剩余预算推导，并把该 deadline 的 `AbortSignal` 传到底层请求。短链默认整体 180s（可配置），单个 LLM stage 最多 90s，意图阶段为后续阶段保留 60s，候选判断为写入保留 15s，不再使用独立 8s、隐藏 60s 或固定 30s 截断真实模型。
 - System prompt 含约 100 条规则
-- 返回 JSON：`intent` / `confidence` / `slots` / `pendingAction` / `taskPlanDraft` / `assistantFeedback` / `searchAlternatives`
+- 当前 prompt `v2.5`；返回 JSON：`intent` / `confidence` / `slots` / `pendingAction` / `taskPlanDraft` / `assistantFeedback` / `searchAlternatives`。`queryKind` 应由模型置于顶层；解释器仅兼容模型已明确返回但误置于 `slots.queryKind` 的合法枚举，不从用户文本推断。`program_lookup` 可从可读的 `slots.targetProgramName` 取得节目名，不要求模型重复技术字段。
 - `normalizeInterpretation`：校验 confidence≥0.5、合法 intent/pendingAction，过滤早完成声明，`sanitizeAssistantFeedback` 限 180 字
 
-#### `AtomicCommandCapability`（[atomicCommandCapability.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/atomicCommandCapability.ts)）
+#### `AtomicCommandCapability`（[atomicCommandCapability.ts](file:///./src/services/agent/atomicCommandCapability.ts)）
 
 原子命令能力包（约 5900 行），实现 8 种 AtomicCommandIntent 的完整链路。
 
@@ -601,7 +627,7 @@ LLM-only 意图解释器，`usesLlm=true`。
 
 8 种 AtomicCommandIntent：`move` / `insert` / `replace` / `delete` / `batch_move` / `batch_delete` / `query` / `validate`
 
-#### `AgentPlaylistPolicy`（[playlistPolicy.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/playlistPolicy.ts)）
+#### `AgentPlaylistPolicy`（[playlistPolicy.ts](file:///./src/services/agent/playlistPolicy.ts)）
 
 TV vs Rotation 策略分流核心。
 
@@ -612,15 +638,15 @@ TV vs Rotation 策略分流核心。
 | delete / batch_delete | confirm_before_commit | confirm_before_commit |
 | query / validate | read | read |
 
-#### `AgentConstraintEngine`（[constraintEngine.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/constraintEngine.ts)）
+#### `AgentConstraintEngine`（[constraintEngine.ts](file:///./src/services/agent/constraintEngine.ts)）
 
 约束引擎，检查 move/insert/replace/delete/batch 合法性、validateSchedule、validateContext。检测重叠、版面边界、禁排范围、锁定项、顺播倒序/跳集（中文集数解析，仅 TV）、历史顺播违反、素材/版权未就绪。
 
-#### `AgentTvSequenceCandidateSelector`（[tvSequenceCandidateSelector.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/tvSequenceCandidateSelector.ts)）
+#### `AgentTvSequenceCandidateSelector`（[tvSequenceCandidateSelector.ts](file:///./src/services/agent/tvSequenceCandidateSelector.ts)）
 
 TV 顺播候选选择器（仅 TV）。从 today + history 收集 SequenceFact，按 programId/name(去集数)/codePrefix 建 seriesKey；today 优先，期望集数 = max+1；多候选命中时二次打分唯一化；未命中返回 candidateOptions 让用户选。
 
-#### `ProfessionalRules`（[professionalRules.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/agent/professionalRules.ts)）
+#### `ProfessionalRules`（[professionalRules.ts](file:///./src/services/agent/professionalRules.ts)）
 
 11 条专业规则：
 
@@ -640,7 +666,7 @@ TV 顺播候选选择器（仅 TV）。从 today + history 收集 SequenceFact�
 
 ### 6.3 命令执行器
 
-#### `ScheduleCommandBus`（[scheduleCommandBus.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/scheduleCommandBus.ts)）
+#### `ScheduleCommandBus`（[scheduleCommandBus.ts](file:///./src/services/scheduleCommandBus.ts)）
 
 命令总线，按 action 分发：
 
@@ -652,15 +678,15 @@ command.action === 'insert'
     : await getCommandExecutor().execute(command)
 ```
 
-#### `InsertCommandExecutor`（[insertCommandExecutor.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/insertCommandExecutor.ts)）
+#### `InsertCommandExecutor`（[insertCommandExecutor.ts](file:///./src/services/insertCommandExecutor.ts)）
 
 工作流：参数校验 → 获取候选 → 时间可用性检查 → 顺播顺序检查 → 物化器物化 → `appendItems` → 校验。
 
-#### `ReplaceCommandExecutor`（[replaceCommandExecutor.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/replaceCommandExecutor.ts)）
+#### `ReplaceCommandExecutor`（[replaceCommandExecutor.ts](file:///./src/services/replaceCommandExecutor.ts)）
 
 工作流：查找原条目 → 查找候选 → preview 检查 → `replaceItem` → 校验 → 不通过则 `restoreSnapshot`。
 
-#### `AtomicCapabilities`（[atomicCapabilities.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/atomicCapabilities.ts)）
+#### `AtomicCapabilities`（[atomicCapabilities.ts](file:///./src/services/atomicCapabilities.ts)）
 
 编排单基本操作能力，每操作自动快照。
 
@@ -670,7 +696,7 @@ command.action === 'insert'
 
 ### 6.4 候选选择
 
-#### `CandidateService`（[candidateService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/candidateService.ts)）
+#### `CandidateService`（[candidateService.ts](file:///./src/services/candidateService.ts)）
 
 候选节目库检索与排序。
 
@@ -679,7 +705,7 @@ command.action === 'insert'
 - 非顺播策略 `sortNonSequentialCandidates`：按 `selectionPolicy.primary`（rating/trending/content_match/default）切换
 - 诊断输出 `rejectionReasons`：11 种拒绝原因
 
-#### `CandidateSelectionService`（[candidateSelectionService.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/candidateSelectionService.ts)）
+#### `CandidateSelectionService`（[candidateSelectionService.ts](file:///./src/services/candidateSelectionService.ts)）
 
 候选选择三层架构：LLM + 本地守卫 + 编辑决策。
 
@@ -689,7 +715,7 @@ command.action === 'insert'
 - `guardGapSelection`：硬关键词、时长、顺播、当前编排上下文守卫
 - `CONTENT_MATCH_MIN_AUTO_SCORE = 70`、`CONTENT_MATCH_MIN_MATCHED_INTENT_KEYWORDS = 2`
 
-#### `CandidateKeywordMatcher`（[candidateKeywordMatcher.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/candidateKeywordMatcher.ts)）
+#### `CandidateKeywordMatcher`（[candidateKeywordMatcher.ts](file:///./src/services/candidateKeywordMatcher.ts)）
 
 5 层关键词体系：
 
@@ -701,7 +727,7 @@ command.action === 'insert'
 | functional | 功能型（21 个） | 预热/预告/导视/垫片/暖场 |
 | soft | 软关键词 | 归一化通用匹配 |
 
-#### `InsertCandidateResolver`（[insertCandidateResolver.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/insertCandidateResolver.ts)）
+#### `InsertCandidateResolver`（[insertCandidateResolver.ts](file:///./src/services/insertCandidateResolver.ts)）
 
 插入候选解析，决定直接执行还是推荐列表。
 
@@ -710,7 +736,7 @@ command.action === 'insert'
 
 ### 6.5 Agent Server 运行时
 
-#### `AgentServerRuntime`（[agentServerRuntime.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/agentServerRuntime.ts)）
+#### `AgentServerRuntime`（[agentServerRuntime.ts](file:///./src/services/runtime/agentServerRuntime.ts)）
 
 服务端运行时核心类。
 
@@ -724,16 +750,17 @@ command.action === 'insert'
 | `stopReactTask` / `stopExecutionCheckpoint` | 停止长程任务 |
 | `subscribeSessionEvents` | SSE 事件订阅 |
 
-#### `FormalPlaylistWriteAdapter`（[formalPlaylistWriteAdapter.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/formalPlaylistWriteAdapter.ts)）
+#### `FormalPlaylistWriteAdapter`（[formalPlaylistWriteAdapter.ts](file:///./src/services/runtime/formalPlaylistWriteAdapter.ts)）
 
-正式播单写入边界，三层保护：
+正式播单写入边界，四层保护：
 
-1. **幂等缓存**：`sessionId:idempotencyKey`（status: applied/reused）
-2. **版本冲突阻断**：`formal_playlist_version_conflict`
-3. **批量上限阻断**：`formal_playlist_batch_limit_exceeded`
-- `metadata.boundary = 'agent-server'`
+1. **Mutation policy 写屏障**：缺失 `mutationContext`、`preview_only`、`pending_only` 均在 delegate 前阻断
+2. **幂等缓存**：按 `sessionId + workspaceKey + idempotencyKey` 隔离（status: applied/reused），切换播单后不复用上一工作区结果
+3. **版本冲突阻断**：`formal_playlist_version_conflict`
+4. **批量上限阻断**：`formal_playlist_batch_limit_exceeded`
+- `metadata.boundary = 'formal-playlist-write-adapter'`，并以 `transport = 'local' | 'agent-server'` 区分调用通道
 
-#### `AgentRuntimeClient`（[agentRuntimeClient.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/runtime/agentRuntimeClient.ts)）
+#### `AgentRuntimeClient`（[agentRuntimeClient.ts](file:///./src/services/runtime/agentRuntimeClient.ts)）
 
 双模式客户端：
 
@@ -743,7 +770,7 @@ command.action === 'insert'
 
 ### 6.6 LLM 基础设施
 
-#### `LLMClient`（[llmClient.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/llmClient.ts)）
+#### `LLMClient`（[llmClient.ts](file:///./src/services/llm/llmClient.ts)）
 
 OpenAI SDK 兼容客户端。
 
@@ -757,15 +784,20 @@ OpenAI SDK 兼容客户端。
 
 特性：重试（指数退避）、超时、Token 统计、请求追踪（保留最近 20 条）、浏览器 Mock（DEV 读 `window.__AIBIANDAN_LLM_MOCK__`）、`normalizeError`（401/429/5xx/ETIMEDOUT 翻译）。
 
-#### `AgentPlanner`（[agentPlanner.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/agentPlanner.ts)）
+#### `AgentPlanner`（[agentPlanner.ts](file:///./src/services/llm/agentPlanner.ts)）
 
-Agent Planner，调用 LLM 编译多动作计划。
+Agent Planner，调用 LLM 编译多动作计划；当前 system prompt 版本为 `v1.10`，正式 ReAct 首批 `research_check` 必须由模型给出非空查询或明确可检索语义标签；`formal_orchestration` 与正式 `commit_layout_draft` 必须同时返回顶层 `mode="react"` 和 `reactTask`。有顺序依赖的多动作由同一 ReAct task 逐轮执行，运行时完整保留 action，并在每轮 observation 后重新决定下一步；`create_playlist` 排在正式 action 前时先真实创建工作区，不能因后续正式 action 误报计划无效。前台恢复时旧未执行步骤标记为 `blocked/superseded`，自然语言确认则回到 planner，只有显式确认控件调用写入 API。
 
-- `plan(input)`：调 `llmClient.chat`（temperature 0.2, maxTokens 1100, timeout 30s, maxRetries 1, traceLabel 'agent_planner'）
-- 输出 `AgentPlan`：`mode`（single/react）+ `actions`（9 种 type）+ `reactTask` + `assistantReplyDraft`
-- 9 种动作：`create_playlist` / `prepare_layout_draft` / `refine_layout_draft` / `commit_layout_draft` / `formal_orchestration` / `atomic_command` / `read_only_analysis` / `research_check` / `validate` / `clarify`
+- `plan(input, deadline?)`：调 `llmClient.chat`（temperature 0.2, maxTokens 1100, maxRetries 1, traceLabel `agent_planner`），stage timeout 从共享 `AgentDeadline` 的剩余预算推导，并把 `AbortSignal` 传到底层请求。
+- 输出 `AgentPlan`：`mode`（single/react）+ `actions`（10 种 type）+ `reactTask` + `assistantReplyDraft`
+- 10 种动作：`create_playlist` / `prepare_layout_draft` / `refine_layout_draft` / `commit_layout_draft` / `formal_orchestration` / `atomic_command` / `read_only_analysis` / `research_check` / `validate` / `clarify`
+- `formal_orchestration` 的 `mode` / `taskKind` / `useLayoutDraft` / `targetTimeRange` / `searchKeywords` 由 LLM action 直接给出并透传到 capability；本地只校验枚举、模式组合和字段结构，不从用户原话正则回填。缺失或冲突的必需语义会使 action 失效，并进入可恢复澄清路径。
+- 顶层与 atomic `pendingAction` 都是结构化模型输出；同工作区 pending 只有 `start_new_task` / `cancel_pending` 等显式 action 才改变，不按用户文本自然过期。
+- formal rebuild review 向 planner 透传原 `actionKind/mode/useLayoutDraft`；确认轮由 LLM 显式返回匹配动作和 `confirmExistingRebuild:true`，本地只做 pending 一致性校验，不从“确认”文本补字段。
+- `assistantReplyDraft` 只提供流式进度或安全可见文案。没有有效执行 action 时，runtime 会阻断“已/将创建播单”及其他虚假执行承诺，保留 `noMutation` 现场并提示重试，不在本地补意图。
+- “我先整理草案，再创建播单”等将来执行措辞同样受无 action 安全校验；这属于模型输出与执行事实的一致性保护，不是用户文本分类器。终态是否展示由 ChatPanel 的结构化消息元数据决定。
 
-#### `loadLLMConfig`（[llmConfig.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/src/services/llm/llmConfig.ts)）
+#### `loadLLMConfig`（[llmConfig.ts](file:///./src/services/llm/llmConfig.ts)）
 
 LLM 配置多源加载优先级：
 
@@ -916,7 +948,9 @@ layout_prepare（草案生成）
   └─ runtimeLayoutRegistry.setRuntimeLayout 注册
 
 layout_refine（草案微调）
-  └─ LayoutDraftService.refineSpec（保留 coverage，多段替换/单段 replaceRange）
+  └─ LayoutDraftService.refineSpec
+      ├─ 默认：单段或多段均按时间范围合并，保留未命中的既有时段并扩展 coverage
+      └─ replaceAll=true：仅由 planner 的 ignoreExistingLayout=true 映射，整份替换现有 segments
 
 layout_commit（草案提交）
   └─ 注册到 runtimeLayoutRegistry，作为正式编排依据
@@ -993,6 +1027,8 @@ layout_analysis（版面分析）
 | POST | `/api/agent/pending/insert-recommendation` | 解决插入推荐 |
 | POST | `/api/agent/sessions/:sessionId/tasks/:taskId/continue` | 继续 ReAct 任务 |
 | POST | `/api/agent/sessions/:sessionId/tasks/:taskId/stop` | 停止 ReAct 任务 |
+| POST | `/api/agent/orchestration` | 执行正式 ReAct；POST 返回完整结果和补偿进度，实时进度由 session SSE 投影 |
+| POST | `/api/agent/sessions/:sessionId/orchestration/recover` | 显式检查、继续、重试、缩小范围或取消正式 ReAct checkpoint |
 | POST | `/api/agent/sessions/:sessionId/execution/stop` | 停止执行 checkpoint |
 | POST | `/api/agent/llm-config/import` | 导入前台 LLM 配置 |
 
@@ -1016,14 +1052,14 @@ layout_analysis（版面分析）
 | `npm run agent:check:tests` | Agent 编排链路指定测试清单（30+ 文件） |
 | `npm run agent:check` | tests + build（Agent 编排链路强制门禁） |
 | `npm run agent:browser:goal37` | Playwright 前台浏览器测试 |
-| `npm run agent:browser:goal38` | 同 goal37 |
+| `npm run agent:browser:goal38` | Playwright 前台浏览器测试（Goal 38 可恢复失败重试） |
 | `npm run agent:eval:llm` | 真实 LLM 评估 |
 | `npm run agent:eval:llm:strict` | 严格真实 LLM 评估 |
 | `npm run agent:health` | Agent Server 健康检查（11 项） |
 
 ### 9.2 测试配置
 
-- 配置文件：[vitest.config.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/vitest.config.ts)
+- 配置文件：[vitest.config.ts](file:///./vitest.config.ts)
 - environment：`node`
 - include：`src/**/__tests__/*.test.ts`
 - clearMocks / restoreMocks：true
@@ -1064,14 +1100,14 @@ layout_analysis（版面分析）
 
 | 文件 | 说明 |
 |------|------|
-| [tsconfig.json](file:///c:/Users/Administrator/Documents/Playground/aibiandan/tsconfig.json) | 根，references 指向 app/node |
-| [tsconfig.app.json](file:///c:/Users/Administrator/Documents/Playground/aibiandan/tsconfig.app.json) | extends `@vue/tsconfig/tsconfig.dom.json`；`noUncheckedIndexedAccess=true`；paths `@/*` → `./src/*` |
-| [tsconfig.node.json](file:///c:/Users/Administrator/Documents/Playground/aibiandan/tsconfig.node.json) | extends `@tsconfig/node24`；module='preserve'；types=['node'] |
+| [tsconfig.json](file:///./tsconfig.json) | 根，references 指向 app/node |
+| [tsconfig.app.json](file:///./tsconfig.app.json) | extends `@vue/tsconfig/tsconfig.dom.json`；`noUncheckedIndexedAccess=true`；paths `@/*` → `./src/*` |
+| [tsconfig.node.json](file:///./tsconfig.node.json) | extends `@tsconfig/node24`；module='preserve'；types=['node'] |
 
 ### 10.2 构建配置
 
-- [vite.config.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/vite.config.ts)：vue + vueDevTools 插件；alias `@` → `./src`
-- [eslint.config.ts](file:///c:/Users/Administrator/Documents/Playground/aibiandan/eslint.config.ts)：defineConfigWithVueTs + pluginVue essential + vueTsConfigs.recommended + pluginOxlint + skipFormatting
+- [vite.config.ts](file:///./vite.config.ts)：vue + vueDevTools 插件；alias `@` → `./src`
+- [eslint.config.ts](file:///./eslint.config.ts)：defineConfigWithVueTs + pluginVue essential + vueTsConfigs.recommended + pluginOxlint + skipFormatting
 
 ### 10.3 环境变量
 
@@ -1087,7 +1123,7 @@ layout_analysis（版面分析）
 
 ### 10.4 Agent env 加载顺序
 
-`AGENT_ENV_FILES`（[agent-env.mjs](file:///c:/Users/Administrator/Documents/Playground/aibiandan/scripts/agent-env.mjs)）：
+`AGENT_ENV_FILES`（[agent-env.mjs](file:///./scripts/agent-env.mjs)）：
 
 ```
 .env.agent.local → .env.agent → .env.local → .env.development → .env
@@ -1109,14 +1145,14 @@ layout_analysis（版面分析）
 
 ## 11. 当前状态与路线图
 
-### 11.1 当前状态（基于 [docs/current-status.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/current-status.md)）
+### 11.1 当前状态（基于代码现状；原 [docs/current-status.md](file:///./docs/archive/baseline/current-status.md) 已归档）
 
 - 前端原型可运行、可构建、可演示
 - 工程基线已建立（vue-tsc / eslint / vitest / vite build 通过）
 - 当前阶段：**Goal 51 `office-trial-hardening`**（办公网试用硬化）
 - 重点：Agent Server 服务端持有 LLM Key、session 持久化、ReAct 长程任务、正式播单写入边界
 
-### 11.2 主要技术债（[docs/tech-debt.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/tech-debt.md)）
+### 11.2 主要技术债（详见 [docs/agent-evolution-roadmap-proposal.md](file:///./docs/agent-evolution-roadmap-proposal.md) A1-A16 缺陷清单；原 [docs/tech-debt.md](file:///./docs/archive/baseline/tech-debt.md) 已归档）
 
 | 编号 | 优先级 | 内容 |
 |------|--------|------|
@@ -1127,7 +1163,7 @@ layout_analysis（版面分析）
 | TD-05 | P1 | 文档与代码同步滞后 |
 | TD-06 | P2 | 构建产物清理 |
 
-### 11.3 路线图（[docs/roadmap.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/roadmap.md)）
+### 11.3 路线图（详见 [docs/agent-evolution-roadmap-proposal.md](file:///./docs/agent-evolution-roadmap-proposal.md) v2 修订版；原 [docs/roadmap.md](file:///./docs/archive/roadmap/roadmap.md) 已归档）
 
 | 阶段 | 目标 |
 |------|------|
@@ -1140,9 +1176,11 @@ layout_analysis（版面分析）
 
 1. **LLM-first / LLM-only 主路径**：开放自然语言理解必须保持 LLM 主路径；删除所有在 LLM 前后强行改写用户意图的本地逻辑。LLM 失败不兜底，直接暴露失败。
 2. **本地逻辑只保护结果，不改写意图**：时间换算、写入校验、草案完整度判断、危险操作保护、正式播单与草案隔离、模型返回结构校验、执行边界和失败报错。
+3. **原子命令与草案完整度解耦**：已打开播单时，明确的正式插入、删除、移动、替换不因草案为空/部分完成而转入草案或整体编排；缺少原子槽位时在 formal playlist owner 内追问或给候选。
+4. **Pending 状态归属**：`AgentServerRuntime` 在保存/返回 pending 时补齐 owner、workspaceKey、mutationId、mutationPolicy，并在跨工作区时 fail closed。
 3. **TV vs Rotation 双轨**：从 LLM 上下文包、约束引擎、候选选择器、策略表、任务计划编译、前台工作区、Planner policy 七层贯穿分流。
 4. **删除敏感类豁免**：delete/batch_delete 在 TV 和 Rotation 均需 confirm_before_commit，不受"电视播单可直接执行"豁免。
-5. **正式播单与草案隔离**：`FormalPlaylistWriteAdapter.boundary='agent-server'`；`refine_layout_draft` 只改草案；`commit_layout_draft` 才进入正式编排。
+5. **正式播单与草案隔离**：正式写入统一经过 `FormalPlaylistWriteAdapter`，metadata 以 `boundary='formal-playlist-write-adapter'` 标识边界、以 `transport` 区分 Local/Server；`refine_layout_draft` 只改草案；`commit_layout_draft` 才进入正式编排。
 6. **幂等与版本保护**：FormalPlaylistWriteAdapter 幂等缓存、版本冲突阻断、批量上限阻断。
 7. **Case First**：新增能力或修复缺陷时，优先把用户命令落到可执行 case，纳入 `npm run agent:check`。
 
@@ -1150,20 +1188,23 @@ layout_analysis（版面分析）
 
 ## 12. 文档索引
 
+> 登记仓库根目录、`docs/` 根目录的活跃文档及仍用于实现追溯的修复报告；已归档文件见 [docs/archive/ARCHIVED.md](file:///./docs/archive/ARCHIVED.md)。
+
 | 文档 | 路径 | 核心内容 |
 |------|------|----------|
-| Agent 工作协议 | [AGENTS.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/AGENTS.md) | 强制工作协议、Scheduling Guardrails、Verification Gates |
-| 项目状态 | [docs/current-status.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/current-status.md) | 可运行状态、主要风险 |
-| 架构说明 | [docs/architecture.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/architecture.md) | 5 层架构（早期） |
-| 模块地图 | [docs/module-map.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/module-map.md) | 命名约定与拆分模块 |
-| 技术债 | [docs/tech-debt.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/tech-debt.md) | TD-01 ~ TD-06 |
-| 功能对齐 | [docs/feature-alignment.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/feature-alignment.md) | F01-F09 功能、AC01-AC24 验收项 |
-| 路线图 | [docs/roadmap.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/roadmap.md) | Phase A-D 四阶段 |
-| 测试基线 | [docs/testing-baseline.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/testing-baseline.md) | Vitest 基线 |
-| 部署手册 | [docs/agent-deployment-runbook.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/agent-deployment-runbook.md) | dev:agent / agent:trial / agent:health |
-| 开发协议 | [docs/agent-development-protocol.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/agent-development-protocol.md) | Case 结构、Trace 结构、Verification Gates |
-| 业务规则 | [docs/aibiandan-agent-rules.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/aibiandan-agent-rules.md) | 工作区、播单策略、写入确认 |
-| 命令清单 | [docs/scheduling-agent-natural-language-command-inventory.md](file:///c:/Users/Administrator/Documents/Playground/aibiandan/docs/scheduling-agent-natural-language-command-inventory.md) | 144 条自然语言命令 |
+| Agent 工作协议 | [AGENTS.md](file:///./AGENTS.md) | 强制工作协议、Scheduling Guardrails、Verification Gates |
+| 开发协议 | [docs/agent-development-protocol.md](file:///./docs/agent-development-protocol.md) | Case 结构、Trace 结构、Verification Gates |
+| 业务规则 | [docs/aibiandan-agent-rules.md](file:///./docs/aibiandan-agent-rules.md) | 工作区、播单策略、写入确认 |
+| 命令清单 | [docs/scheduling-agent-natural-language-command-inventory.md](file:///./docs/scheduling-agent-natural-language-command-inventory.md) | 144 条自然语言命令 |
+| 部署手册 | [docs/agent-deployment-runbook.md](file:///./docs/agent-deployment-runbook.md) | dev:agent / agent:trial / agent:health |
+| 演进路线 | [docs/agent-evolution-roadmap-proposal.md](file:///./docs/agent-evolution-roadmap-proposal.md) | Agent 演进技术方案 v2 |
+| 服务端迁移 | [docs/agent-server-migration-plan.md](file:///./docs/agent-server-migration-plan.md) | Goal 42-49 落地记录 |
+| 方向 1 执行卡 | [docs/agent-direction-1-execution-card.md](file:///./docs/agent-direction-1-execution-card.md) | 方向 1 执行卡 |
+| 九阶段计划 | `AGENTS.md` 与当前任务执行卡 | 当前唯一阶段依据；历史下一步方向草案已归档到 `docs/archive/plans/` |
+| Browser Goal 37 修复方案 | [docs/browser-goal37-fix-proposal.md](file:///./docs/browser-goal37-fix-proposal.md) | 浏览器自动化测试失败根因分析与最小修复方案 |
+| Canonical 数据修复报告 | [docs/proposals/mock-data-audit-and-fix-proposal.md](file:///./docs/proposals/mock-data-audit-and-fix-proposal.md) | 节目库数据审计、修正结果与验证记录 |
+| 无基线顺播修复报告 | [docs/proposals/no-baseline-earliest-episode-fix-proposal.md](file:///./docs/proposals/no-baseline-earliest-episode-fix-proposal.md) | 无历史基线时最早一期选择的根因、决策与验证记录 |
+| 归档索引 | [docs/archive/ARCHIVED.md](file:///./docs/archive/ARCHIVED.md) | 历史归档文件索引与重新激活原则 |
 
 ---
 
