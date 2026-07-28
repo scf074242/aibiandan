@@ -78,11 +78,11 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     userInput: '分析当前3小时轮播单，按热播优先形成压缩到2小时的方案；我确认草案后再正式编排',
     expectedDecision: '方案阶段 research observation 回到 LLM 生成完整2小时草案；用户确认后正式 ReAct 才依次候选裁决、授权写入和总时长校验',
     mustNotHappen: '本地评分替 LLM 决定整表取舍；未审看草案先写正式播单；无 grant 或跳过 decide/validate',
-    verification: '前台黑盒断言方案阶段 noFormalPlaylistWrite；正式运行时断言 grant → research/decide → capability/write adapter → validate',
+    verification: '前台黑盒断言方案阶段 noFormalPlaylistWrite；同一 Agent Server 会话断言3小时现场经服务端 grant、checkpoint 与正式结果融合后收敛为7200秒快照；正式 ReAct/capability/write adapter/validate 由对应执行门禁提供证据',
     playlistModel: 'rotation', surface: 'react_runtime', fault: 'none',
     canonicalFixture: 'canonicalSchedulingData 中可组成3小时轮播现场及带热度证据的节目实体',
     initialState: '3小时正式轮播单已有节目，草案目标仍为3小时，轮播策略为热播优先',
-    expectedFormalState: '2小时草案审看前正式现场不变；确认并完成正式链路后总时长为7200秒且节目边界完整',
+    expectedFormalState: '2小时草案审看前正式现场不变；确认并完成正式链路后同一 workspace 的 session 正式快照总时长为7200秒、节目边界完整、版本更新且 grant 已消费',
     evidenceTestFile: 'src/services/__tests__/schedulingAgentReactTaskRuntime.test.ts',
     additionalEvidenceTestFiles: [
       'src/services/__tests__/agentServerRuntime.test.ts',

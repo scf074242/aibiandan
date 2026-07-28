@@ -155,3 +155,39 @@
 - 草案 decide 复用同一请求的 `AgentDeadline` 与 `AbortSignal`；服务端停止或整体 deadline 到期时，第二次模型思考也会被中断，不会脱离当前 ReAct 任务继续运行。
 - 15 个九阶段后场景均已绑定 `agent:check` 内的真实执行测试；矩阵门禁会读取证据文件并核对 case ID。整表压缩场景同时绑定方案黑盒、Agent Server grant、正式 ReAct 和正式写入边界四层证据。
 - 新增真实 LLM observation→草案 decide 验收：首次请求在 90 秒 stage deadline 超时并正确返回 `research_decide_unavailable`，无草案或正式写入；模拟用户明确重试后约 55 秒成功返回完整 7200 秒草案。结论为流程可承接、失败可恢复，但模型时延仍是残余风险，不通过放宽 deadline 或本地拼草案掩盖。
+
+## 12. 补充执行卡：同会话正式终态核验
+
+### 12.1 问题
+
+整表压缩已有方案黑盒、服务端授权、正式 ReAct 和写入边界的分层证据，但缺少同一 Agent Server 会话内从 3 小时正式现场执行到 2 小时正式快照的终态核验。
+
+### 12.2 期望
+
+- 正式执行前由服务端根据当前确认 pending 签发任务级 `FormalOrchestrationGrant`。
+- ReAct checkpoint、查节目库和候选决策进度可在同一 session 回放。
+- 完成后正式快照仍绑定原 workspace，总时长严格为 7200 秒，节目边界完整、版本更新且 grant 已消费。
+
+### 12.3 前置数据
+
+- 从 `canonicalSchedulingData` 选择 6 个真实 30 分钟节目构造 3 小时正式轮播现场。
+- 使用已确认的完整 2 小时轮播草案；现场节目、最终节目均不得由测试发明。
+
+### 12.4 风险
+
+- 测试绕过服务端授权或只核验返回值，不核验 session 正式快照。
+- 将 Agent Server 状态融合 mock 误称为真实 LLM、capability 或 write adapter 全链执行。
+- 终态通过裁切节目凑时长、跨 workspace 写入，或完成后 grant 仍可复用。
+
+### 12.5 验证方式
+
+- 扩充 `post9-rotation-compression-staged-react` 场景标准。
+- 在 Agent Server 黑盒测试中从公共 submit/execute 入口执行，核验 canonical 身份、7200 秒总时长、正式版本、workspace、checkpoint、进度事件与 consumed grant。
+- 该黑盒只证明服务端授权和状态融合；真实 ReAct、capability、`FormalPlaylistWriteAdapter` 与 validate 继续由各自已纳入 `agent:check` 的执行测试提供证据。
+
+### 12.6 实际验收结果
+
+- 新增同会话黑盒后，服务端从 6 个 canonical 半小时节目构成的 10800 秒正式现场出发，只接受当前确认 pending 签发的 grant。
+- 两轮 checkpoint、`查节目库` 和 `候选决策` 进度均进入 session 事件；完成后正式快照包含 4 个 canonical 完整节目，总时长严格为 7200 秒，workspace 保持不变、版本更新且 grant 状态为 `consumed`。
+- 首次定向执行发现公开 replay 包只提供正式播单摘要，不能从中计算总时长；验收改为从服务端 session store 的正式快照核验明细，没有为测试扩展对外 API 或生产行为。
+- `npm run agent:check` 全部门禁通过。本轮没有暴露生产实现缺陷，因此未修改 Agent 业务代码。
