@@ -58,6 +58,17 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     expectedFormalState: '草案完善前正式播单保持不变',
   },
   {
+    id: 'post9-rotation-compression-routes-by-scope',
+    userInput: '把当前3小时轮播单压缩2小时',
+    expectedDecision: '歧义表达先澄清目标时长与内容取舍；明确队尾完整范围时走 batch_delete；按热播整表压缩到2小时则先完善2小时草案再进入正式 ReAct',
+    mustNotHappen: '把压缩解释为 batch_move；静默猜测3→1或3→2；裁切节目；绕过草案、删除确认或整批重编授权',
+    verification: 'planner 协议覆盖歧义、有限范围与整表重构三条路径，所有正式写入前核验 noMutation/confirmation/grant',
+    playlistModel: 'rotation', surface: 'planner_boundary', fault: 'none',
+    canonicalFixture: 'canonicalSchedulingData 中可组成3小时轮播现场的节目实体',
+    initialState: '当前轮播单目标时长3小时且已有正式节目；草案目标仍为3小时或不完整',
+    expectedFormalState: '澄清与草案调整阶段正式播单不变；有限删除确认后仅删除完整边界目标；整表重构授权后才写入',
+  },
+  {
     id: 'post9-search-broadened-query-finds-existing-canonical-program',
     userInput: '插入与申城出行服务相关的短内容',
     expectedDecision: 'LLM 先给原词与多组受控改写，运行时在预算内查询所有未尝试策略，命中 canonical 已存在节目后进入候选裁决',

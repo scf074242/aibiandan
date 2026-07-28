@@ -32,8 +32,10 @@ import type { AgentPendingAction } from '@/services/agent/types'
  * - v1.9：补充正式编排语义、重编确认与首批 research_check 契约
  * - v1.10：有顺序依赖的多动作必须进入 ReAct，禁止并列 action 被本地盲目串行执行
  * - v1.11：明确有限批量复数命令与整表正式编排边界，并要求候选预检提供受控查询组合
+ * - v1.12：明确轮播总时长压缩的歧义澄清、有限删除与整表草案重构边界
+ * - v1.13：约束轮播完整范围删除必须输出 batch_delete + pending_only，禁止正文确认与 formal_write 矛盾
  */
-export const AGENT_PLANNER_PROMPT_VERSION = 'v1.11' as const
+export const AGENT_PLANNER_PROMPT_VERSION = 'v1.13' as const
 
 export type AgentPlannerAtomicIntent = 'move' | 'insert' | 'replace' | 'delete' | 'batch_move' | 'batch_delete' | 'query' | 'validate'
 
@@ -586,6 +588,9 @@ export class AgentPlanner {
     if (playlistType === 'rotation') {
       return [
         '当前工作区是轮播单。轮播单是内容队列，不是电视时间格；轮播草案用从 00:00:00 起算的相对时长，不要使用 06:00:00-23:59:59 的电视全天窗口。',
+        '轮播单“压缩 N 小时”可能表示减少 N 小时，也可能表示压缩到 N 小时；例如当前 3 小时时，“减少 2 小时”得到 1 小时，“压缩到 2 小时”得到 2 小时。用户没有说清时必须返回 clarify，同时追问目标总时长和内容取舍方式，不能静默选择一种解释。',
+        '轮播总时长压缩不能解释为 batch_move，因为平移不会改变队列总时长。用户明确删除队尾或明确相对范围，且边界落在完整节目之间时，属于有限、可定位的 batch_delete，action 必须返回 intent:"batch_delete"、rangeStart、rangeEnd 和 mutationPolicy:"pending_only"；涉及多个节目或一个范围时不得降成 delete，初次提出的批量删除不得使用 formal_write。删除仍需确认；边界会穿过节目时必须追问，不得裁切节目或直接改写节目时长。',
+        '用户要求按热播、收视率、内容匹配等策略压缩整张轮播单到明确目标时长时，属于整表内容重构：先准备或调整轮播草案，使目标时长和取舍策略明确；本轮只更新草案，不写正式播单。草案完整后由用户确认再启动正式 ReAct 重编，并遵守已有节目整批重编授权。',
         '已打开播单时，用户说“插入/排入/放入/放到队列开头/队列末尾/后面接着放”等正式节目动作，就是原子或复合操作；不要因为轮播草案为空而改成草案生成或整体编排门禁。',
         '如果用户说“插入/排入/放入”但只给了内容描述或主题，没有给具体节目，也没有给明确位置，不要返回裸 atomic_command；返回 research_check，purpose:"candidate_precheck"，queries 写可检索关键词，并在 assistantReplyDraft 里说明还需要确认插入位置。',
         '没有给具体节目，也没有给明确位置，不要返回裸 atomic_command。',
@@ -653,6 +658,9 @@ export class AgentPlanner {
     ]
     if (input.playlistType === 'tv') {
       examples.push('电视草案定位示例：{"mode":"single","actions":[{"type":"atomic_command","intent":"insert","targetTime":"06:00:00","targetProgramName":"东方快报","programHint":"东方快报 期数最大","searchAlternatives":["东方快报 期数最大","东方快报 最新一期","东方快报"]}],"assistantReplyDraft":"我会按草案里的东方快报栏目定位时段，再按期数最大的要求去筛节目，确认可用后写入正式播单。","reasoning":"用户是在电视草案栏目里要求正式填入节目，不是修改草案。"}')
+    }
+    if (input.playlistType === 'rotation') {
+      examples.push('轮播完整范围删除示例：当前3小时轮播单由完整节目组成，用户说“把队尾完整的2小时内容删掉，保留第1小时”时，返回 {"mode":"single","actions":[{"type":"atomic_command","intent":"batch_delete","rangeStart":"01:00:00","rangeEnd":"03:00:00","mutationPolicy":"pending_only"}],"assistantReplyDraft":"1小时边界落在完整节目之间，我会先列出01:00到03:00的待删除节目，请你确认后再写入。","reasoning":"这是有限且边界完整的范围删除，不是单条delete、batch_move或整体重编。"}')
     }
     if (input.hasDraft) {
       examples.push('草案块名称微调示例：{"mode":"single","actions":[{"type":"refine_layout_draft","targetSegmentIndex":10,"targetSegmentLabel":"亚洲队10介绍","semanticLabel":"中国队介绍"}],"assistantReplyDraft":"我会把第10段从亚洲队10介绍调整为中国队介绍，只更新草案，不写正式节目。","reasoning":"用户按草案块名称提出局部微调。"}')

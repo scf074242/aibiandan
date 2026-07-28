@@ -7,8 +7,9 @@ import { LlmAgentIntentInterpreter } from '@/services/agent/llmAgentIntentInterp
 import { LLMClient } from '@/services/llm/llmClient'
 import { AgentDeadline } from '@/services/agent/agentDeadline'
 import { LlmFormalOrchestrationDecider } from '@/services/agent/formalOrchestrationDecider'
+import { canonicalSchedulingData } from '@/services/agent/canonicalSchedulingData'
 import { FormalOrchestrationRuntime } from '@/services/runtime/formalOrchestrationRuntime'
-import type { AgentPlannerAction } from '@/services/llm/agentPlanner'
+import { AgentPlanner, type AgentPlannerAction } from '@/services/llm/agentPlanner'
 import { isPlaceholderApiKey } from '@/services/llm/localDemoLlm'
 import { buildAgentRealLlmEvaluationCases } from './fixtures/agentRealLlmEvaluationCases'
 import {
@@ -163,6 +164,98 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
       interpretations: result.results.map((turnResult) => turnResult.input.interpretation),
     })), null, 2)).toBeGreaterThanOrEqual(0.8)
   }, REAL_LLM_SCENARIO_TIMEOUT_MS)
+
+  /**
+   * case post9-rotation-compression-routes-by-scope
+   * - userInput: 把当前3小时轮播单压缩2小时 / 删除完整队尾 / 按热播压缩到2小时
+   * - expectedDecision: 歧义追问、有限 batch_delete、整表先调整草案
+   * - mustNotHappen: batch_move、静默猜目标、裁切节目、无草案直接正式重编
+   * - verification: 真实 AgentPlanner 连续处理三种表达并返回对应结构化 action
+   */
+  it('routes real rotation compression requests by ambiguity and scope', async () => {
+    const canonicalItems = canonicalSchedulingData.candidates.filter((candidate) => candidate.duration === 1800).slice(0, 6)
+    expect(canonicalItems.length, 'data_fixture_missing: 需要六条30分钟 canonical 节目构造3小时轮播现场').toBe(6)
+    const toClock = (seconds: number) => {
+      const hours = Math.floor(seconds / 3600).toString().padStart(2, '0')
+      const minutes = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0')
+      return `${hours}:${minutes}:00`
+    }
+    const currentSchedule = canonicalItems.map((candidate, index) => ({
+      id: `scheduled-${candidate.id}`,
+      programId: candidate.programId,
+      programCode: candidate.programCode,
+      programName: candidate.programName,
+      instanceName: candidate.instanceName,
+      startTime: toClock(index * 1800),
+      endTime: toClock((index + 1) * 1800),
+      duration: candidate.duration,
+      programType: candidate.programType,
+    }))
+    const llmClient = new LLMClient({
+      apiKey: apiKey!, baseURL, model, temperature: 0, maxTokens: 1200, timeout: 90_000,
+    })
+    const planner = new AgentPlanner({ chat: llmClient.chat.bind(llmClient) })
+    const baseInput = {
+      scheduleState: {
+        playlistId: 'rotation-compression', playlistType: 'rotation' as const, rotationStrategy: 'trending' as const,
+        rotationDurationSeconds: 10_800, channelId: 'rotation', channelName: '轮播单', date: '2026-07-28',
+        isEmpty: false, itemCount: currentSchedule.length, gapCount: 0, hasSelectedTimeRange: false,
+      },
+      currentSchedule,
+    }
+    const planWithExplicitRetry = async (userInput: string) => {
+      const first = await planner.plan({ ...baseInput, userInput })
+      if (!first.llmFailure?.canRetry) return first
+      // 独立验收请求模拟用户看到可恢复失败后明确重试，不改变生产运行时的失败暴露语义。
+      return planner.plan({ ...baseInput, userInput })
+    }
+    const ambiguous = await planWithExplicitRetry('把当前3小时轮播单压缩2小时')
+    const finite = await planWithExplicitRetry('把当前3小时轮播单队尾完整的2小时内容删掉，保留第1小时')
+    const overall = await planWithExplicitRetry('把当前3小时轮播单压缩到2小时，优先保留热播内容')
+    const ambiguousPassed = ambiguous.actions[0]?.type === 'clarify'
+    const finiteAction = finite.actions[0]
+    const finitePassed = finiteAction?.type === 'atomic_command'
+      && finiteAction.intent === 'batch_delete'
+      && finiteAction.rangeStart === '01:00:00'
+      && finiteAction.rangeEnd === '03:00:00'
+    const overallAction = overall.actions[0]
+    const overallDraftActionPassed = (overallAction?.type === 'prepare_layout_draft' || overallAction?.type === 'refine_layout_draft')
+      && overallAction.rotationDurationSeconds === 7200
+    const overallResearchPassed = overall.mode === 'react'
+      && overall.actions.length === 0
+      && overall.reactTask?.nextActions[0]?.type === 'research_check'
+      && overall.reactTask.nextActions[0].purpose === 'draft_precheck'
+      && `${overall.reactTask.objective} ${overall.reactTask.stopCondition}`.includes('草案')
+    const overallPassed = overallDraftActionPassed || overallResearchPassed
+    const traces = llmClient.getRecentRequestTraces().filter((trace) => trace.label === 'agent_planner')
+    const passed = ambiguousPassed && finitePassed && overallPassed && traces.filter((trace) => trace.success).length >= 3
+    sections.push({
+      id: 'rotation_compression_planner',
+      title: 'Rotation duration compression planner boundary',
+      status: passed ? 'passed' : 'failed',
+      threshold: 1,
+      total: 3,
+      passed: [ambiguousPassed, finitePassed, overallPassed].filter(Boolean).length,
+      failed: [ambiguousPassed, finitePassed, overallPassed].filter((item) => !item).length,
+      passRate: [ambiguousPassed, finitePassed, overallPassed].filter(Boolean).length / 3,
+      llmCallsAttempted: traces.length,
+      llmCallsSucceeded: traces.filter((trace) => trace.success).length,
+      llmCallsFailed: traces.filter((trace) => !trace.success).length,
+      tagCoverage: [{ tag: 'rotation_compression', total: 3, passed: [ambiguousPassed, finitePassed, overallPassed].filter(Boolean).length, failed: [ambiguousPassed, finitePassed, overallPassed].filter((item) => !item).length }],
+      failures: passed ? [] : [{
+        id: 'post9-rotation-compression-routes-by-scope',
+        tags: ['rotation_compression'],
+        failures: [
+          `ambiguous=${JSON.stringify(ambiguous.actions)}`,
+          `finite=${JSON.stringify(finite.actions)}`,
+          `overall=${JSON.stringify(overall.actions)}`,
+          `traces=${traces.length}`,
+        ],
+      }],
+    })
+
+    expect(passed, JSON.stringify({ ambiguous, finite, overall, traces }, null, 2)).toBe(true)
+  }, 10 * 60_000)
 
   /**
    * case formal-react-real-llm-multi-turn-decide

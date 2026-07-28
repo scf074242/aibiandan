@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { AgentPlanner, AGENT_PLANNER_PROMPT_VERSION } from '@/services/llm/agentPlanner'
+import { canonicalSchedulingData } from '@/services/agent/canonicalSchedulingData'
 
 describe('AgentPlanner promptVersion 透传', () => {
   /**
@@ -64,7 +65,7 @@ describe('AgentPlanner promptVersion 透传', () => {
     })
 
     expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
-    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.11')
+    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.13')
     expect(systemPrompt).toContain('formal_orchestration 是长流程控制动作')
     expect(systemPrompt).toContain('research_check、validate')
     expect(systemPrompt).toContain('mutationPolicy')
@@ -109,6 +110,65 @@ describe('AgentPlanner promptVersion 透传', () => {
     expect(systemPrompt).toContain('有限、可定位的目标集合')
     expect(systemPrompt).toContain('整张播单、全部空窗或完整目标时长')
     expect(systemPrompt).toContain('不能因为草案缺失或不完整')
+  })
+
+  it('agent-planner-v1-13: routes rotation duration compression by ambiguity and scope', async () => {
+    const testCase = {
+      id: 'post9-rotation-compression-routes-by-scope',
+      userInput: '把当前3小时轮播单压缩2小时',
+      expectedDecision: '歧义先澄清；完整队尾范围走 batch_delete；按策略整表压缩先调整草案',
+      mustNotHappen: 'batch_move、静默猜目标时长、裁切节目或无草案直接正式重编',
+      verification: 'planner prompt 明确三类路由及节目边界保护',
+    }
+    let systemPrompt = ''
+    const planner = new AgentPlanner({
+      chat: vi.fn(async (messages) => {
+        systemPrompt = messages[0]?.content ?? ''
+        return { content: JSON.stringify({
+          mode: 'single',
+          actions: [{ type: 'clarify', question: '你是要减少2小时变为1小时，还是压缩到2小时？' }],
+          assistantReplyDraft: '还需要确认目标总时长和内容取舍方式。',
+        }) }
+      }),
+    } as never)
+
+    const canonicalItems = canonicalSchedulingData.candidates.filter((candidate) => candidate.duration === 1800).slice(0, 6)
+    expect(canonicalItems.length, 'data_fixture_missing: 需要六条30分钟 canonical 节目构造3小时轮播现场').toBe(6)
+    const toClock = (seconds: number) => {
+      const hours = Math.floor(seconds / 3600).toString().padStart(2, '0')
+      const minutes = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0')
+      return `${hours}:${minutes}:00`
+    }
+    const plan = await planner.plan({
+      scheduleState: {
+        playlistId: 'rotation-compression', playlistType: 'rotation', channelId: 'rotation', channelName: '轮播单',
+        date: '2026-07-28', isEmpty: false, itemCount: canonicalItems.length, gapCount: 0, hasSelectedTimeRange: false,
+      },
+      userInput: testCase.userInput,
+      currentSchedule: canonicalItems.map((candidate, index) => ({
+        id: `scheduled-${candidate.id}`,
+        programId: candidate.programId,
+        programCode: candidate.programCode,
+        programName: candidate.programName,
+        instanceName: candidate.instanceName,
+        startTime: toClock(index * 1800),
+        endTime: toClock((index + 1) * 1800),
+        duration: candidate.duration,
+        programType: candidate.programType,
+      })),
+    })
+
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+    expect(plan.actions[0]).toMatchObject({ type: 'clarify' })
+    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.13')
+    expect(systemPrompt).toContain('减少 2 小时')
+    expect(systemPrompt).toContain('压缩到 2 小时')
+    expect(systemPrompt).toContain('不能解释为 batch_move')
+    expect(systemPrompt).toContain('不得裁切节目')
+    expect(systemPrompt).toContain('先准备或调整轮播草案')
+    expect(systemPrompt).toContain('初次提出的批量删除不得使用 formal_write')
+    expect(systemPrompt).toContain('"intent":"batch_delete"')
+    expect(systemPrompt).toContain('"mutationPolicy":"pending_only"')
   })
 
   it('agent-planner-draft-formal-owner-v1-8: exposes pending ownership and requires clarification on owner ambiguity', async () => {

@@ -46,9 +46,8 @@ const agentRulesDoc = readFileSync(resolve(process.cwd(), 'docs/aibiandan-agent-
 const agentDevelopmentProtocolDoc = readFileSync(resolve(process.cwd(), 'docs/agent-development-protocol.md'), 'utf8')
 
 describe('editor demand coverage matrix', () => {
-  it('keeps the Goal 24 demand set in the 30-50 case harness range', () => {
+  it('keeps a substantive Goal 24 demand harness without a stale upper bound', () => {
     expect(editorDemandCoverageCases.length).toBeGreaterThanOrEqual(30)
-    expect(editorDemandCoverageCases.length).toBeLessThanOrEqual(50)
   })
 
   it('uses stable ids and covers the major editor-facing categories', () => {

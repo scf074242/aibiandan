@@ -786,7 +786,7 @@ OpenAI SDK 兼容客户端。
 
 #### `AgentPlanner`（[agentPlanner.ts](file:///./src/services/llm/agentPlanner.ts)）
 
-Agent Planner，调用 LLM 编译多动作计划；当前 system prompt 版本为 `v1.11`，正式 ReAct 首批 `research_check` 必须由模型给出 2-6 个保留用户硬条件的受控查询；`formal_orchestration` 与正式 `commit_layout_draft` 必须同时返回顶层 `mode="react"` 和 `reactTask`。有限、可定位目标集合保持复合原子路径，覆盖整表/全部空窗/完整目标时长才进入正式长流程，所需草案不完整时先引导完善草案。有顺序依赖的多动作由同一 ReAct task 逐轮执行，运行时完整保留 action，并在每轮 observation 后重新决定下一步；`create_playlist` 排在正式 action 前时先真实创建工作区，不能因后续正式 action 误报计划无效。前台恢复时旧未执行步骤标记为 `blocked/superseded`，自然语言确认则回到 planner，只有显式确认控件调用写入 API。
+Agent Planner，调用 LLM 编译多动作计划；当前 system prompt 版本为 `v1.13`，正式 ReAct 首批 `research_check` 必须由模型给出 2-6 个保留用户硬条件的受控查询；`formal_orchestration` 与正式 `commit_layout_draft` 必须同时返回顶层 `mode="react"` 和 `reactTask`。有限、可定位目标集合保持复合原子路径，覆盖整表/全部空窗/完整目标时长才进入正式长流程，所需草案不完整时先引导完善草案。轮播时长压缩先消解“减少 N 小时/压缩到 N 小时”歧义；完整队尾范围必须输出带范围与 `pending_only` 的 `batch_delete`，不得降成单条删除或直接正式写入；按策略整表压缩先调整目标时长一致的草案，禁止按平移处理或裁切节目。有顺序依赖的多动作由同一 ReAct task 逐轮执行，运行时完整保留 action，并在每轮 observation 后重新决定下一步；`create_playlist` 排在正式 action 前时先真实创建工作区，不能因后续正式 action 误报计划无效。前台恢复时旧未执行步骤标记为 `blocked/superseded`，自然语言确认则回到 planner，只有显式确认控件调用写入 API。
 
 - `plan(input, deadline?)`：调 `llmClient.chat`（temperature 0.2, maxTokens 1100, maxRetries 1, traceLabel `agent_planner`），stage timeout 从共享 `AgentDeadline` 的剩余预算推导，并把 `AbortSignal` 传到底层请求。
 - 输出 `AgentPlan`：`mode`（single/react）+ `actions`（10 种 type）+ `reactTask` + `assistantReplyDraft`
