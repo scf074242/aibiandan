@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { LayoutDraft, ScheduleState } from '@/types/orchestration'
 import type { RuntimeScheduleItem } from '@/services/runtime/schedulingAgentRuntimeFacade'
+import { canonicalSchedulingData } from '@/services/agent/canonicalSchedulingData'
+import { AgentDeadline } from '@/services/agent/agentDeadline'
 
 const llmClientChatMock = vi.hoisted(() => vi.fn())
 const taskClassifierClassifyMock = vi.hoisted(() => vi.fn())
@@ -145,6 +147,51 @@ const createRotationDraft = (): LayoutDraft => ({
   ],
 })
 
+const createThreeHourRotationDraft = (): LayoutDraft => {
+  const draft = createRotationDraft()
+  return {
+    ...draft,
+    id: 'rotation-draft-three-hours',
+    userIntent: '三小时综合轮播草案',
+    targetDurationSeconds: 3 * 60 * 60,
+    coverage: { start: '00:00:00', end: '03:00:00' },
+    layoutReference: {
+      ...draft.layoutReference,
+      slots: [
+        ...draft.layoutReference.slots,
+        {
+          id: 'slot-pudong',
+          channelId: 'rotation',
+          columnId: 'column-pudong',
+          startTime: '02:00:00',
+          endTime: '03:00:00',
+        },
+      ],
+    },
+    columns: [
+      ...draft.columns,
+      {
+        columnId: 'column-pudong',
+        columnName: '浦东城市生活',
+        channelId: 'rotation',
+        defaultProgramType: 'documentary',
+        source: 'generated',
+        semanticLabel: '浦东城市生活',
+        queryHints: ['浦东', '城市生活', '上海文旅'],
+      },
+    ],
+    durationSegments: [
+      ...(draft.durationSegments ?? []),
+      {
+        id: 'duration-pudong',
+        label: '浦东城市生活',
+        targetDurationSeconds: 3600,
+        contentHint: '浦东、城市生活、上海文旅',
+      },
+    ],
+  }
+}
+
 const emptySchedule = (): RuntimeScheduleItem[] => []
 
 describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
@@ -238,23 +285,15 @@ describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
         content: '我先查了当前第一段草案和素材库，金山乐高乐园方向可以继续核验。',
       })
 
+    const canonicalScenicCandidate = canonicalSchedulingData.candidates.find((candidate) => (
+      candidate.contentTags?.some((tag) => tag.includes('景点'))
+    ))
+    if (!canonicalScenicCandidate) throw new Error('data_fixture_missing: canonical scenic candidate')
     const facade = new SchedulingAgentRuntimeFacade()
-    const searchPrograms = vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([
-      {
-        id: 'candidate-jinshan-legoland',
-        programId: 'candidate-jinshan-legoland',
-        programCode: 'candidate-jinshan-legoland',
-        programName: '金山乐高乐园宣传片',
-        instanceName: '金山乐高乐园宣传片',
-        channelId: 'rotation',
-        duration: 600,
-        programType: 'documentary',
-        columnName: '文旅宣传',
-        contentTags: ['金山', '乐高乐园', '景点'],
-        popularityScore: 96,
-      },
-    ])
+    const searchPrograms = vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue([canonicalScenicCandidate])
 
+    const deadline = new AgentDeadline()
+    const compressionDeadline = new AgentDeadline()
     const result = await facade.submitInstruction({
       scheduleState: createScheduleState(),
       userInput: '第一段金山区景点部分，选择金山区最近3年最火热的景点',
@@ -264,6 +303,7 @@ describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
       agentCoreEnabled: true,
       layoutDraftEnabled: true,
       inputSource: 'user',
+      deadline,
     })
 
     expect(result.kind).toBe('layout_draft')
@@ -298,6 +338,180 @@ describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
     }))
     expect(taskClassifierClassifyMock).not.toHaveBeenCalled()
     expect(llmClientChatMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('post9-rotation-compression-staged-react: returns whole-playlist research observation to LLM before drafting', async () => {
+    const testCase = {
+      id: 'rotation-compress-overall-observation-builds-reviewable-draft',
+      userInput: '分析当前3小时轮播单，按热播优先形成压缩到2小时的方案',
+      expectedDecision: 'research observation 回到 LLM，生成完整2小时草案供审看',
+      mustNotHappen: '要求指定单一草案段或写入正式播单',
+      verification: 'result.kind=layout_draft、coverage=00:00-02:00、noFormalPlaylistWrite=true',
+    }
+    llmClientChatMock
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          mode: 'react',
+          actions: [],
+          reactTask: {
+            objective: '分析当前轮播内容和热度依据，形成2小时压缩草案',
+            maxTurns: 3,
+            batchSize: 4,
+            stopCondition: '形成可审看的2小时草案，不写正式播单',
+            nextActions: [{
+              type: 'research_check',
+              purpose: 'draft_precheck',
+              semanticLabel: '当前轮播热播内容',
+              queries: ['当前轮播 热播 内容', '上海文旅 热门节目'],
+            }],
+          },
+          assistantReplyDraft: '我先结合当前编单查热度依据，再形成2小时压缩方案。',
+          reasoning: '整表取舍需要先观察当前内容和候选证据。',
+        }),
+      })
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          action: {
+            type: 'refine_layout_draft',
+            rotationDurationSeconds: 7200,
+            ignoreExistingLayout: true,
+            userIntent: '按热播优先压缩当前轮播单到2小时',
+            segments: [
+              { start: '00:00:00', end: '01:00:00', semanticLabel: '高热度城市文旅', programTypeHint: 'documentary' },
+              { start: '01:00:00', end: '02:00:00', semanticLabel: '热门城市生活', programTypeHint: 'news_magazine' },
+            ],
+          },
+          assistantReply: '我结合当前编单和热度证据，整理成两段压缩草案供你审看。',
+          reasoning: '保留热度较高且内容互补的两类节目方向。',
+        }),
+      })
+
+    const canonicalHourCandidates = canonicalSchedulingData.candidates
+      .filter((candidate) => candidate.duration === 3600)
+      .slice(0, 3)
+    if (canonicalHourCandidates.length < 3) throw new Error('data_fixture_missing: three canonical one-hour rotation candidates')
+    const facade = new SchedulingAgentRuntimeFacade()
+    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue(canonicalHourCandidates.slice(0, 2))
+    const currentSchedule: RuntimeScheduleItem[] = canonicalHourCandidates.map((candidate, index) => ({
+      id: candidate.id,
+      programCode: candidate.programCode,
+      programName: candidate.programName,
+      startTime: `0${index}:00:00`,
+      endTime: `0${index + 1}:00:00`,
+      duration: candidate.duration,
+      programType: candidate.programType,
+    }))
+
+    const compressionDeadline = new AgentDeadline()
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState({
+        isEmpty: false,
+        itemCount: currentSchedule.length,
+        gapCount: 0,
+        rotationStrategy: 'trending',
+        rotationDurationSeconds: 3 * 60 * 60,
+      }),
+      userInput: testCase.userInput,
+      currentSchedule,
+      currentLayoutDraft: createThreeHourRotationDraft(),
+      history: [],
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+      deadline: compressionDeadline,
+    })
+
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+    expect(result.kind).toBe('layout_draft')
+    if (result.kind !== 'layout_draft') throw new Error('expected whole-playlist compression draft')
+    expect(result.draft.targetDurationSeconds).toBe(7200)
+    expect(result.draft.coverage).toEqual({ start: '00:00:00', end: '02:00:00' })
+    expect(result.draft.columns.map((column) => column.semanticLabel)).toEqual(['高热度城市文旅', '热门城市生活'])
+    expect(result.feedback.details?.noFormalPlaylistWrite).toBe(true)
+    expect(result.feedback.details?.researchDecisionSource).toBe('llm_observation_decision')
+    expect(result.feedback.details?.reactTaskRun).toMatchObject({
+      status: 'observing',
+      objective: '分析当前轮播内容和热度依据，形成2小时压缩草案',
+      loopCount: 1,
+    })
+    expect(result.feedback.details?.reactTaskBoundary).toMatchObject({
+      mode: 'react',
+      nextDecisionRequiresObservation: true,
+    })
+    expect(currentSchedule).toHaveLength(3)
+    expect(llmClientChatMock).toHaveBeenCalledTimes(2)
+    expect(llmClientChatMock.mock.calls[1]?.[1]?.signal).toBe(compressionDeadline.signal())
+  })
+
+  it('rotation-compress-observation-invalid-decision: preserves the formal schedule and exposes a recoverable failure', async () => {
+    const testCase = {
+      id: 'rotation-compress-observation-invalid-decision',
+      userInput: '分析当前3小时轮播单，按热播优先形成压缩到2小时的方案',
+      expectedDecision: 'LLM 未给完整连续2小时草案时结构化停止并允许重试',
+      mustNotHappen: '本地补齐缺失时段、写入正式播单或自动回滚',
+      verification: 'failureCode=research_decide_invalid、noMutation=true、recoverableFailureEnvelope.kind=llm_decide_unavailable',
+    }
+    llmClientChatMock
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          mode: 'react', actions: [],
+          reactTask: {
+            objective: '形成2小时压缩草案', maxTurns: 3, batchSize: 3,
+            nextActions: [{ type: 'research_check', purpose: 'draft_precheck', semanticLabel: '热播内容', queries: ['热播内容'] }],
+          },
+          assistantReplyDraft: '先查证再形成草案。', reasoning: '整表取舍需要 observation。',
+        }),
+      })
+      .mockResolvedValueOnce({
+        content: JSON.stringify({
+          action: {
+            type: 'refine_layout_draft', rotationDurationSeconds: 7200, ignoreExistingLayout: true,
+            segments: [{ start: '00:00:00', end: '01:00:00', semanticLabel: '只有一小时的残缺方案' }],
+          },
+          assistantReply: '先这样处理。', reasoning: '模型遗漏了一小时。',
+        }),
+      })
+    const canonicalHourCandidates = canonicalSchedulingData.candidates
+      .filter((candidate) => candidate.duration === 3600)
+      .slice(0, 3)
+    if (canonicalHourCandidates.length < 3) throw new Error('data_fixture_missing: three canonical one-hour rotation candidates')
+    const facade = new SchedulingAgentRuntimeFacade()
+    vi.spyOn((facade as any).candidateService, 'searchPrograms').mockResolvedValue(canonicalHourCandidates.slice(0, 1))
+    const currentSchedule: RuntimeScheduleItem[] = canonicalHourCandidates.map((candidate, index) => ({
+      id: candidate.id,
+      programCode: candidate.programCode,
+      programName: candidate.programName,
+      startTime: `0${index}:00:00`,
+      endTime: `0${index + 1}:00:00`,
+      duration: candidate.duration,
+      programType: candidate.programType,
+    }))
+
+    const result = await facade.submitInstruction({
+      scheduleState: createScheduleState({ isEmpty: false, itemCount: 3, gapCount: 0, rotationStrategy: 'trending', rotationDurationSeconds: 10800 }),
+      userInput: testCase.userInput,
+      currentSchedule,
+      currentLayoutDraft: createThreeHourRotationDraft(),
+      agentCoreEnabled: true,
+      layoutDraftEnabled: true,
+      inputSource: 'user',
+    })
+
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+    expect(result.kind).toBe('message')
+    if (result.kind !== 'message') throw new Error('expected recoverable decision failure')
+    expect(result.statusHint).toBe('failed')
+    expect(result.feedback.details).toMatchObject({
+      failureCode: 'research_decide_invalid',
+      noMutation: true,
+      noFormalPlaylistWrite: true,
+      canRetry: true,
+      recoverableFailureEnvelope: {
+        kind: 'llm_decide_unavailable',
+        noMutation: true,
+      },
+    })
+    expect(currentSchedule.map((item) => item.id)).toEqual(canonicalHourCandidates.map((candidate) => candidate.id))
   })
 
   it('keeps ReAct state when the LLM also creates a rotation workspace and draft first', async () => {

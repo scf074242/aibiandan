@@ -23,7 +23,7 @@ if (!expectedCandidate) {
 }
 
 describe('post-nine-stage canonical candidate search acceptance', () => {
-  it('searches LLM-provided strategies until a canonical candidate is found without writing early', async () => {
+  it('post9-search-broadened-query-finds-existing-canonical-program: searches LLM-provided strategies until a canonical candidate is found without writing early', async () => {
     const traces: AgentTraceStep[] = []
     const candidateJudge: AgentCandidateJudge = {
       selectBestCandidate: vi.fn(async ({ candidates }) => ({

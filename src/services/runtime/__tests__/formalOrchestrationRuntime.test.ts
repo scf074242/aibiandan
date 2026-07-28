@@ -22,7 +22,7 @@ describe('FormalOrchestrationRuntime true ReAct loop', () => {
    * - mustNotHappen: 一次性执行初始 plan；decider 未看到 observation；重复执行旧动作
    * - verification: actor 顺序为 a1/a2/a3，decider 调用两次且 checkpoint 保留每轮 observation
    */
-  it('calls decide after every observed batch and only executes newly decided actions', async () => {
+  it('post9-rotation-compression-staged-react formal stage: calls decide after every observed batch and only executes newly decided actions', async () => {
     const actor = vi.fn(async (action: TestAction) => ({ type: 'formal_execution' as const, summary: `executed:${action.id}`, data: { actionId: action.id } }))
     const decide = vi.fn()
       .mockResolvedValueOnce({ kind: 'continue', nextActions: [{ id: 'a3' }], reason: '继续补剩余空窗' })
@@ -72,7 +72,7 @@ describe('FormalOrchestrationRuntime true ReAct loop', () => {
    * - mustNotHappen: 使用旧 plan 自动续跑；吞掉异常
    * - verification: failure.kind=decide_failed，checkpoint 保留异常原因
    */
-  it('exposes decide failure and records it in the checkpoint', async () => {
+  it('post9-react-decider-failure-exposes-structured-state: exposes decide failure and records it in the checkpoint', async () => {
     const runtime = new FormalOrchestrationRuntime<TestAction>({
       actor: vi.fn(async (action) => ({ type: 'formal_execution', summary: `executed:${action.id}` })),
       decide: vi.fn(async () => { throw new Error('model unavailable') }),
@@ -165,7 +165,7 @@ describe('FormalOrchestrationRuntime true ReAct loop', () => {
    * - mustNotHappen: 中止后继续调用 actor 或 decider；自动恢复
    * - verification: status=cancelled，actor 只执行 a1，decider 未调用
    */
-  it('stops at the current checkpoint when the shared deadline is aborted', async () => {
+  it('post9-react-stop-keeps-last-checkpoint: stops at the current checkpoint when the shared deadline is aborted', async () => {
     const deadline = new AgentDeadline({ overallDeadlineMs: 60_000 })
     const actor = vi.fn(async (action: TestAction) => {
       if (action.id === 'a1') deadline.abort()
@@ -295,7 +295,7 @@ describe('FormalOrchestrationRuntime true ReAct loop', () => {
    * - mustNotHappen: 新建无关 run、重复执行 a2、丢失上一轮拒绝证据
    * - verification: actor 仅收到 a3，actionKey 属于 run-1/turn-2，decider 能看到历史 observation
    */
-  it('resumes a half batch without replaying completed actions', async () => {
+  it('post9-recovery-half-batch-does-not-replay: resumes a half batch without replaying completed actions', async () => {
     const priorCheckpoints = [{
       id: 'run-1:checkpoint:1:continue', runId: 'run-1', objective: '补齐晚间空窗', turn: 1,
       actions: [{ id: 'a1' }],

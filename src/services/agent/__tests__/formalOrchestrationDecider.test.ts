@@ -141,7 +141,7 @@ describe('LlmFormalOrchestrationDecider', () => {
     await expect(decider.decide(createInput())).resolves.toEqual({ kind: 'unable_to_decide', reason: '没有足够的顺播证据' })
   })
 
-  it('formal-decider-v1-5: branches on zero-candidate evidence without inventing a match', async () => {
+  it('post9-react-zero-candidate-decides-from-observation: branches on zero-candidate evidence without inventing a match', async () => {
     const input = createInput()
     input.observations = [{
       id: 'zero-candidate-observation', turn: 1, type: 'asset_search' as const,

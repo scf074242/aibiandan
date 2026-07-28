@@ -1,7 +1,7 @@
 # 九阶段后真实复杂场景验收执行卡
 
 - 基线提交：`a14383bab7b9b582ed6e86bfdd939acc1269da93`
-- 状态：已完成（轮播压缩边界已收口；整表热播压缩保留真实模型延迟风险）
+- 状态：已完成（保留真实模型偶发 90 秒超时的可恢复时延风险）
 - 范围：既有 Agent Server、正式播单写入边界、ReAct 长流程与故障恢复
 - 边界：不扩展业务功能，不新增子 agent，不引入自动回滚
 
@@ -113,3 +113,45 @@
 - `把当前3小时轮播单队尾完整的2小时内容删掉，保留第1小时`：v1.12 真实输出曾错误降成单条 `delete + formal_write`。v1.13 增加结构约束和 JSON 示例后，真实输出稳定为 `batch_delete + rangeStart=01:00:00 + rangeEnd=03:00:00 + pending_only`。
 - `把当前3小时轮播单压缩到2小时，优先保留热播内容`：v1.12 真实输出正确进入 `draft_precheck` ReAct，先查热播依据再更新草案；v1.13 定向复验连续两次在 90 秒 stage deadline 超时，均返回 `canRetry: true` 且无 action、无正式写入。当前结论为设计可承接但模型时延稳定性仍属残余风险，不放宽统一 deadline。
 - 验收同时移除了编排员覆盖矩阵“最多50条”的写死上限，避免新增真实 case 被过时统计门禁阻断。
+
+## 11. 补充执行卡：压缩方案与正式操作分阶段
+
+### 11.1 问题
+
+整表轮播压缩不能在识别目标时长后直接进入删除或重编。模型必须先读取当前编单事实，基于内容结构、节目边界和用户指定策略形成压缩方案，再让用户审看；只有方案确认后才能进入候选选择和正式原子操作。
+
+### 11.2 期望
+
+1. 方案阶段只读取当前编单、检索评价证据并形成结构化 2 小时草案，不写正式播单。
+2. `research_check` observation 必须回到 LLM 决定压缩草案，不能由本地候选排序直接替用户决定整表取舍。
+3. 用户审看并确认草案后，正式 ReAct 才检索/裁决具体候选，并生成带 mutationPolicy 的批量原子动作。
+4. 每批正式动作后回到 LLM 基于 observation 决定继续、停止或保留未决内容，最终校验总时长与节目边界。
+
+### 11.3 前置数据
+
+- 当前 3 小时轮播正式播单、当前草案、轮播策略和节目评价证据均来自 canonical 数据或其现场投影。
+- 方案阶段与正式阶段使用同一 workspaceKey，但 draft owner、formal owner、pending 和授权保持隔离。
+
+### 11.4 风险
+
+- research 后由本地评分直接替用户选择整表保留内容。
+- 未展示压缩方案便进入正式删除或重编。
+- 草案确认后跳过候选裁决，或候选选择后绕过正式写入边界。
+- 把方案阶段的 observation 当成正式完成，或没有最终时长校验。
+
+### 11.5 验证方式
+
+- 增加五字段完整 case，明确 `analyze → research → draft → confirm → select → mutate → validate` 顺序。
+- 黑盒验证方案阶段 `noFormalPlaylistWrite=true`，正式阶段 mutation 经 grant、capability 与 `FormalPlaylistWriteAdapter`。
+- 注入候选不足和边界截断，验证返回结构化停止而不是本地硬凑 2 小时。
+
+### 11.6 实际验收结果
+
+- 黑盒复现确认原实现只支持单段 research 更新：整表 `draft_precheck` 没有段定位时，结构化 LLM 输出会被当成展示文本过滤，随后提示用户指定草案段，无法形成完整压缩方案。
+- 修复后，整表 observation 会连同当前 3 小时正式编单和当前草案回到 LLM；只有覆盖 `00:00:00-02:00:00`、总时长 7200 秒且声明整份替换的结构化草案 action 才能进入既有草案编译与校验链路。
+- 同步修复轮播 `replaceAll` 仍保留旧 3 小时 coverage 的问题；该收缩规则仅用于轮播草案，电视版面行为不变。
+- 故障注入“不完整一小时方案”后，运行时返回 `research_decide_invalid`、`llm_decide_unavailable`、`noMutation: true` 和 `canRetry: true`，正式 3 小时现场保持不变；没有自动回滚或本地补齐。
+- 正式阶段继续复用既有整批重编确认、`FormalOrchestrationGrant`、正式 ReAct、capability、`FormalPlaylistWriteAdapter` 与最终 validate，不新增并行执行路径。
+- 草案 decide 复用同一请求的 `AgentDeadline` 与 `AbortSignal`；服务端停止或整体 deadline 到期时，第二次模型思考也会被中断，不会脱离当前 ReAct 任务继续运行。
+- 15 个九阶段后场景均已绑定 `agent:check` 内的真实执行测试；矩阵门禁会读取证据文件并核对 case ID。整表压缩场景同时绑定方案黑盒、Agent Server grant、正式 ReAct 和正式写入边界四层证据。
+- 新增真实 LLM observation→草案 decide 验收：首次请求在 90 秒 stage deadline 超时并正确返回 `research_decide_unavailable`，无草案或正式写入；模拟用户明确重试后约 55 秒成功返回完整 7200 秒草案。结论为流程可承接、失败可恢复，但模型时延仍是残余风险，不通过放宽 deadline 或本地拼草案掩盖。

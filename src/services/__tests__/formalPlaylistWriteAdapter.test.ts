@@ -69,7 +69,7 @@ const workspaceIdempotencyIsolationCase = {
 } as const
 
 describe('FormalPlaylistWriteAdapter', () => {
-  it('delegates to the existing pending command executor and adds formal write metadata', async () => {
+  it('post9-rotation-compression-staged-react formal stage: delegates through the formal write boundary and adds metadata', async () => {
     const executePendingCommand = vi.fn(async () => executedResult())
     const adapter = new FormalPlaylistWriteAdapter({
       executePendingCommand,
@@ -164,7 +164,7 @@ describe('FormalPlaylistWriteAdapter', () => {
    * - mustNotHappen: 把临时失败结果标记 reused，阻断用户重试
    * - verification: delegate 调用两次，第二次成功结果为 applied
    */
-  it('does not cache a transient failure as an idempotent success', async () => {
+  it('post9-formal-transient-failure-retries-same-mutation: does not cache a transient failure as an idempotent success', async () => {
     const executePendingCommand = vi
       .fn()
       .mockResolvedValueOnce(executedResult({ success: false, error: 'network_error', message: '网络中断。' }))
@@ -193,7 +193,7 @@ describe('FormalPlaylistWriteAdapter', () => {
    * - mustNotHappen: 两个并发请求同时调用旧 delegate 造成重复写入
    * - verification: delegate 一次调用，一个结果 applied，另一个 reused
    */
-  it('coalesces concurrent writes with the same idempotency key', async () => {
+  it('post9-formal-concurrent-duplicate-reuses-result: coalesces concurrent writes with the same idempotency key', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const executePendingCommand = vi.fn(async () => {

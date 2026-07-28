@@ -125,7 +125,7 @@ const executeInput = (
 }
 
 describe('post-nine-stage Agent Server black-box acceptance', () => {
-  it('commits a canonical pending delete once and publishes formal state evidence', async () => {
+  it('post9-server-pending-delete-commits-once: commits a canonical pending delete once and publishes formal state evidence', async () => {
     const delegate = vi.fn(async (input: RuntimeExecutePendingCommandInput): Promise<RuntimeExecutedResult> => ({
       success: true,
       command: input.pendingCommand.command,
@@ -154,7 +154,7 @@ describe('post-nine-stage Agent Server black-box acceptance', () => {
     ]))
   })
 
-  it('rejects an old-workspace pending without replacing the server formal snapshot', async () => {
+  it('post9-server-workspace-mismatch-preserves-formal: rejects an old-workspace pending without replacing the server formal snapshot', async () => {
     const delegate = vi.fn()
     const server = createServer(delegate)
     const submitted = await server.submitInstruction(submitInput('删除当前播单里的看东方'))
@@ -192,7 +192,7 @@ describe('post-nine-stage Agent Server black-box acceptance', () => {
     expect(rejected.session.formalPlaylistWorkspaceKey).toBe(oldWorkspace)
   })
 
-  it('blocks a stale confirmation after the formal playlist version drifts', async () => {
+  it('post9-formal-version-drift-blocks-stale-confirmation: blocks a stale confirmation after the formal playlist version drifts', async () => {
     const delegate = vi.fn()
     const sessions = new AgentServerSessionStore()
     const server = createServer(delegate, sessions)
@@ -212,7 +212,7 @@ describe('post-nine-stage Agent Server black-box acceptance', () => {
     })
   })
 
-  it('exposes a thrown write failure and lets the same mutation retry', async () => {
+  it('post9-server-write-exception-remains-retryable: exposes a thrown write failure and lets the same mutation retry', async () => {
     const delegate = vi.fn()
       .mockRejectedValueOnce(new Error('injected network disconnect'))
       .mockImplementationOnce(async (input: RuntimeExecutePendingCommandInput): Promise<RuntimeExecutedResult> => ({

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import {
   postNineStageAcceptanceCases,
@@ -27,6 +29,22 @@ describe('post-nine-stage real scenario acceptance matrix', () => {
       expect(scenario.canonicalFixture, `${scenario.id} canonical fixture`).toContain('canonicalSchedulingData')
       expect(scenario.initialState.trim(), `${scenario.id} initialState`).not.toBe('')
       expect(scenario.expectedFormalState.trim(), `${scenario.id} expectedFormalState`).not.toBe('')
+      for (const evidenceTestFile of [scenario.evidenceTestFile, ...(scenario.additionalEvidenceTestFiles ?? [])]) {
+        const evidenceSource = readFileSync(resolve(process.cwd(), evidenceTestFile), 'utf8')
+        expect(evidenceSource, `${scenario.id} executable evidence`).toContain(scenario.id)
+      }
+    }
+  })
+
+  it('keeps every evidence test inside the agent check gate', () => {
+    const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>
+    }
+    const gatedTests = `${packageJson.scripts?.['preagent:check:tests'] ?? ''} ${packageJson.scripts?.['agent:check:tests'] ?? ''}`
+    for (const scenario of postNineStageAcceptanceCases) {
+      for (const evidenceTestFile of [scenario.evidenceTestFile, ...(scenario.additionalEvidenceTestFiles ?? [])]) {
+        expect(gatedTests, `${scenario.id} gate`).toContain(evidenceTestFile)
+      }
     }
   })
 

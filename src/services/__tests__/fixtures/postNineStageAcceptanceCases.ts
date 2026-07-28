@@ -32,6 +32,8 @@ export interface PostNineStageAcceptanceCase {
   canonicalFixture: string
   initialState: string
   expectedFormalState: string
+  evidenceTestFile: string
+  additionalEvidenceTestFiles?: string[]
 }
 
 export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
@@ -45,6 +47,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中的看东方与东方剧场节目实体',
     initialState: '正式电视播单已有多个明确可定位目标，草案为空或不完整',
     expectedFormalState: '确认前保持正式播单不变；确认后仅修改目标集合',
+    evidenceTestFile: 'src/services/__tests__/agentPlanner.promptVersion.test.ts',
   },
   {
     id: 'post9-hybrid-overall-task-guides-draft-before-formal',
@@ -56,6 +59,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中的轮播节目候选与版面数据',
     initialState: '轮播单存在部分正式节目，但草案缺失或仅覆盖部分目标时长',
     expectedFormalState: '草案完善前正式播单保持不变',
+    evidenceTestFile: 'src/services/__tests__/demoRuntimeFacade.fullGenerateBootstrap.test.ts',
   },
   {
     id: 'post9-rotation-compression-routes-by-scope',
@@ -67,6 +71,24 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中可组成3小时轮播现场的节目实体',
     initialState: '当前轮播单目标时长3小时且已有正式节目；草案目标仍为3小时或不完整',
     expectedFormalState: '澄清与草案调整阶段正式播单不变；有限删除确认后仅删除完整边界目标；整表重构授权后才写入',
+    evidenceTestFile: 'src/services/__tests__/agentPlanner.promptVersion.test.ts',
+  },
+  {
+    id: 'post9-rotation-compression-staged-react',
+    userInput: '分析当前3小时轮播单，按热播优先形成压缩到2小时的方案；我确认草案后再正式编排',
+    expectedDecision: '方案阶段 research observation 回到 LLM 生成完整2小时草案；用户确认后正式 ReAct 才依次候选裁决、授权写入和总时长校验',
+    mustNotHappen: '本地评分替 LLM 决定整表取舍；未审看草案先写正式播单；无 grant 或跳过 decide/validate',
+    verification: '前台黑盒断言方案阶段 noFormalPlaylistWrite；正式运行时断言 grant → research/decide → capability/write adapter → validate',
+    playlistModel: 'rotation', surface: 'react_runtime', fault: 'none',
+    canonicalFixture: 'canonicalSchedulingData 中可组成3小时轮播现场及带热度证据的节目实体',
+    initialState: '3小时正式轮播单已有节目，草案目标仍为3小时，轮播策略为热播优先',
+    expectedFormalState: '2小时草案审看前正式现场不变；确认并完成正式链路后总时长为7200秒且节目边界完整',
+    evidenceTestFile: 'src/services/__tests__/schedulingAgentReactTaskRuntime.test.ts',
+    additionalEvidenceTestFiles: [
+      'src/services/__tests__/agentServerRuntime.test.ts',
+      'src/services/runtime/__tests__/formalOrchestrationRuntime.test.ts',
+      'src/services/__tests__/formalPlaylistWriteAdapter.test.ts',
+    ],
   },
   {
     id: 'post9-search-broadened-query-finds-existing-canonical-program',
@@ -78,6 +100,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData.candidates 中带出行/便民/城市服务标签的实体',
     initialState: '候选库存在语义匹配节目，但用户原句不与标题完全相等',
     expectedFormalState: '仅形成候选或 pending，确认前正式播单保持不变',
+    evidenceTestFile: 'src/services/__tests__/postNineStageCandidateSearchAcceptance.test.ts',
   },
   {
     id: 'post9-react-zero-candidate-decides-from-observation',
@@ -89,6 +112,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 候选源及其真实零命中查询结果',
     initialState: '正式 ReAct 已完成一轮 research_check，候选源可用但明确查询零命中',
     expectedFormalState: '无法消解时保持正式空缺且未写入不匹配节目',
+    evidenceTestFile: 'src/services/agent/__tests__/formalOrchestrationDecider.test.ts',
   },
   {
     id: 'post9-server-pending-delete-commits-once',
@@ -100,6 +124,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData.programs 中的看东方实体',
     initialState: '电视播单已有看东方与相邻 canonical 节目，无 pending',
     expectedFormalState: '只删除目标，看东方以外条目保持不变',
+    evidenceTestFile: 'src/services/__tests__/postNineStageAgentServerAcceptance.test.ts',
   },
   {
     id: 'post9-server-workspace-mismatch-preserves-formal',
@@ -111,6 +136,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中的轮播候选实体',
     initialState: '同一 session 已绑定电视工作区，前台切换到轮播工作区',
     expectedFormalState: '两个工作区的正式状态均保持不变，无 mutation',
+    evidenceTestFile: 'src/services/__tests__/postNineStageAgentServerAcceptance.test.ts',
   },
   {
     id: 'post9-formal-version-drift-blocks-stale-confirmation',
@@ -122,6 +148,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中两个已排节目实体',
     initialState: '用户确认前另一操作已改变正式播单版本',
     expectedFormalState: '保持最新现场快照，不应用过期 mutation',
+    evidenceTestFile: 'src/services/__tests__/postNineStageAgentServerAcceptance.test.ts',
   },
   {
     id: 'post9-formal-transient-failure-retries-same-mutation',
@@ -133,6 +160,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中一个轮播节目实体',
     initialState: '正式播单已有目标，写入 delegate 首次返回临时失败',
     expectedFormalState: '首次失败不变；重试成功后只应用一次',
+    evidenceTestFile: 'src/services/__tests__/formalPlaylistWriteAdapter.test.ts',
   },
   {
     id: 'post9-server-write-exception-remains-retryable',
@@ -144,6 +172,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中一个电视节目实体',
     initialState: '正式播单已有目标且存在 server-owned delete pending，delegate 首次抛出网络异常',
     expectedFormalState: '异常后保持原快照；重试成功后只应用一次',
+    evidenceTestFile: 'src/services/__tests__/postNineStageAgentServerAcceptance.test.ts',
   },
   {
     id: 'post9-formal-concurrent-duplicate-reuses-result',
@@ -155,6 +184,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中一个可插入轮播节目实体',
     initialState: '空轮播单收到两个相同 pending execute 请求',
     expectedFormalState: '正式播单仅含一个目标节目且不重复',
+    evidenceTestFile: 'src/services/__tests__/formalPlaylistWriteAdapter.test.ts',
   },
   {
     id: 'post9-react-stop-keeps-last-checkpoint',
@@ -166,6 +196,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中用于首批编排的节目实体',
     initialState: '电视播单存在多个空窗且已具备可执行草案',
     expectedFormalState: '保持最后 checkpoint 对应的已完成状态，不回滚、不执行剩余动作',
+    evidenceTestFile: 'src/services/runtime/__tests__/formalOrchestrationRuntime.test.ts',
   },
   {
     id: 'post9-react-decider-failure-exposes-structured-state',
@@ -177,6 +208,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中晚间候选节目实体',
     initialState: '首批 act 成功，下一轮 decide 调用失败',
     expectedFormalState: '已完成首批保持，后续动作未写入',
+    evidenceTestFile: 'src/services/runtime/__tests__/formalOrchestrationRuntime.test.ts',
   },
   {
     id: 'post9-recovery-half-batch-does-not-replay',
@@ -188,5 +220,6 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     canonicalFixture: 'canonicalSchedulingData 中批次动作引用的节目实体',
     initialState: '同 workspace/version 的 cancelled checkpoint 已完成半批',
     expectedFormalState: '已完成动作不重复，剩余动作成功后正式状态与完整执行等价',
+    evidenceTestFile: 'src/services/runtime/__tests__/formalOrchestrationRuntime.test.ts',
   },
 ]

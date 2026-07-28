@@ -229,7 +229,7 @@ describe('DemoRuntimeFacade full generate bootstrap', () => {
     expect(mockGenerateSpec).not.toHaveBeenCalled()
   })
 
-  it('轮播单工作区直接发起全天编排会被阻拦并引导补充草案', async () => {
+  it('post9-hybrid-overall-task-guides-draft-before-formal: 轮播单工作区直接发起全天编排会被阻拦并引导补充草案', async () => {
     mockFormalPlanner({
       action: 'formal_orchestration',
       mode: 'full_generate',

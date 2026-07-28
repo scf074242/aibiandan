@@ -734,7 +734,12 @@ export class LayoutDraftService {
     if ((input.segments?.length ?? 0) > 1 && input.replaceAll) {
       const replacements = this.buildSpecSegmentsFromStructuredIntent(input.segments ?? [])
       return {
-        coverage: expandCoverageToSegments(input.currentDraft.coverage, replacements),
+        coverage: input.playlistType === 'rotation'
+          ? {
+              start: replacements[0]!.startTime,
+              end: replacements.at(-1)!.endTime,
+            }
+          : expandCoverageToSegments(input.currentDraft.coverage, replacements),
         segments: replacements,
       }
     }

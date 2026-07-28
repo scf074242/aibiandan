@@ -1246,7 +1246,7 @@ describe('AgentServerRuntime migration boundary', () => {
    * - mustNotHappen: 把完整 Grant 暴露给客户端；接受伪造 resolvedAuthorization；绕过 sourcePendingId 校验
    * - verification: session 保存 Grant，decision 不含 authorizationRequest/resolvedAuthorization，执行时 runtime 收到服务端解析的 Grant
    */
-  it('formal-rebuild-grant-is-issued-and-resolved-by-server: keeps the grant behind the server boundary', async () => {
+  it('post9-rotation-compression-staged-react formal stage: keeps the rebuild grant behind the server boundary', async () => {
     const sessions = new AgentServerSessionStore()
     const session = sessions.createSession()
     const pendingAtomicContext = {

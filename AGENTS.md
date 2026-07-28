@@ -139,6 +139,7 @@ Agent 架构硬约束，对齐 Codex 设计模式，避免架构缺陷反复叠�
 - **ReAct 长流程边界**：长流程（`formal_orchestration` / 补空窗 / 全天编排 / 整体补排）必须使用真 ReAct 循环 + 批量 checkpoint + 上下文压缩；`maxTurns` / `batchSize` / 整体 deadline 必须显式声明；失败时必须返回已完成数量、本批是否写入、剩余数量和可恢复动作，不静默继续。
 - **有限批量与整体编排边界**：对有限、可定位节目集合执行删除、移动、替换，仍属于 `batch_delete` / `batch_move` 或复合原子命令，不因动作数量多、草案缺失或草案不完整升级为 `formal_orchestration`。只有目标覆盖整张播单、全部空窗或完整目标时长并需要持续检索回判时才进入正式长流程；该 taskKind 需要草案而草案不完整时，应引导完善草案，不得降级成猜测插入。
 - **轮播时长压缩边界**：“压缩 N 小时”未明确是减少 N 小时还是压缩到 N 小时时，必须由 LLM 追问目标时长和内容取舍，正式播单保持不变；明确队尾/相对范围且边界完整时必须输出带 `rangeStart` / `rangeEnd` / `pending_only` 的 `batch_delete`，不得降成单条 `delete` 或直接 `formal_write`，边界穿过节目时不得裁切节目。按热播、收视率或内容策略覆盖整张轮播单取舍时，必须先准备或调整到目标时长一致的轮播草案，用户确认后再启动正式 ReAct 重编并校验整批重编授权。压缩不得解释为 `batch_move`。
+- **整表压缩方案阶段**：整表轮播压缩的 `draft_precheck` 必须把当前正式编单、当前草案和候选 observation 交回 LLM，由 LLM 返回覆盖完整目标时长的 `prepare_layout_draft` / `refine_layout_draft`；本地只校验连续 coverage、目标时长和草案结构，不得按候选热度排序替用户拼方案。方案阶段必须标记 `noFormalPlaylistWrite`；decide 缺失、结构无效或证据不足时返回 `llm_decide_unavailable` 可恢复失败并保留现场。
 - **候选检索与零命中边界**：LLM 必须提供保留用户硬条件的原始查询与受控改写，本地在显式轮次/查询预算内检索并记录 trace；这属于有限穷尽，不得声称无限穷尽。ReAct observation 为零候选时，decider 只能在存在未尝试且不违背硬条件的查询时继续，否则返回 `unable_to_decide`、保留空缺并说明需补充条件；禁止伪造候选、重复失败查询或把零候选当完成。
 - **SSE 双路径**：path A 流式 + path B 批量回放必须并存；HTTP 模式必须保留 `onProgress` 回调接收进度事件，禁止退化为单气泡批量展示；进度消息必须包含 `查节目库` / `候选决策` 等 `processTypeLabel` 分支。
 - **流式与执行边界**：LLM token 流只用于首 token/增量体验和安全进度展示；intent、候选决策及任何 mutation 必须等待完整响应通过结构校验后才可进入 capability/write adapter。半截 JSON、断流、停止不得补齐或自动续跑。

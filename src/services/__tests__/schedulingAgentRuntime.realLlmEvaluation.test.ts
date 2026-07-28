@@ -9,6 +9,7 @@ import { AgentDeadline } from '@/services/agent/agentDeadline'
 import { LlmFormalOrchestrationDecider } from '@/services/agent/formalOrchestrationDecider'
 import { canonicalSchedulingData } from '@/services/agent/canonicalSchedulingData'
 import { FormalOrchestrationRuntime } from '@/services/runtime/formalOrchestrationRuntime'
+import { decideReactWholeDraft } from '@/services/runtime/reactDraftDecision'
 import { AgentPlanner, type AgentPlannerAction } from '@/services/llm/agentPlanner'
 import { isPlaceholderApiKey } from '@/services/llm/localDemoLlm'
 import { buildAgentRealLlmEvaluationCases } from './fixtures/agentRealLlmEvaluationCases'
@@ -256,6 +257,97 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
 
     expect(passed, JSON.stringify({ ambiguous, finite, overall, traces }, null, 2)).toBe(true)
   }, 10 * 60_000)
+
+  /**
+   * case post9-rotation-compression-staged-react
+   * - userInput: 分析当前3小时轮播单，按热播优先形成压缩到2小时的方案
+   * - expectedDecision: 真实 LLM 读取当前编单、草案和 research observation 后返回完整连续2小时草案
+   * - mustNotHappen: 本地拼草案；返回正式 mutation；遗漏目标时长或留下草案缺口
+   * - verification: decideReactWholeDraft.ok=true，action 仅为草案 action 且 rotationDurationSeconds=7200
+   */
+  it('forms a real reviewable two-hour compression draft from research observation', async () => {
+    const canonicalItems = canonicalSchedulingData.candidates.filter((candidate) => candidate.duration === 1800).slice(0, 6)
+    expect(canonicalItems.length, 'data_fixture_missing: 需要六条30分钟 canonical 节目构造3小时轮播现场').toBe(6)
+    const llmClient = new LLMClient({
+      apiKey: apiKey!, baseURL, model, temperature: 0, maxTokens: 1600, timeout: 90_000,
+    })
+    const deadline = new AgentDeadline({ overallDeadlineMs: 3 * 60_000 })
+    const toClock = (seconds: number) => {
+      const hours = Math.floor(seconds / 3600).toString().padStart(2, '0')
+      const minutes = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0')
+      return `${hours}:${minutes}:00`
+    }
+    const currentSchedule = canonicalItems.map((candidate, index) => ({
+      id: candidate.id,
+      programName: candidate.programName,
+      startTime: toClock(index * 1800),
+      endTime: toClock((index + 1) * 1800),
+      duration: candidate.duration,
+      programType: candidate.programType,
+    }))
+    const result = await decideReactWholeDraft({
+      llmClient,
+      promptVersion: 'v1.1',
+      userInput: '分析当前3小时轮播单，按热播优先形成压缩到2小时的方案',
+      scheduleState: {
+        playlistId: 'rotation-compression', playlistType: 'rotation', rotationStrategy: 'trending',
+        rotationDurationSeconds: 10_800, channelId: 'rotation', channelName: '轮播单', date: '2026-07-28',
+        isEmpty: false, itemCount: currentSchedule.length, gapCount: 0, hasSelectedTimeRange: false,
+      },
+      currentSchedule,
+      currentLayoutDraft: {
+        id: 'rotation-compression-draft', channelId: 'rotation', date: '2026-07-28', source: 'generated',
+        userIntent: '当前3小时轮播草案', draftKind: 'duration_segments', targetDurationSeconds: 10_800,
+        coverage: { start: '00:00:00', end: '03:00:00' },
+        layoutReference: {
+          id: 'rotation-compression-layout', name: '当前轮播草案', channelId: 'rotation',
+          slots: [0, 1, 2].map((index) => ({
+            id: `rotation-slot-${index + 1}`, channelId: 'rotation', columnId: `rotation-column-${index + 1}`,
+            startTime: toClock(index * 3600), endTime: toClock((index + 1) * 3600),
+          })),
+        },
+        columns: [0, 1, 2].map((index) => ({
+          columnId: `rotation-column-${index + 1}`, columnName: `当前内容段${index + 1}`, channelId: 'rotation',
+          defaultProgramType: canonicalItems[index * 2]!.programType, source: 'generated', semanticLabel: `当前内容段${index + 1}`,
+          queryHints: canonicalItems.slice(index * 2, index * 2 + 2).map((candidate) => candidate.programName),
+        })),
+      },
+      plan: {
+        mode: 'react', actions: [], reasoning: '用户要求按热播策略重构整张轮播草案。',
+        reactTask: {
+          objective: '结合当前轮播节目和热度证据形成2小时压缩草案', maxTurns: 3, batchSize: 3,
+          stopCondition: '生成完整2小时草案供用户审看，不写正式播单',
+          nextActions: [{ type: 'research_check', purpose: 'draft_precheck', semanticLabel: '当前轮播热播内容', queries: ['当前轮播 热播内容'] }],
+        },
+      },
+      researchAction: { type: 'research_check', purpose: 'draft_precheck', semanticLabel: '当前轮播热播内容', queries: ['当前轮播 热播内容'] },
+      observation: {
+        candidateCount: canonicalItems.length,
+        topCandidates: canonicalItems.map((candidate) => ({
+          id: candidate.id, programName: candidate.programName, duration: candidate.duration,
+          programType: candidate.programType, popularityScore: candidate.popularityScore,
+          estimatedRating: candidate.estimatedRating, playCount: candidate.playCount, contentTags: candidate.contentTags,
+        })),
+      },
+      deadline,
+    })
+    const traces = llmClient.getRecentRequestTraces().filter((trace) => trace.label === 'agent_react_draft_decide')
+    const passed = result.ok
+      && result.action.rotationDurationSeconds === 7200
+      && (result.action.type === 'prepare_layout_draft' || result.action.type === 'refine_layout_draft')
+      && traces.length === 1
+      && traces[0]?.success === true
+    sections.push({
+      id: 'rotation_compression_draft_decide', title: 'Rotation compression observation-to-draft decide',
+      status: passed ? 'passed' : 'failed', threshold: 1, total: 1, passed: passed ? 1 : 0, failed: passed ? 0 : 1,
+      passRate: passed ? 1 : 0, llmCallsAttempted: traces.length,
+      llmCallsSucceeded: traces.filter((trace) => trace.success).length,
+      llmCallsFailed: traces.filter((trace) => !trace.success).length,
+      tagCoverage: [{ tag: 'rotation_compression', total: 1, passed: passed ? 1 : 0, failed: passed ? 0 : 1 }],
+      failures: passed ? [] : [{ id: 'post9-rotation-compression-staged-react', tags: ['rotation_compression'], failures: [JSON.stringify(result)] }],
+    })
+    expect(passed, JSON.stringify({ result, traces }, null, 2)).toBe(true)
+  }, 240_000)
 
   /**
    * case formal-react-real-llm-multi-turn-decide

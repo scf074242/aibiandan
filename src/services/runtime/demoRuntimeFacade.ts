@@ -74,6 +74,7 @@ import {
   type SchedulingTaskStage,
 } from './schedulingTaskPlan'
 import { getSchedulingReactTaskRuntime } from './reactTaskRuntime'
+import { decideReactWholeDraft } from './reactDraftDecision'
 import type { ReactTaskObservationType, ReactTaskPlannerDraft, ReactTaskRun } from './reactTaskTypes'
 import type { FormalOrchestrationResumePlan } from './formalOrchestrationRecovery'
 import type {
@@ -104,8 +105,9 @@ import {
 /**
  * demoRuntimeFacade prompt 版本号（对齐 AGENTS.md Prompt 版本管理门禁）
  * - v1.0：初始版本（3 段内联 system prompt 共享同一版本基线）
+ * - v1.1：整表草案 research observation 必须由 LLM 返回结构化草案决定
  */
-export const DEMO_RUNTIME_FACADE_PROMPT_VERSION = 'v1.0' as const
+export const DEMO_RUNTIME_FACADE_PROMPT_VERSION = 'v1.1' as const
 
 export type RuntimeDetailMap = Record<string, unknown>
 export type RuntimeProcessType = 'planning' | 'selection' | 'execution' | 'validation' | 'general' | 'error'
@@ -1314,6 +1316,10 @@ export class DemoRuntimeFacade {
 
     if (action.purpose === 'candidate_precheck' && observation.candidateCount > 0 && !draftSegment) {
       return this.buildResearchInsertRecommendationDecision(input, plan, action, observation, '')
+    }
+
+    if (action.purpose === 'draft_precheck' && observation.candidateCount > 0 && !draftSegment) {
+      return await this.decideWholeDraftAfterResearch(input, plan, action, observation)
     }
 
     const synthesizedReply = await this.synthesizeResearchCheckReply(input, plan, action, observation)
@@ -4039,6 +4045,89 @@ export class DemoRuntimeFacade {
         },
       ),
       pendingAtomicContext: pendingContext,
+    }
+  }
+
+  private async decideWholeDraftAfterResearch(
+    input: RuntimeSubmitInput,
+    plan: AgentPlan,
+    action: Extract<AgentPlannerAction, { type: 'research_check' }>,
+    observation: RuntimeDetailMap,
+  ): Promise<RuntimeDecision> {
+    const result = await decideReactWholeDraft({
+      llmClient: this.llmClient,
+      promptVersion: DEMO_RUNTIME_FACADE_PROMPT_VERSION,
+      userInput: input.userInput,
+      scheduleState: input.scheduleState,
+      currentSchedule: input.currentSchedule,
+      currentLayoutDraft: input.currentLayoutDraft,
+      plan,
+      researchAction: action,
+      observation,
+      deadline: input.deadline,
+    })
+    if (!result.ok) {
+      return this.buildWholeDraftResearchDecisionFailure(
+        input,
+        plan,
+        observation,
+        result.failureCode,
+        result.assistantReply,
+      )
+    }
+
+    const draftDecision = await this.executePlannerLayoutDraftAction(input, result.action, result.reasoning || plan.reasoning)
+    if (!('feedback' in draftDecision)) return draftDecision
+    return {
+      ...draftDecision,
+      feedback: {
+        ...draftDecision.feedback,
+        content: result.assistantReply || draftDecision.feedback.content,
+        details: {
+          ...draftDecision.feedback.details,
+          ...observation,
+          noFormalPlaylistWrite: true,
+          researchDecisionSource: 'llm_observation_decision',
+        },
+      },
+    } as RuntimeDecision
+  }
+
+  private buildWholeDraftResearchDecisionFailure(
+    input: RuntimeSubmitInput,
+    plan: AgentPlan,
+    observation: RuntimeDetailMap,
+    failureCode: string,
+    assistantReply?: string,
+  ): RuntimeDecision {
+    const content = assistantReply
+      || '查证已经完成，但模型没有形成可安全执行的完整压缩草案。我保留了当前编单和草案，你可以重试或补充内容取舍条件。'
+    const failureEnvelope = buildRecoverableFailureEnvelope({
+      kind: 'llm_decide_unavailable',
+      recognizedSlots: [
+        { name: 'playlistType', value: input.scheduleState.playlistType, confidence: 1, source: 'context' },
+        ...(input.scheduleState.rotationStrategy
+          ? [{ name: 'strategy' as const, value: input.scheduleState.rotationStrategy, confidence: 1, source: 'context' as const }]
+          : []),
+      ],
+      noMutation: true,
+      humanSummary: content,
+      traceId: `research-draft-decide-${Date.now()}`,
+    })
+    return {
+      kind: 'message',
+      statusHint: 'failed',
+      feedback: createFeedback(content, 'error', '草案决策未完成', {
+        explanation: plan.reasoning,
+        details: {
+          ...observation,
+          failureCode,
+          noMutation: true,
+          noFormalPlaylistWrite: true,
+          canRetry: true,
+          recoverableFailureEnvelope: failureEnvelope,
+        },
+      }),
     }
   }
 
