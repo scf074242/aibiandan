@@ -31,8 +31,9 @@ import type { AgentPendingAction } from '@/services/agent/types'
  * - v1.8：明确草案完整度不阻断正式播单原子命令，缺槽位时保持原子 owner 追问
  * - v1.9：补充正式编排语义、重编确认与首批 research_check 契约
  * - v1.10：有顺序依赖的多动作必须进入 ReAct，禁止并列 action 被本地盲目串行执行
+ * - v1.11：明确有限批量复数命令与整表正式编排边界，并要求候选预检提供受控查询组合
  */
-export const AGENT_PLANNER_PROMPT_VERSION = 'v1.10' as const
+export const AGENT_PLANNER_PROMPT_VERSION = 'v1.11' as const
 
 export type AgentPlannerAtomicIntent = 'move' | 'insert' | 'replace' | 'delete' | 'batch_move' | 'batch_delete' | 'query' | 'validate'
 
@@ -556,6 +557,8 @@ export class AgentPlanner {
       '你是 AI 编审助手的 LLM planner。你的任务是理解编排员的自然语言，并返回一个可执行的多动作计划。',
       '不要把一句话压成单个分类。用户一句话可能同时包含：创建播单、生成草案、细分内容块、只读分析、正式编排、原子修改。',
       '多动作输出有严格边界：只有“创建播单并生成对应草案”可以在 single 模式返回两个 actions；多个原子动作、查询后再写入、先查证再修改等有顺序依赖的任务必须返回 mode:"react" + reactTask，由每轮 observation 后重新 decide，不要在 single actions 中并列返回后期待本地串行执行。',
+      '批量与整体编排按影响范围界定：删除、移动、替换有限、可定位的目标集合，仍属于 batch_delete / batch_move 或复合原子命令；即使动作不止一个，也不等于 formal_orchestration。不能因为草案缺失或不完整，把这类正式播单批量操作改成完善草案。',
+      '只有目标覆盖整张播单、全部空窗或完整目标时长，且需要持续检索、观察和回判时，才使用 formal_orchestration；如果该 taskKind 按播单类型需要草案而草案缺失或不完整，应明确引导完善草案，不能降级成一组猜测的插入命令。',
       '本地系统只负责安全裁决和执行；你负责理解业务意图、拆动作、生成草案结构。',
       '上一轮候选、缺参或确认信息会作为上下文提供给你；普通自然语言追问、选择和修正都由你结合上下文理解，不要假设本地会用关键词替你续接。',
       'assistantReplyDraft 必须承接当前上下文并给出下一步引导：说明“我正在做什么/已完成什么/下一步会做什么”，但不得承诺尚未通过候选、业务门禁或正式写入校验的结果。',
@@ -611,6 +614,7 @@ export class AgentPlanner {
       '用户给出第一小时/第二小时/每条10分钟/拆成N条/分三段等结构时，必须在 prepare_layout_draft 或 refine_layout_draft 中返回 segments。',
       '如果用户要求“先看看/核验/找最火/最近三年/有没有素材/查一下成品库/这个草案块选什么”，返回 research_check。research_check 只负责让本地查草案和素材库，不会改草案，也不会写正式节目。',
       'research_check 应由你给出 targetSegmentIndex 或 targetSegmentLabel、semanticLabel 和非空 queries；queries 或语义标签至少一项必须可直接检索，不要让本地猜策划内容，也不要返回 queries:[]。',
+      '候选预检的 queries 应提供 2-6 个受控查询：先保留用户明确节目名、主题和硬条件，再给同义改写、拆分词或逐步放宽的查询；不得删除用户明确要求后用弱相关节目冒充命中。运行时会逐个读取这些真实查询并去重，不会替你补造关键词。',
     ]
     if (!input.hasDraft) return base
     return [

@@ -137,11 +137,13 @@ Agent 架构硬约束，对齐 Codex 设计模式，避免架构缺陷反复叠�
 - **不引入子 agent**：当前项目本身就是典型的子 agent，禁止引入 DraftAgent / CandidateAgent / SelectionAgent / WriteAgent / ValidationAgent 等子 agent 雏形；复杂能力拆分只通过按 intent 拆分 capability + 统一分发机制实现。
 - **失败暴露而非回滚**：禁止引入 mutation journal / auto rollback / compensation transaction；失败时保留现场 + 暴露结构化 envelope + 让用户决定下一步（重试 / 补参 / 取消 / 换关键词 / 缩小范围）。
 - **ReAct 长流程边界**：长流程（`formal_orchestration` / 补空窗 / 全天编排 / 整体补排）必须使用真 ReAct 循环 + 批量 checkpoint + 上下文压缩；`maxTurns` / `batchSize` / 整体 deadline 必须显式声明；失败时必须返回已完成数量、本批是否写入、剩余数量和可恢复动作，不静默继续。
+- **有限批量与整体编排边界**：对有限、可定位节目集合执行删除、移动、替换，仍属于 `batch_delete` / `batch_move` 或复合原子命令，不因动作数量多、草案缺失或草案不完整升级为 `formal_orchestration`。只有目标覆盖整张播单、全部空窗或完整目标时长并需要持续检索回判时才进入正式长流程；该 taskKind 需要草案而草案不完整时，应引导完善草案，不得降级成猜测插入。
+- **候选检索与零命中边界**：LLM 必须提供保留用户硬条件的原始查询与受控改写，本地在显式轮次/查询预算内检索并记录 trace；这属于有限穷尽，不得声称无限穷尽。ReAct observation 为零候选时，decider 只能在存在未尝试且不违背硬条件的查询时继续，否则返回 `unable_to_decide`、保留空缺并说明需补充条件；禁止伪造候选、重复失败查询或把零候选当完成。
 - **SSE 双路径**：path A 流式 + path B 批量回放必须并存；HTTP 模式必须保留 `onProgress` 回调接收进度事件，禁止退化为单气泡批量展示；进度消息必须包含 `查节目库` / `候选决策` 等 `processTypeLabel` 分支。
 - **流式与执行边界**：LLM token 流只用于首 token/增量体验和安全进度展示；intent、候选决策及任何 mutation 必须等待完整响应通过结构校验后才可进入 capability/write adapter。半截 JSON、断流、停止不得补齐或自动续跑。
 - **流式展示语言**：`structured_complete` 属于内部协议事件，只推进状态机与 trace，不生成“完整接收/结构校验通过”等用户气泡；前台只展示理解需求、查节目库、候选决策、写入校验等业务进度及最终真实结果。
 - **终态可见性只认结构化状态**：前台不得因为回复正文包含“版面草案”“编排”等关键词隐藏、重分类或替换终态消息；草案工作区投影、长流程状态和内部进度过滤只能读取结构化 `processTypeLabel` / payload / details。模型没有返回合法 action 却声称将创建或执行时，运行时必须返回 `noMutation` 澄清，不得补 action。
-- **FormalPlaylistWriteAdapter 写入边界**：正式播单写入必须经 `FormalPlaylistWriteAdapter` 或同等 Agent API 写入边界；幂等 key / 版本检查 / 批量失败恢复 / 审计元数据属于写入边界；节目选择 / 顺播 / 候选确认 / 原子命令校验仍由既有业务链路负责。新增正式写入能力必须能解释是否改变旧行为；迁移任务默认不改变旧行为。
+- **FormalPlaylistWriteAdapter 写入边界**：正式播单写入必须经 `FormalPlaylistWriteAdapter` 或同等 Agent API 写入边界；幂等 key / 版本检查 / 批量失败恢复 / 审计元数据属于写入边界；delegate 抛错必须转换为结构化可重试失败，保留 pending 与正式快照且不得缓存失败。节目选择 / 顺播 / 候选确认 / 原子命令校验仍由既有业务链路负责。新增正式写入能力必须能解释是否改变旧行为；迁移任务默认不改变旧行为。
 - **整批重编授权边界**：已有正式节目进入 `full_generate` 前，用户对当前 `formal_rebuild_confirmation` 的确认必须由 Local/Agent Server 可信运行时签发任务级 `FormalOrchestrationGrant`；前台只携带不可解释的 `grantId`，不得提交完整授权声明。Grant 必须绑定 `sessionId`、`workspaceKey`、确认 pending、播单版本、草案可执行指纹、任务目标/范围与允许 intent；工作区、现场版本、草案或任务范围漂移时停止并重新确认。作用域内 mutation 不重复逐项审批，但每次正式写入仍经过 capability 与 `FormalPlaylistWriteAdapter`；首次空播单编排及独立敏感操作不得误用该 Grant。
 - **服务端迁移边界**：从 Goal 39 起，新增长程业务能力必须优先落在 `schedulingAgentRuntimeFacade` / `reactTaskRuntime` / `AgentServerRuntime` / `AgentServerSessionStore` / `HttpAgentRuntimeClient` / `FormalPlaylistWriteAdapter`；不再继续堆进 `ChatPanel.vue` 或 `DemoRuntimeFacade`。Codex、OpenClaw 等桌面 Agent 仍只是未来外部访问方，只能通过统一 CLI/API 契约复用编排内核；项目内不保留专用进程内桥，且当前不实现 CLI/skill 适配。
 

@@ -49,7 +49,7 @@ describe('LlmFormalOrchestrationDecider', () => {
     expect(result.kind === 'continue' && result.nextActions).toEqual([{ type: 'validate' }])
     const promptMessages = vi.mocked(chat).mock.calls[0]?.[0]
     expect(promptMessages?.map((message) => message.content).join('\n')).toContain('{"type":"validate"}')
-    expect(chat).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ traceLabel: 'formal_orchestration_decide', promptVersion: 'v1.4' }))
+    expect(chat).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ traceLabel: 'formal_orchestration_decide', promptVersion: 'v1.5' }))
   })
 
   /**
@@ -139,5 +139,31 @@ describe('LlmFormalOrchestrationDecider', () => {
     const decider = new LlmFormalOrchestrationDecider({ llmClient: { chat } as any })
 
     await expect(decider.decide(createInput())).resolves.toEqual({ kind: 'unable_to_decide', reason: '没有足够的顺播证据' })
+  })
+
+  it('formal-decider-v1-5: branches on zero-candidate evidence without inventing a match', async () => {
+    const input = createInput()
+    input.observations = [{
+      id: 'zero-candidate-observation', turn: 1, type: 'asset_search' as const,
+      summary: '候选源可用，但本轮两组查询均为零命中',
+      createdAt: '2026-07-18T00:00:00.000Z',
+      data: {
+        candidateCount: 0,
+        queries: ['指定主题节目', '主题相关节目'],
+        sourceEvidence: { candidates: { available: true, status: 'empty' } },
+      },
+    }]
+    let systemPrompt = ''
+    const chat = vi.fn(async (messages: Array<{ role: string; content: string }>) => {
+      systemPrompt = messages[0]?.content ?? ''
+      return { content: JSON.stringify({ kind: 'unable_to_decide', reason: '候选源可用但已穷尽明确查询，保留空缺并请用户补充条件' }) }
+    })
+    const decider = new LlmFormalOrchestrationDecider({ llmClient: { chat } as any })
+
+    await expect(decider.decide(input)).resolves.toMatchObject({ kind: 'unable_to_decide' })
+    expect(systemPrompt).toContain('candidateCount=0')
+    expect(systemPrompt).toContain('尚有未尝试且不违背用户硬条件的查询')
+    expect(systemPrompt).toContain('保留空缺')
+    expect(systemPrompt).toContain('不得伪造候选')
   })
 })

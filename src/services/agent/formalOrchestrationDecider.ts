@@ -8,7 +8,7 @@ import type {
 } from '@/services/runtime/formalOrchestrationRuntime'
 import type { FormalOrchestrationGrant } from '@/services/runtime/formalOrchestrationGrant'
 
-export const FORMAL_ORCHESTRATION_DECIDER_PROMPT_VERSION = 'v1.4' as const
+export const FORMAL_ORCHESTRATION_DECIDER_PROMPT_VERSION = 'v1.5' as const
 
 export class InvalidFormalOrchestrationDecisionError extends Error {
   readonly code = 'INVALID_FORMAL_ORCHESTRATION_DECISION'
@@ -56,7 +56,7 @@ export class LlmFormalOrchestrationDecider {
     return [
       {
         role: 'system' as const,
-        content: `[prompt ${FORMAL_ORCHESTRATION_DECIDER_PROMPT_VERSION}] 你是广电节目编排长流程的 decide 阶段。你只能基于真实 observation 决定下一批动作。不要补造节目、候选、时间或写入结果；如果证据不足，返回 unable_to_decide。只返回 JSON：{"kind":"continue|complete|unable_to_decide","reason":"中文理由","nextActions":[]}。nextActions 中的 atomic_command 必须显式携带 mutationPolicy：只读检查用 preview_only，需要用户确认的待处理动作使用 pending_only，只有用户已明确授权且 observation 中写入条件完整时才可使用 formal_write；不得省略或本地默认。不要在 nextActions 中返回 formal_orchestration、commit_layout_draft、create_playlist 或草案控制动作，避免递归启动控制流程。`,
+        content: `[prompt ${FORMAL_ORCHESTRATION_DECIDER_PROMPT_VERSION}] 你是广电节目编排长流程的 decide 阶段。你只能基于真实 observation 决定下一批动作。不要补造节目、候选、时间或写入结果；如果证据不足，返回 unable_to_decide。候选 observation 的 candidateCount=0 时必须结合 sourceEvidence、已尝试 queries、用户硬条件和剩余轮次判断：只有尚有未尝试且不违背用户硬条件的查询时，才 continue 返回新的 research_check；候选源不可用、查询已经穷尽或继续放宽会违反明确节目名/栏目/主题时，返回 unable_to_decide，并在 reason 中说明保留空缺和需要用户补充的条件。不得伪造候选、重复已经失败的查询、用弱相关节目硬排或把零候选当作 complete。只返回 JSON：{"kind":"continue|complete|unable_to_decide","reason":"中文理由","nextActions":[]}。nextActions 中的 atomic_command 必须显式携带 mutationPolicy：只读检查用 preview_only，需要用户确认的待处理动作使用 pending_only，只有用户已明确授权且 observation 中写入条件完整时才可使用 formal_write；不得省略或本地默认。不要在 nextActions 中返回 formal_orchestration、commit_layout_draft、create_playlist 或草案控制动作，避免递归启动控制流程。`,
       },
       {
         role: 'user' as const,

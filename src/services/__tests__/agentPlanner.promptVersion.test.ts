@@ -64,13 +64,51 @@ describe('AgentPlanner promptVersion 透传', () => {
     })
 
     expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
-    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.10')
+    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.11')
     expect(systemPrompt).toContain('formal_orchestration 是长流程控制动作')
     expect(systemPrompt).toContain('research_check、validate')
     expect(systemPrompt).toContain('mutationPolicy')
     expect(systemPrompt).toContain('pendingAction')
     expect(systemPrompt).toContain('不要返回 queries:[]')
     expect(systemPrompt).toContain('本地不会从')
+  })
+
+  it('agent-planner-v1-11: separates finite batch edits from overall orchestration', async () => {
+    const testCase = {
+      id: 'post9-hybrid-finite-batch-remains-composite-atomic',
+      userInput: '把今天所有看东方删掉，再把东方剧场整体后移半小时',
+      expectedDecision: '有限目标集合走复合原子命令，覆盖整表或全部空窗才走 formal_orchestration',
+      mustNotHappen: '因草案不完整把有限批量操作升级为草案完善或整体编排',
+      verification: 'system prompt 含有限目标、整体覆盖和草案门禁三段边界',
+    }
+    let systemPrompt = ''
+    const planner = new AgentPlanner({
+      chat: vi.fn(async (messages) => {
+        systemPrompt = messages[0]?.content ?? ''
+        return { content: JSON.stringify({
+          mode: 'react', actions: [],
+          reactTask: {
+            objective: '分批删除并移动明确目标节目', maxTurns: 4, batchSize: 5,
+            stopCondition: '全部明确目标完成或暴露失败',
+            nextActions: [{ type: 'validate' }],
+          },
+        }) }
+      }),
+    } as never)
+
+    await planner.plan({
+      scheduleState: {
+        playlistId: 'playlist-a', playlistType: 'tv', channelId: 'dragon', channelName: '东方卫视', date: '2026-07-18',
+        isEmpty: false, itemCount: 12, gapCount: 2, hasSelectedTimeRange: false,
+      },
+      userInput: testCase.userInput,
+      currentSchedule: [],
+    })
+
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+    expect(systemPrompt).toContain('有限、可定位的目标集合')
+    expect(systemPrompt).toContain('整张播单、全部空窗或完整目标时长')
+    expect(systemPrompt).toContain('不能因为草案缺失或不完整')
   })
 
   it('agent-planner-draft-formal-owner-v1-8: exposes pending ownership and requires clarification on owner ambiguity', async () => {

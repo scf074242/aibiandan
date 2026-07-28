@@ -504,7 +504,7 @@ AtomicCommandCapability.handle*（8 种原子命令）
 | [schedulingTaskPlanCompiler.ts](file:///./src/services/runtime/schedulingTaskPlanCompiler.ts) | 任务计划编译（batch/shift） |
 | [schedulingTaskPlanConflict.ts](file:///./src/services/runtime/schedulingTaskPlanConflict.ts) | 任务计划冲突检测 |
 | [formalPlaylistState.ts](file:///./src/services/runtime/formalPlaylistState.ts) | 正式播单快照与 Patch 计算 |
-| [formalPlaylistWriteAdapter.ts](file:///./src/services/runtime/formalPlaylistWriteAdapter.ts) | 写入边界（幂等/版本/批量保护） |
+| [formalPlaylistWriteAdapter.ts](file:///./src/services/runtime/formalPlaylistWriteAdapter.ts) | 写入边界（幂等/版本/批量保护）；delegate 异常结构化为可重试失败，保留 pending 与正式快照且不缓存失败 |
 | [foregroundAgentContextPackage.ts](file:///./src/services/runtime/foregroundAgentContextPackage.ts) | 前台上下文包（仅提供客观现场状态，不做用户意图分类） |
 | [pendingAtomicContext.ts](file:///./src/services/runtime/pendingAtomicContext.ts) | 待处理原子上下文（5 种 phase） |
 | [pendingAtomicContextService.ts](file:///./src/services/runtime/pendingAtomicContextService.ts) | 待处理上下文生命周期（TTL 10min, maxAttempts 3） |
@@ -786,7 +786,7 @@ OpenAI SDK 兼容客户端。
 
 #### `AgentPlanner`（[agentPlanner.ts](file:///./src/services/llm/agentPlanner.ts)）
 
-Agent Planner，调用 LLM 编译多动作计划；当前 system prompt 版本为 `v1.10`，正式 ReAct 首批 `research_check` 必须由模型给出非空查询或明确可检索语义标签；`formal_orchestration` 与正式 `commit_layout_draft` 必须同时返回顶层 `mode="react"` 和 `reactTask`。有顺序依赖的多动作由同一 ReAct task 逐轮执行，运行时完整保留 action，并在每轮 observation 后重新决定下一步；`create_playlist` 排在正式 action 前时先真实创建工作区，不能因后续正式 action 误报计划无效。前台恢复时旧未执行步骤标记为 `blocked/superseded`，自然语言确认则回到 planner，只有显式确认控件调用写入 API。
+Agent Planner，调用 LLM 编译多动作计划；当前 system prompt 版本为 `v1.11`，正式 ReAct 首批 `research_check` 必须由模型给出 2-6 个保留用户硬条件的受控查询；`formal_orchestration` 与正式 `commit_layout_draft` 必须同时返回顶层 `mode="react"` 和 `reactTask`。有限、可定位目标集合保持复合原子路径，覆盖整表/全部空窗/完整目标时长才进入正式长流程，所需草案不完整时先引导完善草案。有顺序依赖的多动作由同一 ReAct task 逐轮执行，运行时完整保留 action，并在每轮 observation 后重新决定下一步；`create_playlist` 排在正式 action 前时先真实创建工作区，不能因后续正式 action 误报计划无效。前台恢复时旧未执行步骤标记为 `blocked/superseded`，自然语言确认则回到 planner，只有显式确认控件调用写入 API。
 
 - `plan(input, deadline?)`：调 `llmClient.chat`（temperature 0.2, maxTokens 1100, maxRetries 1, traceLabel `agent_planner`），stage timeout 从共享 `AgentDeadline` 的剩余预算推导，并把 `AbortSignal` 传到底层请求。
 - 输出 `AgentPlan`：`mode`（single/react）+ `actions`（10 种 type）+ `reactTask` + `assistantReplyDraft`
@@ -1201,6 +1201,7 @@ layout_analysis（版面分析）
 | 服务端迁移 | [docs/agent-server-migration-plan.md](file:///./docs/agent-server-migration-plan.md) | Goal 42-49 落地记录 |
 | 方向 1 执行卡 | [docs/agent-direction-1-execution-card.md](file:///./docs/agent-direction-1-execution-card.md) | 方向 1 执行卡 |
 | 九阶段计划 | `AGENTS.md` 与当前任务执行卡 | 当前唯一阶段依据；历史下一步方向草案已归档到 `docs/archive/plans/` |
+| 九阶段后验收执行卡 | [docs/agent-post-nine-stage-acceptance-execution-card.md](file:///./docs/agent-post-nine-stage-acceptance-execution-card.md) | 真实复杂场景矩阵、黑盒状态核验与故障注入的执行依据 |
 | Browser Goal 37 修复方案 | [docs/browser-goal37-fix-proposal.md](file:///./docs/browser-goal37-fix-proposal.md) | 浏览器自动化测试失败根因分析与最小修复方案 |
 | Canonical 数据修复报告 | [docs/proposals/mock-data-audit-and-fix-proposal.md](file:///./docs/proposals/mock-data-audit-and-fix-proposal.md) | 节目库数据审计、修正结果与验证记录 |
 | 无基线顺播修复报告 | [docs/proposals/no-baseline-earliest-episode-fix-proposal.md](file:///./docs/proposals/no-baseline-earliest-episode-fix-proposal.md) | 无历史基线时最早一期选择的根因、决策与验证记录 |

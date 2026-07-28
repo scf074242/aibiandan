@@ -262,6 +262,21 @@ export class FormalPlaylistWriteAdapter {
     let result: RuntimeExecutedResult
     try {
       result = await delegatePromise
+    } catch (error) {
+      result = {
+        success: false,
+        command: input.pendingCommand.command,
+        message: '正式播单写入失败，当前播单保持不变，可以重试。',
+        error: 'formal_playlist_write_failed',
+        summary: input.pendingCommand.summary,
+        thinking: '正式写入 delegate 异常，已保留当前快照和待确认操作。',
+        explanation: error instanceof Error ? error.message : String(error),
+        details: {
+          writeError: error instanceof Error ? error.message : String(error),
+          retryable: true,
+          noMutation: true,
+        },
+      }
     } finally {
       if (cacheKey && this.inFlightByIdempotencyKey.get(cacheKey) === delegatePromise) {
         this.inFlightByIdempotencyKey.delete(cacheKey)

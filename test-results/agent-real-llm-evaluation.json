@@ -1,96 +1,364 @@
 {
-  "generatedAt": "2026-07-27T11:57:43.442Z",
-  "status": "skipped",
+  "generatedAt": "2026-07-27T13:00:54.721Z",
+  "status": "passed",
   "config": {
-    "runRequested": false,
-    "strict": false,
+    "runRequested": true,
+    "strict": true,
     "apiKeyPresent": true,
     "apiKeyUsable": true,
     "model": "deepseek-ai/DeepSeek-V4-Flash",
-    "baseURL": "https://api.siliconflow.cn/v1",
-    "skipReason": "RUN_AGENT_REAL_LLM_EVAL is not set to 1."
+    "baseURL": "https://api.siliconflow.cn/v1"
   },
   "acceptanceCoverage": [
     {
       "tag": "tv_sequence",
-      "total": 0,
-      "passed": 0,
+      "total": 2,
+      "passed": 2,
       "failed": 0,
-      "covered": false,
-      "sections": []
+      "covered": true,
+      "sections": [
+        "intent_contract",
+        "runtime_loop"
+      ]
     },
     {
       "tag": "rotation_short_clip",
-      "total": 0,
-      "passed": 0,
+      "total": 4,
+      "passed": 4,
       "failed": 0,
-      "covered": false,
-      "sections": []
+      "covered": true,
+      "sections": [
+        "intent_contract",
+        "runtime_loop"
+      ]
     },
     {
       "tag": "missing_param",
-      "total": 0,
-      "passed": 0,
+      "total": 3,
+      "passed": 3,
       "failed": 0,
-      "covered": false,
-      "sections": []
+      "covered": true,
+      "sections": [
+        "intent_contract",
+        "runtime_loop",
+        "conversation_loop"
+      ]
     },
     {
       "tag": "target_occupied",
-      "total": 0,
-      "passed": 0,
+      "total": 4,
+      "passed": 4,
       "failed": 0,
-      "covered": false,
-      "sections": []
+      "covered": true,
+      "sections": [
+        "intent_contract",
+        "runtime_loop"
+      ]
     },
     {
       "tag": "professional_refusal",
-      "total": 0,
-      "passed": 0,
+      "total": 6,
+      "passed": 6,
       "failed": 0,
-      "covered": false,
-      "sections": []
+      "covered": true,
+      "sections": [
+        "intent_contract",
+        "runtime_loop"
+      ]
     },
     {
       "tag": "pending_context",
-      "total": 0,
-      "passed": 0,
+      "total": 9,
+      "passed": 9,
       "failed": 0,
-      "covered": false,
-      "sections": []
+      "covered": true,
+      "sections": [
+        "intent_contract",
+        "runtime_loop",
+        "conversation_loop"
+      ]
     }
   ],
   "sections": [
     {
       "id": "intent_contract",
       "title": "Structured intent contract",
-      "status": "skipped",
-      "total": 0,
-      "passed": 0,
+      "status": "passed",
+      "threshold": 0.85,
+      "total": 23,
+      "passed": 23,
       "failed": 0,
-      "skippedReason": "RUN_AGENT_REAL_LLM_EVAL is not set to 1.",
-      "tagCoverage": [],
+      "passRate": 1,
+      "tagCoverage": [
+        {
+          "tag": "batch_delete",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "batch_move",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "cancel",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "confirm",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "delete",
+          "total": 2,
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "tag": "insert",
+          "total": 6,
+          "passed": 6,
+          "failed": 0
+        },
+        {
+          "tag": "missing_param",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "move",
+          "total": 3,
+          "passed": 3,
+          "failed": 0
+        },
+        {
+          "tag": "pending_context",
+          "total": 4,
+          "passed": 4,
+          "failed": 0
+        },
+        {
+          "tag": "professional_refusal",
+          "total": 3,
+          "passed": 3,
+          "failed": 0
+        },
+        {
+          "tag": "query",
+          "total": 3,
+          "passed": 3,
+          "failed": 0
+        },
+        {
+          "tag": "replace",
+          "total": 2,
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "tag": "rotation_short_clip",
+          "total": 3,
+          "passed": 3,
+          "failed": 0
+        },
+        {
+          "tag": "start_new_task",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "target_occupied",
+          "total": 2,
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "tag": "tv",
+          "total": 10,
+          "passed": 10,
+          "failed": 0
+        },
+        {
+          "tag": "tv_sequence",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "validate",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        }
+      ],
       "failures": []
     },
     {
       "id": "runtime_loop",
       "title": "Runtime preview and constraint loop",
-      "status": "skipped",
-      "total": 0,
-      "passed": 0,
+      "status": "passed",
+      "threshold": 0.8,
+      "total": 12,
+      "passed": 12,
       "failed": 0,
-      "skippedReason": "RUN_AGENT_REAL_LLM_EVAL is not set to 1.",
-      "tagCoverage": [],
+      "passRate": 1,
+      "llmCallsAttempted": 12,
+      "llmCallsSucceeded": 12,
+      "llmCallsFailed": 0,
+      "tagCoverage": [
+        {
+          "tag": "blocked",
+          "total": 5,
+          "passed": 5,
+          "failed": 0
+        },
+        {
+          "tag": "delete",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "insert",
+          "total": 4,
+          "passed": 4,
+          "failed": 0
+        },
+        {
+          "tag": "missing_param",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "move",
+          "total": 2,
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "tag": "pending_context",
+          "total": 3,
+          "passed": 3,
+          "failed": 0
+        },
+        {
+          "tag": "preview",
+          "total": 2,
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "tag": "professional_refusal",
+          "total": 3,
+          "passed": 3,
+          "failed": 0
+        },
+        {
+          "tag": "query",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "rotation_short_clip",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "target_occupied",
+          "total": 2,
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "tag": "tv_sequence",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "validate",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        }
+      ],
       "failures": []
     },
     {
       "id": "conversation_loop",
       "title": "Multi-turn pending context loop",
-      "status": "skipped",
-      "total": 0,
-      "passed": 0,
+      "status": "passed",
+      "threshold": 0.8,
+      "total": 2,
+      "passed": 2,
       "failed": 0,
-      "skippedReason": "RUN_AGENT_REAL_LLM_EVAL is not set to 1.",
+      "passRate": 1,
+      "llmCallsAttempted": 4,
+      "llmCallsSucceeded": 4,
+      "llmCallsFailed": 0,
+      "tagCoverage": [
+        {
+          "tag": "confirm",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "delete",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "insert",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "missing_param",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "tag": "pending_context",
+          "total": 2,
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "tag": "preview",
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        }
+      ],
+      "failures": []
+    },
+    {
+      "id": "formal_react_loop",
+      "title": "Formal ReAct observation and decide loop",
+      "status": "passed",
+      "threshold": 1,
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "passRate": 1,
+      "llmCallsAttempted": 2,
+      "llmCallsSucceeded": 2,
+      "llmCallsFailed": 0,
       "tagCoverage": [],
       "failures": []
     }
