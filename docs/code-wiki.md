@@ -528,7 +528,7 @@ AtomicCommandCapability.handle*（8 种原子命令）
 | [contextBuilder.ts](file:///./src/services/llm/contextBuilder.ts) | LLM 业务上下文构建 |
 | [responseParser.ts](file:///./src/services/llm/responseParser.ts) | LLM JSON 响应解析与校验 |
 | [taskClassifier.ts](file:///./src/services/llm/taskClassifier.ts) | 遗留任务分类器接口壳（LLM-only 后退化为默认模式） |
-| [agentPlanner.ts](file:///./src/services/llm/agentPlanner.ts) | Agent Planner（多动作计划，single/react） |
+| [agentPlanner.ts](file:///./src/services/llm/agentPlanner.ts) | LLM-first Agent Planner（多动作计划，single/react）；prompt `v1.14` 区分有限批量、整表编排、轮播压缩与“参考已有编单”的对象/维度澄清。 |
 | [prompts/systemPrompts.ts](file:///./src/services/llm/prompts/systemPrompts.ts) | 5 个角色系统 Prompt 常量 |
 
 ### 5.9 数据与 mock 支撑层
@@ -787,7 +787,7 @@ OpenAI SDK 兼容客户端。
 
 #### `AgentPlanner`（[agentPlanner.ts](file:///./src/services/llm/agentPlanner.ts)）
 
-Agent Planner，调用 LLM 编译多动作计划；当前 system prompt 版本为 `v1.13`，正式 ReAct 首批 `research_check` 必须由模型给出 2-6 个保留用户硬条件的受控查询；`formal_orchestration` 与正式 `commit_layout_draft` 必须同时返回顶层 `mode="react"` 和 `reactTask`。有限、可定位目标集合保持复合原子路径，覆盖整表/全部空窗/完整目标时长才进入正式长流程，所需草案不完整时先引导完善草案。轮播时长压缩先消解“减少 N 小时/压缩到 N 小时”歧义；完整队尾范围必须输出带范围与 `pending_only` 的 `batch_delete`，不得降成单条删除或直接正式写入；按策略整表压缩先调整目标时长一致的草案，禁止按平移处理或裁切节目。有顺序依赖的多动作由同一 ReAct task 逐轮执行，运行时完整保留 action，并在每轮 observation 后重新决定下一步；`create_playlist` 排在正式 action 前时先真实创建工作区，不能因后续正式 action 误报计划无效。前台恢复时旧未执行步骤标记为 `blocked/superseded`，自然语言确认则回到 planner，只有显式确认控件调用写入 API。
+Agent Planner，调用 LLM 编译多动作计划；当前 system prompt 版本为 `v1.14`，正式 ReAct 首批 `research_check` 必须由模型给出 2-6 个保留用户硬条件的受控查询；`formal_orchestration` 与正式 `commit_layout_draft` 必须同时返回顶层 `mode="react"` 和 `reactTask`。有限、可定位目标集合保持复合原子路径，覆盖整表/全部空窗/完整目标时长才进入正式长流程，所需草案不完整时先引导完善草案。轮播时长压缩先消解“减少 N 小时/压缩到 N 小时”歧义；完整队尾范围必须输出带范围与 `pending_only` 的 `batch_delete`，不得降成单条删除或直接正式写入；按策略整表压缩先调整目标时长一致的草案，禁止按平移处理或裁切节目。“参考已有编单”先确认日期/频道/工作区和版面结构、节目内容分布或顺播进度，缺少结构化参考事实时保持 noMutation。有顺序依赖的多动作由同一 ReAct task 逐轮执行，运行时完整保留 action，并在每轮 observation 后重新决定下一步；`create_playlist` 排在正式 action 前时先真实创建工作区，不能因后续正式 action 误报计划无效。前台恢复时旧未执行步骤标记为 `blocked/superseded`，自然语言确认则回到 planner，只有显式确认控件调用写入 API。
 
 整表轮播压缩的草案观察后决定由 [demoRuntimeFacade.ts](file:///./src/services/runtime/demoRuntimeFacade.ts) 承接，prompt 版本为 `v1.1`：当前正式编单、当前草案与候选 observation 一并交给 LLM，响应只能是覆盖完整目标时长的 `prepare_layout_draft` / `refine_layout_draft`。合法 action 继续走 `LayoutDraftService` 与 validator，并标记 `noFormalPlaylistWrite`；无效 decide 以 `llm_decide_unavailable` 暴露，不回退本地评分。轮播 `replaceAll` 草案允许 coverage 收缩到新 segments，电视版面仍保留原 coverage 规则。
 

@@ -79,6 +79,7 @@
 - **草案 / 正式播单状态机硬约束**：draft reference / draft pending mutation / formal playlist / formal pending mutation 四种状态必须显式声明 `owner` / `workspaceKey` / `mutationId` / `mutationPolicy`；草案 mutation 不得写入正式播单，正式播单 mutation 不得污染草案；用户未明确"按草案"时草案仅作为参考上下文，不得作为正式编排依据。
 - **历史上下文不覆盖现场事实**：当前编排单已有节目、用户当前轮明确选择、pending 状态、服务端 session 快照均为现场事实，历史编排记录只作为顺播基线推断材料，不覆盖现场事实。
 - **长流程连续写入现场**：同一正式 ReAct 请求内，首次成功写入后的后续 `loadContext` 必须读取该次最新提交结果，不得重新读取请求开始时的旧前台快照并覆盖前一轮 mutation；新请求仍以新的 session/前台正式快照重新建立事实。
+- **参考已有编单边界**：用户要求参考某张已有编单时，LLM 必须区分参考对象（日期/频道/工作区）与参考维度（版面结构/节目内容分布/连续节目进度）；缺失时追问且不修改现场。版面结构复用草案引用，顺播进度复用历史证据；正式编单内容分布只有在结构化参考事实可用时才作为草案证据，不得直接复制覆盖当前正式播单或跨工作区读取。
 - **多用户会话隔离**（后续阶段）：当前阶段仍为单会话 / 单工作区原型，但服务端 session store、LLM key、formal playlist snapshot 必须按 `sessionId` + `workspaceKey` 隔离；商用部署前必须补完多用户会话隔离、速率限制、日志脱敏与权限边界。
 
 ## Atomic Command Policy By Playlist Type

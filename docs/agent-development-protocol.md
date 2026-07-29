@@ -134,7 +134,7 @@ trace 必须能回答：命令被分到哪里、草案如何生成、检索条�
 - 用户消息与终态消息的可见性只能由结构化标签、payload 和 runtime details 决定，禁止扫描自然语言正文中的“版面草案”“编排”等词来隐藏或重分类消息。无合法 action 的执行承诺必须转为 `noMutation` 可恢复澄清，并保留空工作区或原工作区现场；该校验只检查模型输出是否越过执行事实，不得据此推断用户 intent 或补 action。
 - 意图解释器 prompt 当前为 `v2.5`，结构输出预算为 1100 tokens。字段位置兼容只允许归一化模型已明确返回的合法枚举（如误置于 `slots.queryKind` 的 `queryKind`）；不得读取用户文本来补字段、改 intent 或恢复隐藏续接协议。普通 pending 补参继续返回同一 intent 与新增 slots。
 - 正式 ReAct HTTP 入口同样执行 SSE path A + POST path B：客户端必须在提交 `/api/agent/orchestration` 前订阅当前 session，服务端将任务规划、查节目库、候选决策、checkpoint 和结构化可恢复失败投影为稳定 id 的 progress 事件；SSE 未连接或中途断流时，只能从同一 POST envelope 补回未送达事件，不得重跑 action 或重复展示。业务可恢复失败应返回 HTTP 200 + `status: failed` outcome，不得抛成 HTTP 500，也不得映射成 `completed`；旧非 ReAct 兼容入口保留原异常语义。
-- Planner prompt `v1.13` 要求正式 ReAct 首批 `research_check` 由 LLM 提供 2-6 个保留用户硬条件的受控查询，并要求 `formal_orchestration` / `commit_layout_draft` 正式执行同时携带顶层 `mode="react"` 与 `reactTask`；有限、可定位目标集合的批量操作保持复合原子路径，只有覆盖整表/全部空窗/完整目标时长才进入正式长流程。轮播“压缩 N 小时”存在减少 N 小时/压缩到 N 小时歧义时先追问；明确完整队尾范围必须输出 `batch_delete + rangeStart/rangeEnd + pending_only`，不得降成单条 `delete` 或直接 `formal_write`；整表按策略压缩则先查当前编单和候选依据，再由 observation 后的 LLM decide 生成目标时长一致的草案，确认后才正式 ReAct，禁止 `batch_move`、裁切节目或本地拼方案。有顺序依赖的多动作必须进入同一 ReAct task，逐轮根据 observation 决策。本地只拒绝空条件或不完整计划并暴露 `react_plan_invalid`，不得替模型补关键词、补第一步、过滤合法 action、并列盲目串行或回退旧编排器。
+- Planner prompt `v1.14` 要求正式 ReAct 首批 `research_check` 由 LLM 提供 2-6 个保留用户硬条件的受控查询，并要求 `formal_orchestration` / `commit_layout_draft` 正式执行同时携带顶层 `mode="react"` 与 `reactTask`；有限、可定位目标集合的批量操作保持复合原子路径，只有覆盖整表/全部空窗/完整目标时长才进入正式长流程。轮播“压缩 N 小时”存在减少 N 小时/压缩到 N 小时歧义时先追问；明确完整队尾范围必须输出 `batch_delete + rangeStart/rangeEnd + pending_only`，不得降成单条 `delete` 或直接 `formal_write`；整表按策略压缩则先查当前编单和候选依据，再由 observation 后的 LLM decide 生成目标时长一致的草案，确认后才正式 ReAct，禁止 `batch_move`、裁切节目或本地拼方案。“参考已有编单”先确认参考对象与参考维度，缺少结构化参考事实时保持 noMutation；不得假装读取或直接复制历史正式编单。有顺序依赖的多动作必须进入同一 ReAct task，逐轮根据 observation 决策。本地只拒绝空条件或不完整计划并暴露 `react_plan_invalid`，不得替模型补关键词、补第一步、过滤合法 action、并列盲目串行或回退旧编排器。
 - 合法 ReAct 计划若按顺序返回 `create_playlist` 与后续正式 action，运行时必须先真实创建工作区并记录 observation，再把后续 action 留给下一轮 decide；不得因为后续包含 `formal_orchestration` / `commit_layout_draft` 而误报 `react_plan_invalid` 或只展示命令序列。
 - 前台短请求的 ReAct 恢复必须以最新 LLM decide 为准：旧 task 中尚未执行的 pending step 只能保留为 `blocked/superseded` 审计记录，不得抢在新 action 前执行；正式长流程批次仍由 `formalOrchestrationRuntime` 按 checkpoint 追加。
 - 自然语言“确认/取消/选择”不得由 ChatPanel 正则直接调用写入 API；只有显式确认控件可以调用 `confirm_pending` / `cancel`，普通文本必须携带 pending 上下文回到 planner，由 LLM 返回结构化 `pendingAction` 或新的 intent。
@@ -145,6 +145,7 @@ trace 必须能回答：命令被分到哪里、草案如何生成、检索条�
 - 正式播单原子命令与草案完整度解耦：电视/轮播单已打开时，明确的插入、删除、移动、替换继续走 `formal_playlist` 原子链路；即使草案为空或部分完成，也不能自动升级为草案修改或整体编排。信息不足时只在原子 owner 内补参、候选选择或追问。
 - pending 状态由服务端统一补齐 `owner`、`workspaceKey`、`mutationId`、`mutationPolicy`；显式跨工作区 pending 直接拒绝，历史 session 缺字段时只允许使用已保存的 session 工作区兼容重放。
 - `formalOrchestrationDecider` prompt `v1.6` 只接收已由运行时解析的最小 Grant 摘要；作用域和写入证据完整时可返回 `formal_write`，避免整批任务内逐项重复确认。prompt 明确提供 `atomic_command` 结构，禁止需要 mutation 时只在理由中描述修改却重复 validate。零候选 observation 必须按候选源、已尝试 queries、硬条件和剩余轮次选择新查询或 `unable_to_decide`，穷尽时保留空缺。LLM 不得生成、续期或扩大 Grant；ActionAdapter、AtomicPort 与 `FormalPlaylistWriteAdapter` 继续逐次执行确定性校验。
+- `agentPlanner` prompt `v1.14` 对“参考已有编单”先澄清参考对象和参考维度。版面结构、正式节目内容分布与历史顺播进度属于不同证据源；未提供结构化参考事实时只能追问，不能假装读取、直接复制历史正式编单或绕过草案确认。
 
 对应 case 必须覆盖：
 

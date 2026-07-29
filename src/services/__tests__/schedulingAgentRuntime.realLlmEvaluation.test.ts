@@ -265,6 +265,48 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
   }, 10 * 60_000)
 
   /**
+   * case post9-reference-existing-playlist-clarifies-evidence-scope
+   * - userInput: 参考东方卫视之前那张已有编单，重新规划今天整张播单
+   * - expectedDecision: 追问可定位参考对象与版面结构/内容分布/顺播进度
+   * - mustNotHappen: 猜测历史编单、生成草案、启动正式 ReAct 或写入
+   * - verification: 真实 AgentPlanner 返回 clarify，且没有 mutation/control action
+   */
+  it('clarifies an ambiguous existing-playlist reference before planning', async () => {
+    const canonicalItems = canonicalSchedulingData.candidates.slice(0, 4)
+    expect(canonicalItems.length, 'data_fixture_missing: 需要 canonical 节目构造当前正式电视现场').toBe(4)
+    const llmClient = new LLMClient({
+      apiKey: apiKey!, baseURL, model, temperature: 0, maxTokens: 1000, timeout: 90_000,
+    })
+    const planner = new AgentPlanner({ chat: llmClient.chat.bind(llmClient) })
+    const plan = await planner.plan({
+      scheduleState: {
+        playlistId: 'reference-playlist-current', playlistType: 'tv', channelId: 'dragon', channelName: '东方卫视',
+        date: '2026-07-29', isEmpty: false, itemCount: canonicalItems.length, gapCount: 1, hasSelectedTimeRange: false,
+      },
+      userInput: '参考东方卫视之前那张已有编单，重新规划今天整张播单',
+      currentSchedule: canonicalItems.map((candidate, index) => ({
+        id: `reference-current-${candidate.id}`,
+        programId: candidate.programId,
+        programCode: candidate.programCode,
+        programName: candidate.programName,
+        instanceName: candidate.instanceName,
+        startTime: `${String(6 + index).padStart(2, '0')}:00:00`,
+        endTime: `${String(7 + index).padStart(2, '0')}:00:00`,
+        duration: 3600,
+        programType: candidate.programType,
+      })),
+    }, new AgentDeadline())
+
+    expect(plan.actions[0]).toMatchObject({ type: 'clarify' })
+    expect(plan.actions.every((action) => ![
+      'prepare_layout_draft', 'refine_layout_draft', 'commit_layout_draft', 'formal_orchestration', 'atomic_command',
+    ].includes(action.type))).toBe(true)
+    const visibleText = `${plan.assistantReplyDraft ?? ''} ${plan.actions.map((action) => action.type === 'clarify' ? action.question : '').join(' ')}`
+    expect(visibleText).toMatch(/日期|哪一天|工作区|哪张/)
+    expect(visibleText).toMatch(/版面|结构|内容|节目|顺播|进度/)
+  }, REAL_LLM_SCENARIO_TIMEOUT_MS)
+
+  /**
    * case post9-rotation-compression-staged-react
    * - userInput: 分析当前3小时轮播单，按热播优先形成压缩到2小时的方案
    * - expectedDecision: 真实 LLM 读取当前编单、草案和 research observation 后返回完整连续2小时草案

@@ -65,7 +65,7 @@ describe('AgentPlanner promptVersion 透传', () => {
     })
 
     expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
-    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.13')
+    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.14')
     expect(systemPrompt).toContain('formal_orchestration 是长流程控制动作')
     expect(systemPrompt).toContain('research_check、validate')
     expect(systemPrompt).toContain('mutationPolicy')
@@ -110,6 +110,46 @@ describe('AgentPlanner promptVersion 透传', () => {
     expect(systemPrompt).toContain('有限、可定位的目标集合')
     expect(systemPrompt).toContain('整张播单、全部空窗或完整目标时长')
     expect(systemPrompt).toContain('不能因为草案缺失或不完整')
+  })
+
+  it('post9-reference-existing-playlist-clarifies-evidence-scope: keeps ambiguous playlist references read-only', async () => {
+    const testCase = {
+      id: 'post9-reference-existing-playlist-clarifies-evidence-scope',
+      userInput: '参考东方卫视之前那张已有编单，重新规划今天整张播单',
+      expectedDecision: '先追问可定位参考对象和参考维度，再形成草案并等待确认',
+      mustNotHappen: '猜测历史编单、直接复制正式节目或绕过草案启动正式写入',
+      verification: 'system prompt 明确版面结构、内容分布、顺播进度与 noMutation 边界',
+    }
+    let systemPrompt = ''
+    const planner = new AgentPlanner({
+      chat: vi.fn(async (messages) => {
+        systemPrompt = messages[0]?.content ?? ''
+        return { content: JSON.stringify({
+          mode: 'single',
+          actions: [{ type: 'clarify', question: '请说明要参考哪一天的编单，以及参考版面结构、节目内容分布还是连续节目进度。' }],
+          assistantReplyDraft: '我需要先定位参考编单和参考维度，当前草案与正式播单不会修改。',
+        }) }
+      }),
+    } as never)
+
+    const plan = await planner.plan({
+      scheduleState: {
+        playlistId: 'playlist-current', playlistType: 'tv', channelId: 'dragon', channelName: '东方卫视', date: '2026-07-29',
+        isEmpty: false, itemCount: 4, gapCount: 1, hasSelectedTimeRange: false,
+      },
+      userInput: testCase.userInput,
+      currentSchedule: [],
+    })
+
+    expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
+    expect(plan.actions[0]).toMatchObject({ type: 'clarify' })
+    expect(systemPrompt).toContain('参考对象')
+    expect(systemPrompt).toContain('版面结构')
+    expect(systemPrompt).toContain('节目内容分布')
+    expect(systemPrompt).toContain('顺播进度')
+    expect(systemPrompt).toContain('先形成')
+    expect(systemPrompt).toContain('不得直接复制')
+    expect(systemPrompt).toContain('没有结构化参考事实时继续 clarify')
   })
 
   it('agent-planner-v1-13: routes rotation duration compression by ambiguity and scope', async () => {
@@ -160,7 +200,7 @@ describe('AgentPlanner promptVersion 透传', () => {
 
     expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
     expect(plan.actions[0]).toMatchObject({ type: 'clarify' })
-    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.13')
+    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.14')
     expect(systemPrompt).toContain('减少 2 小时')
     expect(systemPrompt).toContain('压缩到 2 小时')
     expect(systemPrompt).toContain('不能解释为 batch_move')

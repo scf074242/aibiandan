@@ -34,8 +34,9 @@ import type { AgentPendingAction } from '@/services/agent/types'
  * - v1.11：明确有限批量复数命令与整表正式编排边界，并要求候选预检提供受控查询组合
  * - v1.12：明确轮播总时长压缩的歧义澄清、有限删除与整表草案重构边界
  * - v1.13：约束轮播完整范围删除必须输出 batch_delete + pending_only，禁止正文确认与 formal_write 矛盾
+ * - v1.14：明确“参考已有编单”的对象/维度澄清与草案优先边界，禁止假装读取或直接复制历史正式编单
  */
-export const AGENT_PLANNER_PROMPT_VERSION = 'v1.13' as const
+export const AGENT_PLANNER_PROMPT_VERSION = 'v1.14' as const
 
 export type AgentPlannerAtomicIntent = 'move' | 'insert' | 'replace' | 'delete' | 'batch_move' | 'batch_delete' | 'query' | 'validate'
 
@@ -568,6 +569,8 @@ export class AgentPlanner {
       '如果新任务不是 atomic_command（例如 read_only_analysis 或草案操作），但需要结束当前 pending，在 AgentPlan 顶层返回 pendingAction:"start_new_task"。本地只依据该结构化字段处置 pending。',
       'foregroundContext.pending.owner 明确表示当前 pending 属于 layout_draft 还是 formal_playlist。用户本轮明确切换 owner 时，必须结束旧 pending：非 atomic 新任务在顶层返回 pendingAction:"start_new_task"；atomic 新任务在 atomic_command 中返回 pendingAction:"start_new_task"。不得把上一 owner 的槽位、候选或确认复用到新 owner。',
       '如果草案和正式播单同时存在，而“第二段”“那条”“删掉这个”等指代无法判断目标属于草案还是正式播单，返回 clarify 追问目标对象；不要默认选择任一 owner。',
+      '用户要求“参考某张已有编单进行编排”时，必须先确认两个事实：参考对象能否由明确日期、频道或工作区定位，以及参考维度是版面结构、节目内容分布还是连续节目顺播进度。任一事实缺失时返回 clarify，并说明当前草案和正式播单不修改；不得从“之前那张”“某某编单”等模糊表达猜参考对象。',
+      '参考版面结构应进入既有版面草案引用，参考连续节目进度应使用历史编排证据；参考某张正式编单的内容分布属于整表方案证据，只有上下文已提供可验证的参考编单事实时才可先形成草案供审看。没有结构化参考事实时继续 clarify，不得声称已读取；即使事实完整，也不得直接复制历史正式编单、让历史覆盖当前现场，或绕过草案确认启动正式写入。',
       '当你返回 atomic_command 时，如果你已经从本轮或历史上下文理解到动作、时间/队列位置、节目线索、替换线索或候选选择，必须写入 action 字段：intent、targetTime、programHint、replacementHint、candidateId、targetItemId、targetProgramName、searchAlternatives 等。不要只返回 {"type":"atomic_command"} 后让下一层重新猜。',
       '当你返回 formal_orchestration 时，必须直接给出 mode、taskKind、useLayoutDraft、targetTimeRange 和 searchKeywords；本地不会再从用户原话猜这些语义。taskKind 只能是 full_day / overall_refill / local_refill：全天重编用 full_day，补齐整张播单的全部空窗用 overall_refill，指定时段或局部范围补排用 local_refill。',
       'formal_orchestration 的 mode 与 taskKind 必须一致：full_generate 只能搭配 full_day；partial_generate 只能搭配 overall_refill 或 local_refill。local_refill 应给出 targetTimeRange；没有明确关键词时 searchKeywords 返回空数组，不要编造。',
@@ -658,6 +661,7 @@ export class AgentPlanner {
     ]
     if (input.playlistType === 'tv') {
       examples.push('电视草案定位示例：{"mode":"single","actions":[{"type":"atomic_command","intent":"insert","targetTime":"06:00:00","targetProgramName":"东方快报","programHint":"东方快报 期数最大","searchAlternatives":["东方快报 期数最大","东方快报 最新一期","东方快报"]}],"assistantReplyDraft":"我会按草案里的东方快报栏目定位时段，再按期数最大的要求去筛节目，确认可用后写入正式播单。","reasoning":"用户是在电视草案栏目里要求正式填入节目，不是修改草案。"}')
+      examples.push('参考编单澄清示例：用户说“参考东方卫视之前那张已有编单，重新规划今天整张播单”但没有明确参考日期和参考维度时，返回 {"mode":"single","actions":[{"type":"clarify","question":"请说明要参考哪一天或哪个工作区的编单，以及参考版面结构、节目内容分布还是连续节目进度。"}],"assistantReplyDraft":"我先定位参考编单和参考维度；确认前不会修改当前草案或正式播单。","reasoning":"参考事实不足，不能猜测或直接复制历史正式编单。"}')
     }
     if (input.playlistType === 'rotation') {
       examples.push('轮播完整范围删除示例：当前3小时轮播单由完整节目组成，用户说“把队尾完整的2小时内容删掉，保留第1小时”时，返回 {"mode":"single","actions":[{"type":"atomic_command","intent":"batch_delete","rangeStart":"01:00:00","rangeEnd":"03:00:00","mutationPolicy":"pending_only"}],"assistantReplyDraft":"1小时边界落在完整节目之间，我会先列出01:00到03:00的待删除节目，请你确认后再写入。","reasoning":"这是有限且边界完整的范围删除，不是单条delete、batch_move或整体重编。"}')
