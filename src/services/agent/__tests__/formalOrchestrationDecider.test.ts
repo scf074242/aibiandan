@@ -49,7 +49,8 @@ describe('LlmFormalOrchestrationDecider', () => {
     expect(result.kind === 'continue' && result.nextActions).toEqual([{ type: 'validate' }])
     const promptMessages = vi.mocked(chat).mock.calls[0]?.[0]
     expect(promptMessages?.map((message) => message.content).join('\n')).toContain('{"type":"validate"}')
-    expect(chat).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ traceLabel: 'formal_orchestration_decide', promptVersion: 'v1.5' }))
+    expect(promptMessages?.map((message) => message.content).join('\n')).toContain('atomic_command')
+    expect(chat).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ traceLabel: 'formal_orchestration_decide', promptVersion: 'v1.6' }))
   })
 
   /**

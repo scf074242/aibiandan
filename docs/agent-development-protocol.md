@@ -144,7 +144,7 @@ trace 必须能回答：命令被分到哪里、草案如何生成、检索条�
 - 已有节目整批重编的确认属于任务级授权，不属于每个原子 mutation 的重复审批。`DemoRuntimeFacade` 只可产生与当前确认 pending 对应的授权申请；Local/Agent Server 可信边界核验 `sourcePendingId` 后签发 `FormalOrchestrationGrant`，前台请求只回传 `authorizationGrantId`。Grant 绑定 session/workspace、正式播单当前版本、草案可执行指纹以及 `taskKind + objective + targetTimeRange + searchKeywords` 范围；任一现场事实漂移必须停止并要求重新确认。服务端 session/replay 保存 grantId、来源 pending 与状态，可恢复失败不得消费 Grant，任务完成后标记 consumed。
 - 正式播单原子命令与草案完整度解耦：电视/轮播单已打开时，明确的插入、删除、移动、替换继续走 `formal_playlist` 原子链路；即使草案为空或部分完成，也不能自动升级为草案修改或整体编排。信息不足时只在原子 owner 内补参、候选选择或追问。
 - pending 状态由服务端统一补齐 `owner`、`workspaceKey`、`mutationId`、`mutationPolicy`；显式跨工作区 pending 直接拒绝，历史 session 缺字段时只允许使用已保存的 session 工作区兼容重放。
-- `formalOrchestrationDecider` prompt `v1.5` 只接收已由运行时解析的最小 Grant 摘要；作用域和写入证据完整时可返回 `formal_write`，避免整批任务内逐项重复确认。零候选 observation 必须按候选源、已尝试 queries、硬条件和剩余轮次选择新查询或 `unable_to_decide`，穷尽时保留空缺。LLM 不得生成、续期或扩大 Grant；ActionAdapter、AtomicPort 与 `FormalPlaylistWriteAdapter` 继续逐次执行确定性校验。
+- `formalOrchestrationDecider` prompt `v1.6` 只接收已由运行时解析的最小 Grant 摘要；作用域和写入证据完整时可返回 `formal_write`，避免整批任务内逐项重复确认。prompt 明确提供 `atomic_command` 结构，禁止需要 mutation 时只在理由中描述修改却重复 validate。零候选 observation 必须按候选源、已尝试 queries、硬条件和剩余轮次选择新查询或 `unable_to_decide`，穷尽时保留空缺。LLM 不得生成、续期或扩大 Grant；ActionAdapter、AtomicPort 与 `FormalPlaylistWriteAdapter` 继续逐次执行确定性校验。
 
 对应 case 必须覆盖：
 
@@ -214,7 +214,8 @@ Goal 39 是前端内嵌 runtime 的最后一条能力型扩展边界。ReAct 长
 - `formalOrchestrationRuntime`：正式编排的批次 ReAct 执行内核；每批 act 后必须记录原始 observation 并调用 decider，`unable_to_decide`、decider 异常或中止必须停止并保留 checkpoint。生产请求只允许通过 runtime client 携带 `reactTask` 进入该内核；逐轮 checkpoint 写入服务端 session，按 workspace 隔离并进入 replay。未携带结构化计划时返回 `react_plan_invalid`，前台、facade 与 capability 均不得静默调用旧 `Orchestrator`。
 - `formalOrchestrationDecider`：基于 observation 的唯一 LLM decide 适配器；只返回结构化下一步，不执行 action、不补齐非法 JSON、不在模型失败时本地猜测。
 - `formalOrchestrationActionAdapter`：长流程 action 的业务执行边界；只按明确端口分发，校验 workspaceKey 和 mutationPolicy，控制动作不得递归进入 batch actor，只读端口不得报告 mutation。
-- `formalOrchestrationReadPorts`：将 ReAct 的 research/validate action 接到统一 `SchedulingDataGateway` 与 `AgentConstraintEngine`；数据源缺失和约束问题必须作为 observation 暴露，不得伪装成功或触发写入。
+- `formalOrchestrationReadPorts`：将 ReAct 的 research/validate/read_only_analysis action 接到统一 `SchedulingDataGateway` 与 `AgentConstraintEngine`；数据源缺失和约束问题必须作为 observation 暴露，不得伪装成功或触发写入。候选已有的收视率、播放量、热度分和编辑判断必须原样透传给 LLM，不得在 read port 丢失、重算或排序；只读分析必须返回可定位的当前正式节目明细。
+- 同一正式 ReAct 请求发生成功写入后，下一轮 `SchedulingDataGateway.loadContext` 必须读取本请求最近提交的正式现场；不得回到请求开始时的旧前台快照。该连续性只存在于当前请求，新请求仍从新的 session/前台快照建立上下文。
 - `formalOrchestrationAtomicPort`：将 query、pending 与 formal write 接到既有原子能力；不得复制业务规则，`formal_write` 必须经 `FormalPlaylistWriteAdapter`，停止后不得自动回滚。
 - 后续服务端迁移 adapter：LLM 调用、素材库检索、正式播单写入、会话状态和审计日志必须能从浏览器内实现迁移到服务端实现。
 

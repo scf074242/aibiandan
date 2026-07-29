@@ -4,6 +4,7 @@ import type { LayoutDraft, ScheduleState } from '@/types/orchestration'
 import type { RuntimeScheduleItem } from '@/services/runtime/schedulingAgentRuntimeFacade'
 import { canonicalSchedulingData } from '@/services/agent/canonicalSchedulingData'
 import { AgentDeadline } from '@/services/agent/agentDeadline'
+import { getAtomicCapabilities, resetAtomicCapabilities } from '@/services/atomicCapabilities'
 
 const llmClientChatMock = vi.hoisted(() => vi.fn())
 const taskClassifierClassifyMock = vi.hoisted(() => vi.fn())
@@ -62,6 +63,12 @@ vi.mock('@/services/layoutDraftFeasibilityService', () => ({
 
 import { SchedulingAgentRuntimeFacade } from '@/services/runtime/schedulingAgentRuntimeFacade'
 import { getSchedulingReactTaskRuntime } from '@/services/runtime/reactTaskRuntime'
+
+class InspectableSchedulingAgentRuntimeFacade extends SchedulingAgentRuntimeFacade {
+  buildFormalGateway(input: Parameters<SchedulingAgentRuntimeFacade['submitInstruction']>[0]) {
+    return this.buildAgentCoreDataGateway(input)
+  }
+}
 
 const createScheduleState = (overrides: Partial<ScheduleState> = {}): ScheduleState => ({
   channelId: 'rotation',
@@ -197,6 +204,7 @@ const emptySchedule = (): RuntimeScheduleItem[] => []
 describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    resetAtomicCapabilities()
     taskClassifierClassifyMock.mockImplementation(async () => {
       throw new Error('local task classifier should not handle open scheduling language')
     })
@@ -205,6 +213,69 @@ describe('SchedulingAgentRuntimeFacade ReAct task execution', () => {
       confidence: 0.1,
       reasoning: 'layout recognizer should not run before planner',
     })
+  })
+
+  /**
+   * case post9-rotation-compression-staged-react
+   * - userInput: 确认按2小时草案正式压缩当前3小时轮播单
+   * - expectedDecision: 同一 ReAct 请求第一次正式写入后，下一轮读取最近提交的5条现场并继续处理
+   * - mustNotHappen: 下一轮重新读取最初6条前台快照，导致后续删除覆盖第一次结果
+   * - verification: facade 正式 gateway commit 一次后 loadContext 与 atomic 正式现场均为5条
+   */
+  it('post9-rotation-compression-staged-react: keeps the latest formal state between ReAct writes', async () => {
+    const candidates = canonicalSchedulingData.candidates.filter((candidate) => candidate.duration === 1800).slice(0, 6)
+    expect(candidates).toHaveLength(6)
+    const currentSchedule = candidates.map((candidate, index) => ({
+      id: candidate.id,
+      programCode: candidate.programCode,
+      programName: candidate.programName,
+      startTime: `0${Math.floor(index / 2)}:${index % 2 === 0 ? '00' : '30'}:00`,
+      endTime: `0${Math.floor((index + 1) / 2)}:${(index + 1) % 2 === 0 ? '00' : '30'}:00`,
+      duration: candidate.duration,
+      programType: candidate.programType,
+      sequence: index + 1,
+    }))
+    getAtomicCapabilities().loadItems(currentSchedule)
+    const facade = new InspectableSchedulingAgentRuntimeFacade()
+    const gateway = facade.buildFormalGateway({
+      scheduleState: createScheduleState({
+        playlistId: 'rotation-compression',
+        isEmpty: false,
+        itemCount: 6,
+        gapCount: 0,
+        rotationStrategy: 'trending',
+        rotationDurationSeconds: 10_800,
+      }),
+      userInput: '确认按2小时草案正式压缩当前3小时轮播单',
+      currentSchedule,
+      history: [],
+      layoutDraftEnabled: true,
+    })
+    const initial = await gateway.loadContext({
+      userInput: '删除最低热度节目',
+      channelId: 'rotation',
+      date: '2026-03-25',
+      playlistId: 'rotation-compression',
+    })
+
+    const committed = await gateway.commitScheduleItems({
+      channelId: 'rotation',
+      date: '2026-03-25',
+      playlistId: 'rotation-compression',
+      items: initial.scheduleItems.slice(0, 5),
+      reason: 'post9:first-formal-delete',
+    })
+    const nextTurn = await gateway.loadContext({
+      userInput: '继续处理剩余节目',
+      channelId: 'rotation',
+      date: '2026-03-25',
+      playlistId: 'rotation-compression',
+    })
+
+    expect(committed.committed).toBe(true)
+    expect(getAtomicCapabilities().getAllItems()).toHaveLength(5)
+    expect(nextTurn.scheduleItems).toHaveLength(5)
+    expect(nextTurn.bundle.sources.today.source).toBe('agent_commit_cache')
   })
 
   it('replaces stale foreground steps after observation when the editor changes the target', () => {

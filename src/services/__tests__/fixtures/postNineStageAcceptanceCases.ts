@@ -86,6 +86,7 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     evidenceTestFile: 'src/services/__tests__/schedulingAgentReactTaskRuntime.test.ts',
     additionalEvidenceTestFiles: [
       'src/services/__tests__/agentServerRuntime.test.ts',
+      'src/services/runtime/__tests__/formalOrchestrationReadPorts.test.ts',
       'src/services/runtime/__tests__/formalOrchestrationRuntime.test.ts',
       'src/services/__tests__/formalPlaylistWriteAdapter.test.ts',
     ],

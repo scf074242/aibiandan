@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { AgentCapability } from '@/services/agent/types'
+import { FormalOrchestrationGrantAuthority } from '../formalOrchestrationGrant'
 import { createFormalOrchestrationAtomicPort } from '../formalOrchestrationAtomicPort'
 
 const createContext = () => ({
@@ -39,6 +40,7 @@ const createContext = () => ({
 const createPort = (
   commitScheduleItems = vi.fn(),
   capabilityRegistry?: { resolveAll: (input: any) => AgentCapability[] },
+  authorization?: ReturnType<FormalOrchestrationGrantAuthority['issue']>,
 ) => {
   const loadContext = vi.fn(async () => createContext() as any)
   const ports = createFormalOrchestrationAtomicPort({
@@ -47,6 +49,7 @@ const createPort = (
     baseInput: { userInput: '处理当前播单', channelId: 'dragon', date: '2026-07-18', playlistId: 'playlist-a', conversationId: 'session-a' },
     candidateJudge: {} as any,
     capabilityRegistry,
+    authorization,
   })
   return { atomicCommand: ports.atomicCommand!, loadContext, commitScheduleItems }
 }
@@ -136,6 +139,48 @@ describe('formal orchestration atomic port', () => {
     expect(result).toMatchObject({ noMutation: false, mutationPolicy: 'formal_write' })
     expect(result.data?.formalWrite).toMatchObject({
       boundary: 'formal-playlist-write-adapter', transport: 'agent-server', workspaceKey: 'ws-a', status: 'applied', reused: false,
+    })
+    expect(commitScheduleItems).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * case post9-rotation-compression-staged-react
+   * - userInput: 已确认整表压缩后删除低热度节目
+   * - expectedDecision: 有效整表 grant 作用域内的 delete 不再逐项确认，经 capability 与 WriteAdapter 正式写入
+   * - mustNotHappen: grant 在 atomic port 丢失；重新生成 pending；绕过 capability 或 WriteAdapter
+   * - verification: delete formal_write 返回 applied，gateway 只提交一次且没有 pendingMutation
+   */
+  it('post9-rotation-compression-staged-react: applies a granted delete without duplicate item approval', async () => {
+    const authorization = new FormalOrchestrationGrantAuthority().issue({
+      sessionId: 'session-a',
+      sourcePendingId: 'compression-confirmation',
+      workspaceKey: 'ws-a',
+      initialPlaylistVersion: 'formal-v1',
+      existingItemCount: 1,
+      mode: 'full_generate',
+    })
+    const commitScheduleItems = vi.fn(async (input: any) => ({
+      committed: true,
+      operationId: 'delete-op',
+      affectedItemIds: ['item-1'],
+      scheduleItems: input.items,
+    }))
+    const { atomicCommand } = createPort(commitScheduleItems, undefined, authorization)
+
+    const result = await atomicCommand({
+      type: 'atomic_command',
+      intent: 'delete',
+      targetItemId: 'item-1',
+      mutationPolicy: 'formal_write',
+    }, portContext)
+
+    expect(result).toMatchObject({
+      noMutation: false,
+      mutationPolicy: 'formal_write',
+      data: {
+        pendingMutation: undefined,
+        formalWrite: { boundary: 'formal-playlist-write-adapter', status: 'applied' },
+      },
     })
     expect(commitScheduleItems).toHaveBeenCalledTimes(1)
   })

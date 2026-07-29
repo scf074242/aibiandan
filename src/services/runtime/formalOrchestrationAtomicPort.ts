@@ -139,12 +139,28 @@ async function executeAtomicAction(
   const capability = capabilityMatches[0]!
 
   try {
-    const result = await capability.handle(input, {
+    const capabilityRuntime = {
       dataGateway: gateway,
       candidateJudge: options.candidateJudge,
       trace,
       deadline: options.deadline,
-    })
+    }
+    let result = await capability.handle(input, capabilityRuntime)
+    if (
+      action.mutationPolicy === 'formal_write'
+      && options.authorization
+      && result.status === 'needs_confirmation'
+      && result.decision.pendingTask
+    ) {
+      result = await capability.handle({
+        ...input,
+        pendingTask: result.decision.pendingTask,
+        interpretation: {
+          ...input.interpretation!,
+          pendingAction: 'confirm',
+        },
+      }, capabilityRuntime)
+    }
     const readOnly = action.intent === 'query' || action.intent === 'validate'
     const pendingMutation = action.mutationPolicy === 'pending_only' && result.decision.pendingTask
       ? {

@@ -1,6 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { canonicalSchedulingData } from '@/services/agent/canonicalSchedulingData'
 import { createFormalOrchestrationReadPorts } from '../formalOrchestrationReadPorts'
+
+const canonicalTrendingCandidate = canonicalSchedulingData.candidates.find((candidate) => (
+  typeof candidate.popularityScore === 'number'
+  && typeof candidate.estimatedRating === 'number'
+  && typeof candidate.playCount === 'number'
+))
+
+if (!canonicalTrendingCandidate) {
+  throw new Error('data_fixture_missing: formal ReAct trending evidence requires a canonical candidate with popularity metrics')
+}
 
 const createContext = () => ({
   channelId: 'dragon', date: '2026-07-18', playlistId: 'playlist-a', playlistType: 'tv',
@@ -27,6 +38,83 @@ const createContext = () => ({
 })
 
 describe('formal orchestration real read ports', () => {
+  /**
+   * case post9-rotation-compression-staged-react
+   * - userInput: 按热播优先把当前3小时轮播单压缩到2小时
+   * - expectedDecision: research observation 原样保留 canonical 候选的热度、收视率和播放量证据供 LLM 取舍
+   * - mustNotHappen: read port 丢弃策略证据；本地排序或重算分数；让 LLM 在无证据时猜测热播
+   * - verification: observation candidate 的三个指标与 canonical 数据严格相等，且不触发 commit
+   */
+  it('post9-rotation-compression-staged-react: preserves canonical trending evidence for the LLM decider', async () => {
+    const context = createContext()
+    context.programCandidates = [canonicalTrendingCandidate] as any
+    const commitScheduleItems = vi.fn()
+    const ports = createFormalOrchestrationReadPorts({
+      workspaceKey: 'rotation:rotation-compression',
+      dataGateway: { loadContext: vi.fn(async () => context as any), commitScheduleItems },
+      baseInput: {
+        userInput: '按热播优先把当前3小时轮播单压缩到2小时',
+        channelId: 'rotation',
+        date: '2026-07-28',
+        playlistId: 'rotation-compression',
+      },
+    })
+
+    const result = await ports.researchCheck!(
+      { type: 'research_check', queries: [canonicalTrendingCandidate.programName] },
+      { workspaceKey: 'rotation:rotation-compression', runId: 'post9-compression', turn: 1 },
+    )
+
+    expect(result.data?.candidates).toEqual([
+      expect.objectContaining({
+        id: canonicalTrendingCandidate.id,
+        popularityScore: canonicalTrendingCandidate.popularityScore,
+        estimatedRating: canonicalTrendingCandidate.estimatedRating,
+        playCount: canonicalTrendingCandidate.playCount,
+      }),
+    ])
+    expect(commitScheduleItems).not.toHaveBeenCalled()
+  })
+
+  /**
+   * case post9-rotation-compression-staged-react
+   * - userInput: 读取当前轮播单明细后决定压缩动作
+   * - expectedDecision: read_only_analysis 返回当前正式节目ID、时段和时长供下一轮 LLM 决策
+   * - mustNotHappen: action 合法但端口缺失；只返回数量不返回可定位节目；触发 commit
+   * - verification: observation 包含 canonical 现场明细且 noMutation=true
+   */
+  it('post9-rotation-compression-staged-react: exposes current playlist details through read-only analysis', async () => {
+    const context = createContext()
+    context.scheduleItems = [{
+      id: canonicalTrendingCandidate.id,
+      programId: canonicalTrendingCandidate.programId,
+      programCode: canonicalTrendingCandidate.programCode,
+      programName: canonicalTrendingCandidate.programName,
+      startTime: '2026-07-18T00:00:00',
+      endTime: '2026-07-18T00:30:00',
+      duration: canonicalTrendingCandidate.duration,
+      programType: canonicalTrendingCandidate.programType,
+      sequence: 1,
+    }] as any
+    const commitScheduleItems = vi.fn()
+    const ports = createFormalOrchestrationReadPorts({
+      workspaceKey: 'rotation:rotation-compression',
+      dataGateway: { loadContext: vi.fn(async () => context as any), commitScheduleItems },
+      baseInput: { userInput: '读取当前轮播单明细', channelId: 'rotation', date: '2026-07-18', playlistId: 'rotation-compression' },
+    })
+
+    const result = await ports.readOnlyAnalysis!(
+      { type: 'read_only_analysis', analysisKind: 'playlist_analysis' },
+      { workspaceKey: 'rotation:rotation-compression', runId: 'post9-compression', turn: 2 },
+    )
+
+    expect(result).toMatchObject({ workspaceKey: 'rotation:rotation-compression', noMutation: true, mutationPolicy: 'preview_only' })
+    expect(result.data?.scheduleItems).toEqual([
+      expect.objectContaining({ id: canonicalTrendingCandidate.id, startTime: '2026-07-18T00:00:00', duration: 1800 }),
+    ])
+    expect(commitScheduleItems).not.toHaveBeenCalled()
+  })
+
   /**
    * case formal-read-port-research-real-gateway
    * - userInput: 查“晚间新闻”和“民生新闻”候选

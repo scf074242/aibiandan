@@ -9,6 +9,12 @@ import { AgentDeadline } from '@/services/agent/agentDeadline'
 import { LlmFormalOrchestrationDecider } from '@/services/agent/formalOrchestrationDecider'
 import { canonicalSchedulingData } from '@/services/agent/canonicalSchedulingData'
 import { FormalOrchestrationRuntime } from '@/services/runtime/formalOrchestrationRuntime'
+import { FormalOrchestrationActionAdapter } from '@/services/runtime/formalOrchestrationActionAdapter'
+import { createFormalOrchestrationAtomicPort } from '@/services/runtime/formalOrchestrationAtomicPort'
+import { createFormalOrchestrationReadPorts } from '@/services/runtime/formalOrchestrationReadPorts'
+import { RuntimeSchedulingDataGateway } from '@/services/agent/runtimeSchedulingDataGateway'
+import { AgentServerRuntime } from '@/services/runtime/agentServerRuntime'
+import { AgentServerSessionStore } from '@/services/runtime/agentServerSessionStore'
 import { decideReactWholeDraft } from '@/services/runtime/reactDraftDecision'
 import { AgentPlanner, type AgentPlannerAction } from '@/services/llm/agentPlanner'
 import { isPlaceholderApiKey } from '@/services/llm/localDemoLlm'
@@ -348,6 +354,291 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
     })
     expect(passed, JSON.stringify({ result, traces }, null, 2)).toBe(true)
   }, 240_000)
+
+  /**
+   * case post9-rotation-compression-staged-react
+   * - userInput: 确认按热播优先的2小时草案正式压缩当前3小时轮播单
+   * - expectedDecision: Agent Server 签发 grant，真实 LLM 基于 canonical 热度 observation 决定正式动作，capability/WriteAdapter 写入并校验7200秒
+   * - mustNotHappen: 测试预选删除对象；重复逐项确认；绕过 capability/WriteAdapter；丢失 workspace/checkpoint/grant 状态
+   * - verification: 同一 session 完成 research→LLM decide→formal_write→validate，最终4条完整 canonical 节目、7200秒、grant=consumed
+   */
+  it('runs the granted rotation compression through a real LLM and formal write boundary', async () => {
+    const canonicalItems = canonicalSchedulingData.candidates
+      .filter((candidate) => candidate.duration === 1800 && typeof candidate.popularityScore === 'number')
+      .sort((left, right) => (right.popularityScore ?? 0) - (left.popularityScore ?? 0))
+      .slice(0, 6)
+    expect(canonicalItems.length, 'data_fixture_missing: 需要六条带热度指标的30分钟 canonical 节目').toBe(6)
+    const toClock = (seconds: number) => {
+      const hours = Math.floor(seconds / 3600).toString().padStart(2, '0')
+      const minutes = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0')
+      return `${hours}:${minutes}:00`
+    }
+    let currentItems = canonicalItems.map((candidate, index) => ({
+      id: candidate.id,
+      programId: candidate.programId,
+      programCode: candidate.programCode,
+      programName: candidate.programName,
+      instanceName: candidate.instanceName,
+      startTime: toClock(index * 1800),
+      endTime: toClock((index + 1) * 1800),
+      duration: candidate.duration,
+      programType: candidate.programType,
+      sequence: index + 1,
+    }))
+    const workspaceKey = 'rotation:rotation-compression-real'
+    const pendingId = 'post9-real-compression-confirmation'
+    const scheduleState = {
+      playlistId: 'rotation-compression-real',
+      playlistType: 'rotation' as const,
+      rotationStrategy: 'trending' as const,
+      rotationDurationSeconds: 7200,
+      channelId: 'rotation',
+      channelName: '真实压缩验收轮播单',
+      date: '2026-07-28',
+      isEmpty: false,
+      itemCount: 6,
+      gapCount: 0,
+      hasSelectedTimeRange: false,
+    }
+    const confirmedDraft = {
+      id: 'post9-real-compression-draft',
+      channelId: 'rotation',
+      date: '2026-07-28',
+      version: 1,
+      source: 'generated' as const,
+      userIntent: '按热播优先把当前3小时轮播单压缩到2小时',
+      draftKind: 'duration_segments' as const,
+      targetDurationSeconds: 7200,
+      coverage: { start: '00:00:00', end: '02:00:00' },
+      layoutReference: {
+        id: 'post9-real-compression-layout',
+        name: '已确认2小时压缩草案',
+        slots: [{
+          id: 'post9-real-compression-slot',
+          channelId: 'rotation',
+          columnId: 'post9-real-compression-column',
+          startTime: '00:00:00',
+          endTime: '02:00:00',
+        }],
+      },
+      columns: [{
+        columnId: 'post9-real-compression-column',
+        columnName: '热播内容',
+        channelId: 'rotation',
+        defaultProgramType: 'mixed',
+        source: 'generated' as const,
+        semanticLabel: '热播内容',
+      }],
+      durationSegments: [{
+        id: 'post9-real-compression-segment',
+        label: '热播内容',
+        contentHint: '按 canonical 热度证据保留完整节目',
+        targetDurationSeconds: 7200,
+        selectionPriority: 'trending' as const,
+        repeatPolicy: 'avoid_repeat' as const,
+        fallbackPolicy: 'ask_user' as const,
+      }],
+    }
+    const submitInput = {
+      userInput: '确认按刚才热播优先的2小时草案正式压缩当前3小时轮播单',
+      scheduleState,
+      currentSchedule: currentItems,
+      currentLayoutDraft: confirmedDraft,
+      history: [],
+      layoutDraftEnabled: true,
+    }
+    const dataGateway = new RuntimeSchedulingDataGateway({
+      scheduleState,
+      reader: {
+        getScheduleItems: () => currentItems,
+        getProgramCandidates: () => canonicalItems,
+        getBroadcastReadiness: () => [],
+        getHistorySchedules: () => [],
+        getLockedItemIds: () => [],
+        getBlockedTimeRanges: () => [],
+        applyScheduleItems: ({ items }) => {
+          currentItems = items.map((item) => ({ ...item }))
+        },
+      },
+    })
+    const llmClient = new LLMClient({
+      apiKey: apiKey!, baseURL, model, temperature: 0, maxTokens: 1600, timeout: 90_000,
+    })
+    const sessions = new AgentServerSessionStore()
+    const session = sessions.createSession()
+    sessions.updateSession(session.id, {
+      pendingAtomicContext: {
+        pendingId,
+        action: null,
+        phase: 'formal_rebuild_confirmation',
+        summary: '待确认按2小时热播草案重编',
+        reasoning: '当前正式轮播单已有3小时节目',
+        originalUserInput: '按热播优先把当前3小时轮播单压缩到2小时',
+        collectedUserInput: submitInput.userInput,
+        slots: {},
+        missingFields: ['selection'],
+        followUpQuestion: '确认正式执行吗？',
+        attemptCount: 0,
+        formalRebuildConfirmation: {
+          actionKind: 'formal_orchestration',
+          mode: 'full_generate',
+          existingItemCount: 6,
+          playlistType: 'rotation',
+          userInput: submitInput.userInput,
+        },
+        owner: 'formal_playlist',
+        workspaceKey,
+        mutationId: pendingId,
+        mutationPolicy: 'pending_only',
+        createdAt: '2026-07-28T00:00:00.000Z',
+        updatedAt: '2026-07-28T00:00:00.000Z',
+      },
+    })
+    const initialTask = {
+      objective: '根据 research observation 的 popularityScore 保留热度最高的4个完整节目；删除另外2个节目后执行 validate，只有正式现场恰好4条且总时长7200秒才能 complete。',
+      maxTurns: 5,
+      batchSize: 2,
+      stopCondition: '正式现场恰好4条完整节目、总时长7200秒且 validate observation 通过',
+      nextActions: [{
+        type: 'research_check' as const,
+        purpose: 'candidate_precheck' as const,
+        semanticLabel: '当前轮播全部节目热度比较',
+        queries: canonicalItems.map((candidate) => candidate.programName),
+      }],
+    }
+    const server = new AgentServerRuntime({
+      sessions,
+      runtime: {
+        submitInstruction: async () => ({
+          kind: 'orchestration' as const,
+          feedback: { content: '开始正式压缩。', processType: 'planning' as const, processTypeLabel: '任务规划' },
+          orchestrationRequest: {
+            userInput: submitInput.userInput,
+            mode: 'full_generate' as const,
+            reasoning: '用户已确认2小时草案。',
+            layoutDraft: confirmedDraft,
+            reactTask: initialTask,
+            authorizationRequest: {
+              sourcePendingId: pendingId,
+              workspaceKey,
+              mode: 'full_generate' as const,
+              existingItemCount: 6,
+            },
+          },
+        }),
+        executePendingCommand: async () => { throw new Error('unexpected pending command') },
+        resolvePendingTargetSelection: async () => { throw new Error('unexpected target selection') },
+        resolvePendingInsertRecommendation: async () => { throw new Error('unexpected recommendation') },
+        startReactOrchestration: async (request, _input, deadline, onCheckpoint) => {
+          const authorization = request.resolvedAuthorization
+          if (!authorization) throw new Error('server grant was not resolved')
+          const baseInput = {
+            userInput: request.userInput,
+            channelId: 'rotation',
+            date: '2026-07-28',
+            playlistId: 'rotation-compression-real',
+            conversationId: session.id,
+          }
+          const actionAdapter = new FormalOrchestrationActionAdapter({
+            workspaceKey,
+            authorization,
+            ports: {
+              ...createFormalOrchestrationReadPorts({ workspaceKey, dataGateway, baseInput }),
+              ...createFormalOrchestrationAtomicPort({
+                workspaceKey,
+                authorization,
+                dataGateway,
+                baseInput,
+                candidateJudge: {} as never,
+                deadline,
+              }),
+            },
+          })
+          const decider = new LlmFormalOrchestrationDecider({ llmClient, deadline, authorization })
+          const runtime = new FormalOrchestrationRuntime<AgentPlannerAction>({
+            actor: (action, context) => actionAdapter.execute(action, context),
+            decide: (input) => decider.decide(input),
+          })
+          const result = await runtime.run({
+            workspaceKey,
+            originalUserInput: request.userInput,
+            plannerTask: request.reactTask!,
+            deadline,
+            onCheckpoint,
+          })
+          return {
+            status: result.status === 'completed' ? 'completed' as const : 'failed' as const,
+            checkpointCount: result.checkpoints.length,
+            scheduleItems: currentItems,
+            failure: result.failure ? {
+              message: result.failure.message,
+              recoverableFailure: result.failure.envelope,
+              checkpointCount: result.checkpoints.length,
+            } : undefined,
+          }
+        },
+      },
+    })
+
+    const submitted = await server.submitInstruction(submitInput, session.id)
+    expect(submitted.decision?.kind).toBe('orchestration')
+    if (submitted.decision?.kind !== 'orchestration') throw new Error('expected orchestration decision')
+    const executed = await server.executeReactOrchestration(submitted.decision.orchestrationRequest, submitInput, session.id)
+    const formalItems = sessions.getSession(session.id)?.formalPlaylistSnapshot?.items ?? []
+    const checkpoints = sessions.getSession(session.id)?.formalOrchestrationCheckpoints ?? []
+    const traces = llmClient.getRecentRequestTraces().filter((trace) => trace.label === 'formal_orchestration_decide')
+    const writeObservations = checkpoints.flatMap((checkpoint) => checkpoint.observations)
+      .filter((observation) => observation.data?.formalWrite)
+    const passed = executed.result?.status === 'completed'
+      && formalItems.length === 4
+      && formalItems.reduce((total, item) => total + (item.duration ?? 0), 0) === 7200
+      && formalItems.every((item) => canonicalItems.some((candidate) => candidate.id === item.id))
+      && writeObservations.length === 2
+      && writeObservations.every((observation) => (
+        (observation.data?.formalWrite as { boundary?: string; status?: string }).boundary === 'formal-playlist-write-adapter'
+        && (observation.data?.formalWrite as { status?: string }).status === 'applied'
+      ))
+      && checkpoints.some((checkpoint) => checkpoint.actions.some((action) => action.type === 'validate'))
+      && traces.length >= 2
+      && traces.every((trace) => trace.success)
+      && sessions.getSession(session.id)?.formalOrchestrationGrant?.status === 'consumed'
+    sections.push({
+      id: 'rotation_compression_real_formal_chain',
+      title: 'Rotation compression real formal chain',
+      status: passed ? 'passed' : 'failed',
+      threshold: 1,
+      total: 1,
+      passed: passed ? 1 : 0,
+      failed: passed ? 0 : 1,
+      passRate: passed ? 1 : 0,
+      llmCallsAttempted: traces.length,
+      llmCallsSucceeded: traces.filter((trace) => trace.success).length,
+      llmCallsFailed: traces.filter((trace) => !trace.success).length,
+      tagCoverage: [{ tag: 'rotation_compression', total: 1, passed: passed ? 1 : 0, failed: passed ? 0 : 1 }],
+      failures: passed ? [] : [{
+        id: 'post9-rotation-compression-staged-react',
+        tags: ['rotation_compression'],
+        failures: [JSON.stringify({
+          status: executed.result?.status,
+          failure: executed.result?.failure,
+          formalCount: formalItems.length,
+          duration: formalItems.reduce((total, item) => total + (item.duration ?? 0), 0),
+          decisions: checkpoints.map((checkpoint) => checkpoint.decision),
+          actions: checkpoints.map((checkpoint) => checkpoint.actions),
+          writeObservations: writeObservations.length,
+          traces: traces.length,
+        })],
+      }],
+    })
+
+    expect(passed, JSON.stringify({
+      result: executed.result,
+      formalItems,
+      checkpoints,
+      grant: sessions.getSession(session.id)?.formalOrchestrationGrant,
+      traces,
+    }, null, 2)).toBe(true)
+  }, 8 * 60_000)
 
   /**
    * case formal-react-real-llm-multi-turn-decide

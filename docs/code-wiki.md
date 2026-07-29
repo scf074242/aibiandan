@@ -466,7 +466,7 @@ AtomicCommandCapability.handle*（8 种原子命令）
 | [contextBundle.ts](file:///./src/services/agent/contextBundle.ts) | SchedulingContext 转 Bundle |
 | [contextFingerprint.ts](file:///./src/services/agent/contextFingerprint.ts) | FNV-1a 哈希上下文指纹 |
 | [inMemorySchedulingDataGateway.ts](file:///./src/services/agent/inMemorySchedulingDataGateway.ts) | 内存数据网关 |
-| [runtimeSchedulingDataGateway.ts](file:///./src/services/agent/runtimeSchedulingDataGateway.ts) | 运行时数据网关 |
+| [runtimeSchedulingDataGateway.ts](file:///./src/services/agent/runtimeSchedulingDataGateway.ts) | 运行时数据网关；成功提交后检查外部 reader 是否已反映新状态，未反映时仅在当前请求内使用最近提交快照，保证 ReAct 连续 mutation 不被旧前台现场覆盖。 |
 | [runtimeSchedulingDataAdapters.ts](file:///./src/services/agent/runtimeSchedulingDataAdapters.ts) | 5 个数据适配器接口 |
 | [searchFacets.ts](file:///./src/services/agent/searchFacets.ts) | 中文领域词典 + 噪声词剔除 |
 | [time.ts](file:///./src/services/agent/time.ts) | 时间工具 |
@@ -483,7 +483,7 @@ AtomicCommandCapability.handle*（8 种原子命令）
 
 | 文件 | 职责 |
 |------|------|
-| [schedulingAgentRuntimeFacade.ts](file:///./src/services/runtime/schedulingAgentRuntimeFacade.ts) | Facade 单例，继承 DemoRuntimeFacade；正式 ReAct 返回 completed/waiting_user/cancelled/failed outcome，等待与完成结果携带正式播单工作快照，失败保留 recoverable envelope。 |
+| [schedulingAgentRuntimeFacade.ts](file:///./src/services/runtime/schedulingAgentRuntimeFacade.ts) | Facade 单例，继承 DemoRuntimeFacade；正式 ReAct 返回 completed/waiting_user/cancelled/failed outcome，等待与完成结果携带正式播单工作快照，失败保留 recoverable envelope；同一请求的后续轮次读取最近成功提交现场。 |
 | [demoRuntimeFacade.ts](file:///./src/services/runtime/demoRuntimeFacade.ts) | 运行时核心（RuntimeDecision/RuntimePendingCommand 等类型 + 主流程） |
 | [compositeInsertCandidatePreflight.ts](file:///./src/services/runtime/compositeInsertCandidatePreflight.ts) | 复合插入计划的候选硬条件预检；时长冲突阻断，单候选绑定，多候选进入选择 pending。 |
 | [agentServerRuntime.ts](file:///./src/services/runtime/agentServerRuntime.ts) | 服务端运行时核心类；`executeReactOrchestration` 按 session/workspace 执行正式长流程，持久化逐轮 checkpoint，并将任务规划、查节目库、候选决策与可恢复失败投影到 session SSE。 |
@@ -496,10 +496,10 @@ AtomicCommandCapability.handle*（8 种原子命令）
 | [formalOrchestrationRuntime.ts](file:///./src/services/runtime/formalOrchestrationRuntime.ts) | 正式编排真 ReAct 批次内核；强制 act 后 observe/decide，保存 checkpoint，失败或中止立即停止。生产请求只允许由 FormalOrchestrationCapability 携带显式 `reactTask` 接入；缺失时返回 `react_plan_invalid`，不再调用旧 Orchestrator。 |
 | [formalOrchestrationContextCompactor.ts](file:///./src/services/runtime/formalOrchestrationContextCompactor.ts) | ReAct decide 历史压缩纯函数；保留最近两轮 raw observation、全部已决动作摘要与失败原因，输出确定性压缩 trace 供 checkpoint/replay 审计。 |
 | [formalOrchestrationActionAdapter.ts](file:///./src/services/runtime/formalOrchestrationActionAdapter.ts) | ReAct action 到业务端口的执行边界；阻断控制动作递归、缺失 mutationPolicy、跨 workspace 证据和只读 mutation。 |
-| [formalOrchestrationReadPorts.ts](file:///./src/services/runtime/formalOrchestrationReadPorts.ts) | 真实 `SchedulingDataGateway` 只读端口；候选检索和约束校验形成可供下一轮 decide 的 observation，不执行 commit。 |
+| [formalOrchestrationReadPorts.ts](file:///./src/services/runtime/formalOrchestrationReadPorts.ts) | 真实 `SchedulingDataGateway` 只读端口；候选检索、当前正式播单分析和约束校验形成可供下一轮 decide 的 observation，并原样透传收视率、播放量、热度分和编辑判断，不执行 commit 或本地排序。 |
 | [formalOrchestrationAtomicPort.ts](file:///./src/services/runtime/formalOrchestrationAtomicPort.ts) | ReAct 原子 action 端口；复用原子 capability 校验，分别实现 preview、pending capture 与经 FormalPlaylistWriteAdapter 的正式写入。 |
 | [formalOrchestrationGrant.ts](file:///./src/services/runtime/formalOrchestrationGrant.ts) | 已有正式播单整批重编的可信任务级授权；签发并校验 session/workspace、播单版本、草案指纹、任务范围、TTL 与 intent，前台只传 grantId。 |
-| [formalOrchestrationDecider.ts](file:///./src/services/agent/formalOrchestrationDecider.ts) | 长流程 observation 后的 LLM decide 适配器；prompt `v1.4` 只读取当前 observation、`compactedHistory` 与运行时解析的最小 Grant 摘要，执行结构化动作校验、`mutationPolicy` 约束和非法响应失败暴露。 |
+| [formalOrchestrationDecider.ts](file:///./src/services/agent/formalOrchestrationDecider.ts) | 长流程 observation 后的 LLM decide 适配器；prompt `v1.6` 只读取当前 observation、`compactedHistory` 与运行时解析的最小 Grant 摘要，提供合法 `atomic_command` 结构并执行 `mutationPolicy` 约束和非法响应失败暴露。 |
 | [reactTaskTypes.ts](file:///./src/services/runtime/reactTaskTypes.ts) | ReAct 任务类型 |
 | [schedulingTaskPlan.ts](file:///./src/services/runtime/schedulingTaskPlan.ts) | 任务计划类型 |
 | [schedulingTaskPlanCompiler.ts](file:///./src/services/runtime/schedulingTaskPlanCompiler.ts) | 任务计划编译（batch/shift） |

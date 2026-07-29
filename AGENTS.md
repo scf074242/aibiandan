@@ -78,6 +78,7 @@
 - **pending 状态契约**：服务端保存或返回 `RuntimePendingAtomicContext` 时必须补齐 `owner` / `workspaceKey` / `mutationId` / `mutationPolicy`；显式跨工作区 pending 在进入运行时前拒绝，旧 session 重放缺少工作区字段时只能沿用已保存 session 工作区，不得猜测或覆盖。
 - **草案 / 正式播单状态机硬约束**：draft reference / draft pending mutation / formal playlist / formal pending mutation 四种状态必须显式声明 `owner` / `workspaceKey` / `mutationId` / `mutationPolicy`；草案 mutation 不得写入正式播单，正式播单 mutation 不得污染草案；用户未明确"按草案"时草案仅作为参考上下文，不得作为正式编排依据。
 - **历史上下文不覆盖现场事实**：当前编排单已有节目、用户当前轮明确选择、pending 状态、服务端 session 快照均为现场事实，历史编排记录只作为顺播基线推断材料，不覆盖现场事实。
+- **长流程连续写入现场**：同一正式 ReAct 请求内，首次成功写入后的后续 `loadContext` 必须读取该次最新提交结果，不得重新读取请求开始时的旧前台快照并覆盖前一轮 mutation；新请求仍以新的 session/前台正式快照重新建立事实。
 - **多用户会话隔离**（后续阶段）：当前阶段仍为单会话 / 单工作区原型，但服务端 session store、LLM key、formal playlist snapshot 必须按 `sessionId` + `workspaceKey` 隔离；商用部署前必须补完多用户会话隔离、速率限制、日志脱敏与权限边界。
 
 ## Atomic Command Policy By Playlist Type
@@ -141,6 +142,8 @@ Agent 架构硬约束，对齐 Codex 设计模式，避免架构缺陷反复叠�
 - **轮播时长压缩边界**：“压缩 N 小时”未明确是减少 N 小时还是压缩到 N 小时时，必须由 LLM 追问目标时长和内容取舍，正式播单保持不变；明确队尾/相对范围且边界完整时必须输出带 `rangeStart` / `rangeEnd` / `pending_only` 的 `batch_delete`，不得降成单条 `delete` 或直接 `formal_write`，边界穿过节目时不得裁切节目。按热播、收视率或内容策略覆盖整张轮播单取舍时，必须先准备或调整到目标时长一致的轮播草案，用户确认后再启动正式 ReAct 重编并校验整批重编授权。压缩不得解释为 `batch_move`。
 - **整表压缩方案阶段**：整表轮播压缩的 `draft_precheck` 必须把当前正式编单、当前草案和候选 observation 交回 LLM，由 LLM 返回覆盖完整目标时长的 `prepare_layout_draft` / `refine_layout_draft`；本地只校验连续 coverage、目标时长和草案结构，不得按候选热度排序替用户拼方案。方案阶段必须标记 `noFormalPlaylistWrite`；decide 缺失、结构无效或证据不足时返回 `llm_decide_unavailable` 可恢复失败并保留现场。
 - **候选检索与零命中边界**：LLM 必须提供保留用户硬条件的原始查询与受控改写，本地在显式轮次/查询预算内检索并记录 trace；这属于有限穷尽，不得声称无限穷尽。ReAct observation 为零候选时，decider 只能在存在未尝试且不违背硬条件的查询时继续，否则返回 `unable_to_decide`、保留空缺并说明需补充条件；禁止伪造候选、重复失败查询或把零候选当完成。
+- **候选策略证据透传**：`formalOrchestrationReadPorts` 必须将 canonical 候选已有的 `estimatedRating` / `playCount` / `popularityScore` / `editorialDecision` 原样放入 research observation，供 LLM 按收视率、热播或既有编辑判断取舍；read port 不得丢字段、重算分数、本地排序或替 LLM 选择。
+- **正式只读分析端口**：decider 合法返回 `read_only_analysis` 时，正式 ReAct 必须通过 read port 返回当前正式节目 ID、时段、时长和来源证据，且 `noMutation=true`；不得出现 prompt 允许该 action 但 capability 未配置端口。需要改变播单时，prompt 必须提供合法 `atomic_command` 结构，禁止模型只在理由中描述 mutation 却重复 validate。
 - **SSE 双路径**：path A 流式 + path B 批量回放必须并存；HTTP 模式必须保留 `onProgress` 回调接收进度事件，禁止退化为单气泡批量展示；进度消息必须包含 `查节目库` / `候选决策` 等 `processTypeLabel` 分支。
 - **流式与执行边界**：LLM token 流只用于首 token/增量体验和安全进度展示；intent、候选决策及任何 mutation 必须等待完整响应通过结构校验后才可进入 capability/write adapter。半截 JSON、断流、停止不得补齐或自动续跑。
 - **流式展示语言**：`structured_complete` 属于内部协议事件，只推进状态机与 trace，不生成“完整接收/结构校验通过”等用户气泡；前台只展示理解需求、查节目库、候选决策、写入校验等业务进度及最终真实结果。

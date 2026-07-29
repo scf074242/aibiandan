@@ -18,7 +18,7 @@ export interface FormalOrchestrationReadPortsOptions {
 
 export function createFormalOrchestrationReadPorts(
   options: FormalOrchestrationReadPortsOptions,
-): Pick<FormalOrchestrationActionPorts, 'researchCheck' | 'validate'> {
+): Pick<FormalOrchestrationActionPorts, 'researchCheck' | 'validate' | 'readOnlyAnalysis'> {
   if (!options.workspaceKey.trim()) throw new Error('Formal orchestration read ports require workspaceKey.')
   const constraintEngine = options.constraintEngine ?? new AgentConstraintEngine()
 
@@ -37,6 +37,42 @@ export function createFormalOrchestrationReadPorts(
   }
 
   return {
+    readOnlyAnalysis: async (action, portContext): Promise<FormalActionPortResult> => {
+      const context = await load({
+        ...options.baseInput,
+        userInput: `read_only_analysis:${action.analysisKind ?? 'playlist_analysis'}`,
+        interpretation: {
+          intent: 'validate',
+          confidence: 1,
+          source: 'llm',
+          reasoning: '长流程 LLM decide 请求读取当前正式播单明细。',
+        },
+      }, portContext)
+      return {
+        workspaceKey: options.workspaceKey,
+        summary: `已读取当前正式播单 ${context.scheduleItems.length} 条节目明细，未执行写入。`,
+        noMutation: true,
+        mutationPolicy: 'preview_only',
+        data: {
+          analysisKind: action.analysisKind ?? 'playlist_analysis',
+          scheduleItems: context.scheduleItems.map((item) => ({
+            id: item.id,
+            programId: item.programId,
+            programCode: item.programCode,
+            programName: item.programName,
+            startTime: item.startTime,
+            endTime: item.endTime,
+            duration: item.duration,
+            programType: item.programType,
+            sequence: item.sequence,
+          })),
+          scheduleItemCount: context.scheduleItems.length,
+          sourceEvidence: context.bundle.sources,
+          contextIdentity: context.bundle.identity,
+        },
+      }
+    },
+
     researchCheck: async (action, portContext): Promise<FormalActionPortResult> => {
       const queries = collectExplicitQueries(action)
       if (!queries.length) throw new Error('research_check requires explicit LLM-provided queries or labels.')
@@ -65,6 +101,10 @@ export function createFormalOrchestrationReadPorts(
         issueNo: candidate.issueNo,
         columnName: candidate.columnName,
         contentTags: candidate.contentTags,
+        estimatedRating: candidate.estimatedRating,
+        playCount: candidate.playCount,
+        popularityScore: candidate.popularityScore,
+        editorialDecision: candidate.editorialDecision,
         materialStatus: candidate.materialStatus,
         rightsStatus: candidate.rightsStatus,
       }))

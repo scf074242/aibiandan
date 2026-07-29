@@ -288,7 +288,10 @@ export class RuntimeSchedulingDataGateway implements SchedulingDataGateway {
       ...input,
       items: nextItems.map((item) => ({ ...item })),
     })
-    this.lastCommittedItems = this.reader.applyScheduleItems
+    const readerReflectedCommit = this.reader.applyScheduleItems
+      ? await this.readerReflectsCommittedItems(input, nextItems)
+      : false
+    this.lastCommittedItems = readerReflectedCommit
       ? null
       : nextItems.map((item) => ({ ...item }))
 
@@ -297,6 +300,26 @@ export class RuntimeSchedulingDataGateway implements SchedulingDataGateway {
       operationId: `agent_runtime_op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       affectedItemIds,
       scheduleItems: nextItems.map((item) => ({ ...item })),
+    }
+  }
+
+  private async readerReflectsCommittedItems(
+    input: { channelId: string; date: string; playlistId?: string },
+    committedItems: ScheduleItemSnapshot[],
+  ): Promise<boolean> {
+    try {
+      const reflectedItems = await this.reader.getScheduleItems({
+        userInput: '',
+        channelId: input.channelId,
+        date: input.date,
+        playlistId: input.playlistId,
+      })
+      const normalizedItems = sortScheduleItems(
+        reflectedItems.map((item, index) => this.toScheduleItemSnapshot(item, input.date, index)),
+      )
+      return buildScheduleContextFingerprint(normalizedItems) === buildScheduleContextFingerprint(committedItems)
+    } catch {
+      return false
     }
   }
 
@@ -317,7 +340,7 @@ export class RuntimeSchedulingDataGateway implements SchedulingDataGateway {
   }
 
   private shouldUseCommittedItems(): boolean {
-    return this.lastCommittedItems !== null && !this.reader.applyScheduleItems
+    return this.lastCommittedItems !== null
   }
 
   private buildSourceHints(

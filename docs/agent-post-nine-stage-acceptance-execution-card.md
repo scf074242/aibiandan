@@ -191,3 +191,11 @@
 - 两轮 checkpoint、`查节目库` 和 `候选决策` 进度均进入 session 事件；完成后正式快照包含 4 个 canonical 完整节目，总时长严格为 7200 秒，workspace 保持不变、版本更新且 grant 状态为 `consumed`。
 - 首次定向执行发现公开 replay 包只提供正式播单摘要，不能从中计算总时长；验收改为从服务端 session store 的正式快照核验明细，没有为测试扩展对外 API 或生产行为。
 - `npm run agent:check` 全部门禁通过。本轮没有暴露生产实现缺陷，因此未修改 Agent 业务代码。
+
+### 12.7 真实单次正式链路复验
+
+- 首次真实执行暴露三个生产缺口：research observation 丢失 canonical 热度/收视/播放量证据；同一 ReAct 请求后续轮次会重新读取任务启动时的旧前台快照；整表 grant 未传到 Atomic capability，合法删除仍重复要求逐项确认。
+- 修复后 read port 只原样透传 canonical 指标，不计算或排序；`RuntimeSchedulingDataGateway` 在外部 reader 尚未反映成功提交时仅为当前请求保留最近现场；grant 仍由 ActionAdapter/AtomicPort 校验 workspace、intent、状态和有效期，可信 AtomicPort 将 capability 的待确认结果续接为当前任务已确认后再经同一 capability 与 WriteAdapter 写入，普通删除行为不变。
+- 第一次完整真实 LLM 运行进一步发现 decider prompt 允许 `read_only_analysis` 但 capability 未配置端口，同时缺少 `atomic_command` 合法结构示例，模型因此只在理由中描述删除却重复 validate，最终在第五个 checkpoint 结构化失败。失败期间无正式写入，grant 保持 active，没有自动回滚或本地补动作。
+- 补齐只读播单分析端口并将 decider prompt 升级到 `v1.6` 后，同一真实 case 首次在约 124 秒内通过。将实现收敛到小模块后的第一次复验在首轮 decide 的 90 秒 deadline 超时，运行时保存 research checkpoint、0 次写入、6 条正式现场不变、grant 保持 active，并返回 `llm_decide_unavailable`；不放宽 deadline，模拟用户明确重试后约 170 秒再次通过，4 次 LLM decide 全部成功。模型基于 canonical `popularityScore` 决定两次正式删除，两次 mutation 均经 CapabilityRegistry 与 `FormalPlaylistWriteAdapter`，随后执行 validate；Agent Server 最终保存 4 条完整 canonical 节目、总时长 7200 秒，并将 grant 标记为 `consumed`。
+- 真实用例没有预选删除对象或本地生成 mutation；测试仅按 canonical 热度降序构造一个边界连续的 3 小时现场，实际删除对象由 LLM observation→decide 决定。
