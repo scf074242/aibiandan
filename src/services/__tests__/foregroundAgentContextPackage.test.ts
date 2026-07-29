@@ -8,6 +8,8 @@ import {
   formatForegroundAgentContextForPrompt,
   resolvePendingReviewLifecycle,
 } from '@/services/runtime/foregroundAgentContextPackage'
+import { canonicalSchedulingData } from '@/services/agent/canonicalSchedulingData'
+import { buildTrustedForegroundAgentContext } from '@/services/runtime/trustedForegroundAgentContext'
 
 const scheduleState: ScheduleState = {
   channelId: 'dragon',
@@ -54,6 +56,53 @@ const layoutDraft: LayoutDraft = {
 }
 
 describe('foreground agent context package', () => {
+  it('post9-reference-existing-playlist-builds-draft-from-trusted-history: exposes honest historical summary evidence', () => {
+    const historySchedules = Object.values(canonicalSchedulingData.historySchedules).flat()
+    const reference = historySchedules.find(({ date }) => date === '2026-03-24')
+    expect(reference, 'data_fixture_missing: 缺少2026-03-24 canonical历史编单').toBeDefined()
+
+    const context = buildForegroundAgentContextPackage({
+      latestUserInput: '参考3月24日编单的节目类型配比和收视表现，沿用当前版面，先生成草案',
+      scheduleState,
+      currentSchedule: scheduleItems,
+      currentLayoutDraft: layoutDraft,
+      historySchedules,
+      historySourceAvailable: true,
+    })
+
+    expect(context.referencePlaylists).toMatchObject({
+      source: 'history_schedule_reader',
+      available: true,
+    })
+    expect(context.referencePlaylists.schedules.find(({ date }) => date === '2026-03-24')).toMatchObject({
+      date: '2026-03-24',
+      itemCount: 26,
+      avgRating: 8.6,
+      detailItemCount: 1,
+      programTypes: { news: 6, news_magazine: 4, drama: 6, health: 2, commentary: 3 },
+    })
+    const prompt = formatForegroundAgentContextForPrompt(context)
+    expect(prompt).toContain('history_schedule_reader')
+    expect(prompt).toContain('"detailItemCount": 1')
+  })
+
+  it('loads reference playlist evidence through the trusted runtime boundary', async () => {
+    const context = await buildTrustedForegroundAgentContext({
+      userInput: '参考3月24日编单的内容配比，沿用当前版面先出草案',
+      scheduleState: { ...scheduleState, playlistId: 'playlist-reference-current' },
+      currentSchedule: scheduleItems,
+      currentLayoutDraft: layoutDraft,
+    })
+
+    expect(context.workspace.workspaceKey).toBe('tv:playlist-reference-current')
+    expect(context.referencePlaylists.available).toBe(true)
+    expect(context.referencePlaylists.schedules.find(({ date }) => date === '2026-03-24')).toMatchObject({
+      itemCount: 26,
+      detailItemCount: 1,
+      avgRating: 8.6,
+    })
+  })
+
   it('does not classify natural-language intent locally', () => {
     const context = buildForegroundAgentContextPackage({
       latestUserInput: '请把全天节目重新安排得更适合家庭观看',

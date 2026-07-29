@@ -321,7 +321,7 @@ describe('AgentServerRuntime migration boundary', () => {
     }))
     const session = runtime.createSession()
     const pending = runtime.submitInstruction(baseSubmitInput(testCase.userInput), session.id)
-    await Promise.resolve()
+    await vi.waitFor(() => expect(observedSignal).toBeDefined())
 
     const result = runtime.stopActiveInstruction(session.id, 'workspace-from-another-playlist')
     expect(result).toMatchObject({ stopped: false, reason: 'workspace_mismatch' })

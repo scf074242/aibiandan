@@ -35,8 +35,12 @@ import type { AgentPendingAction } from '@/services/agent/types'
  * - v1.12：明确轮播总时长压缩的歧义澄清、有限删除与整表草案重构边界
  * - v1.13：约束轮播完整范围删除必须输出 batch_delete + pending_only，禁止正文确认与 formal_write 矛盾
  * - v1.14：明确“参考已有编单”的对象/维度澄清与草案优先边界，禁止假装读取或直接复制历史正式编单
+ * - v1.15：接收可信 referencePlaylists 历史摘要，允许明确的内容配比参考先形成草案，并暴露明细不足
+ * - v1.16：沿用完整当前版面时只返回增量 refine action，由既有草案 LLM 阶段生成完整分段
+ * - v1.17：参考历史摘要的增量 action 在 userIntent 中保留选中证据，供既有草案 LLM 阶段继续使用
+ * - v1.18：沿用完整版面时仅输出LLM决定要调整的少量segments，复用既有确定性草案合并路径
  */
-export const AGENT_PLANNER_PROMPT_VERSION = 'v1.14' as const
+export const AGENT_PLANNER_PROMPT_VERSION = 'v1.18' as const
 
 export type AgentPlannerAtomicIntent = 'move' | 'insert' | 'replace' | 'delete' | 'batch_move' | 'batch_delete' | 'query' | 'validate'
 
@@ -159,6 +163,11 @@ const normalizeTimeRange = (value: unknown): { start: string; end: string } | un
 
 const buildPlannerForegroundContext = (contextPackage?: ForegroundAgentContextPackage) => {
   if (!contextPackage) return undefined
+  const referencePlaylists = contextPackage.referencePlaylists ?? {
+    source: 'history_schedule_reader' as const,
+    available: false,
+    schedules: [],
+  }
   return {
     scenario: contextPackage.scenario,
     workspace: {
@@ -178,6 +187,12 @@ const buildPlannerForegroundContext = (contextPackage?: ForegroundAgentContextPa
       segmentCount: contextPackage.layoutDraft.segmentCount,
       completeness: contextPackage.layoutDraft.completeness,
       segments: contextPackage.layoutDraft.segments?.slice(0, 12),
+    },
+    referencePlaylists: {
+      source: referencePlaylists.source,
+      available: referencePlaylists.available,
+      issue: referencePlaylists.issue,
+      schedules: referencePlaylists.schedules.slice(0, 8),
     },
     review: contextPackage.review
       ? {
@@ -570,7 +585,9 @@ export class AgentPlanner {
       'foregroundContext.pending.owner 明确表示当前 pending 属于 layout_draft 还是 formal_playlist。用户本轮明确切换 owner 时，必须结束旧 pending：非 atomic 新任务在顶层返回 pendingAction:"start_new_task"；atomic 新任务在 atomic_command 中返回 pendingAction:"start_new_task"。不得把上一 owner 的槽位、候选或确认复用到新 owner。',
       '如果草案和正式播单同时存在，而“第二段”“那条”“删掉这个”等指代无法判断目标属于草案还是正式播单，返回 clarify 追问目标对象；不要默认选择任一 owner。',
       '用户要求“参考某张已有编单进行编排”时，必须先确认两个事实：参考对象能否由明确日期、频道或工作区定位，以及参考维度是版面结构、节目内容分布还是连续节目顺播进度。任一事实缺失时返回 clarify，并说明当前草案和正式播单不修改；不得从“之前那张”“某某编单”等模糊表达猜参考对象。',
-      '参考版面结构应进入既有版面草案引用，参考连续节目进度应使用历史编排证据；参考某张正式编单的内容分布属于整表方案证据，只有上下文已提供可验证的参考编单事实时才可先形成草案供审看。没有结构化参考事实时继续 clarify，不得声称已读取；即使事实完整，也不得直接复制历史正式编单、让历史覆盖当前现场，或绕过草案确认启动正式写入。',
+      '参考版面结构应进入既有版面草案引用，参考连续节目进度应使用历史编排证据；参考某张正式编单的内容分布属于整表方案证据，只有 foregroundContext.referencePlaylists 中存在日期匹配且 available=true 的结构化事实时，才可结合当前版面先形成草案供审看。referencePlaylists.itemCount 是摘要声明的条目数，detailItemCount 才是实际可见明细数；不得把摘要缺失的明细补造出来。没有结构化参考事实时继续 clarify，不得声称已读取；即使事实完整，也不得直接复制历史正式编单、让历史覆盖当前现场，或绕过草案确认启动正式写入。',
+      '当用户明确“沿用当前版面”，且 foregroundContext.layoutDraft.available=true、completeness.status="complete" 时，参考历史内容配比的方案应返回 refine_layout_draft，并只在 segments 中输出你决定需要调整的1-6个现有时段；start/end 必须复用 currentDraft 对应边界，ignoreExistingLayout 不得为 true。不要重复输出整张版面的全部 segments。既有 LayoutDraftService 只把这些LLM决定的时段合并回完整当前草案，未提及的时段原样保留；本地不会决定改哪些内容。',
+      '上述 refine_layout_draft.userIntent 必须原样摘录所选 referencePlaylists 摘要中的 date、itemCount、programTypes、avgRating 和 detailItemCount，并说明只参考汇总配比、不逐条复刻；不得修改这些事实值。该结构化 userIntent 会传给下一草案 LLM 阶段，避免历史证据在阶段之间丢失。',
       '当你返回 atomic_command 时，如果你已经从本轮或历史上下文理解到动作、时间/队列位置、节目线索、替换线索或候选选择，必须写入 action 字段：intent、targetTime、programHint、replacementHint、candidateId、targetItemId、targetProgramName、searchAlternatives 等。不要只返回 {"type":"atomic_command"} 后让下一层重新猜。',
       '当你返回 formal_orchestration 时，必须直接给出 mode、taskKind、useLayoutDraft、targetTimeRange 和 searchKeywords；本地不会再从用户原话猜这些语义。taskKind 只能是 full_day / overall_refill / local_refill：全天重编用 full_day，补齐整张播单的全部空窗用 overall_refill，指定时段或局部范围补排用 local_refill。',
       'formal_orchestration 的 mode 与 taskKind 必须一致：full_generate 只能搭配 full_day；partial_generate 只能搭配 overall_refill 或 local_refill。local_refill 应给出 targetTimeRange；没有明确关键词时 searchKeywords 返回空数组，不要编造。',
@@ -662,6 +679,7 @@ export class AgentPlanner {
     if (input.playlistType === 'tv') {
       examples.push('电视草案定位示例：{"mode":"single","actions":[{"type":"atomic_command","intent":"insert","targetTime":"06:00:00","targetProgramName":"东方快报","programHint":"东方快报 期数最大","searchAlternatives":["东方快报 期数最大","东方快报 最新一期","东方快报"]}],"assistantReplyDraft":"我会按草案里的东方快报栏目定位时段，再按期数最大的要求去筛节目，确认可用后写入正式播单。","reasoning":"用户是在电视草案栏目里要求正式填入节目，不是修改草案。"}')
       examples.push('参考编单澄清示例：用户说“参考东方卫视之前那张已有编单，重新规划今天整张播单”但没有明确参考日期和参考维度时，返回 {"mode":"single","actions":[{"type":"clarify","question":"请说明要参考哪一天或哪个工作区的编单，以及参考版面结构、节目内容分布还是连续节目进度。"}],"assistantReplyDraft":"我先定位参考编单和参考维度；确认前不会修改当前草案或正式播单。","reasoning":"参考事实不足，不能猜测或直接复制历史正式编单。"}')
+      examples.push('参考历史配比草案示例：foregroundContext.referencePlaylists 中有用户明确日期的摘要、当前草案完整且用户要求沿用当前版面时，返回 {"mode":"single","actions":[{"type":"refine_layout_draft","userIntent":"参考date=2026-03-24的历史摘要：itemCount=26，programTypes={news:6,news_magazine:4,drama:6,health:2,commentary:3}，avgRating=8.6，detailItemCount=1；只参考汇总配比和收视表现，沿用当前版面，不逐条复刻","semanticLabel":"参考历史内容配比与收视表现","segments":[{"start":"06:00:00","end":"07:00:00","semanticLabel":"强化新闻内容","programTypeHint":"news"}]}],"assistantReplyDraft":"我会沿用当前版面，只调整草案中需要变化的时段；正式播单保持不变。","reasoning":"历史摘要可验证，未列出的当前版面时段原样保留。"}。segments只列你决定调整的1-6段，不得输出全部版面。若 itemCount 大于 detailItemCount，只能参考汇总配比，不能声称逐条读取或复刻完整历史编单。')
     }
     if (input.playlistType === 'rotation') {
       examples.push('轮播完整范围删除示例：当前3小时轮播单由完整节目组成，用户说“把队尾完整的2小时内容删掉，保留第1小时”时，返回 {"mode":"single","actions":[{"type":"atomic_command","intent":"batch_delete","rangeStart":"01:00:00","rangeEnd":"03:00:00","mutationPolicy":"pending_only"}],"assistantReplyDraft":"1小时边界落在完整节目之间，我会先列出01:00到03:00的待删除节目，请你确认后再写入。","reasoning":"这是有限且边界完整的范围删除，不是单条delete、batch_move或整体重编。"}')

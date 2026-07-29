@@ -65,7 +65,7 @@ describe('AgentPlanner promptVersion 透传', () => {
     })
 
     expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
-    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.14')
+    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.18')
     expect(systemPrompt).toContain('formal_orchestration 是长流程控制动作')
     expect(systemPrompt).toContain('research_check、validate')
     expect(systemPrompt).toContain('mutationPolicy')
@@ -152,6 +152,57 @@ describe('AgentPlanner promptVersion 透传', () => {
     expect(systemPrompt).toContain('没有结构化参考事实时继续 clarify')
   })
 
+  it('post9-reference-existing-playlist-builds-draft-from-trusted-history: gives the LLM honest reference evidence', async () => {
+    let systemPrompt = ''
+    let userPrompt = ''
+    const planner = new AgentPlanner({
+      chat: vi.fn(async (messages) => {
+        systemPrompt = messages[0]?.content ?? ''
+        userPrompt = messages[1]?.content ?? ''
+        return { content: JSON.stringify({
+          mode: 'single',
+          actions: [{
+            type: 'refine_layout_draft',
+            userIntent: '参考2026-03-24内容配比和收视表现，沿用当前版面生成草案',
+            semanticLabel: '参考历史内容配比的当日草案',
+          }],
+          assistantReplyDraft: '我只更新当前草案，正式播单保持不变。',
+        }) }
+      }),
+    } as never)
+
+    const plan = await planner.plan({
+      scheduleState: {
+        playlistId: 'playlist-current', playlistType: 'tv', channelId: 'dragon', channelName: '东方卫视', date: '2026-03-25',
+        isEmpty: false, itemCount: 4, gapCount: 1, hasSelectedTimeRange: false,
+      },
+      userInput: '参考3月24日东方卫视编单的节目类型配比和收视表现，沿用当前版面，先生成今天的整表草案给我看，不要写正式播单',
+      currentSchedule: [],
+      contextPackage: {
+        scenario: 'layout_reference',
+        workspace: { workspaceKey: 'tv:playlist-current', playlistId: 'playlist-current', playlistType: 'tv', channelName: '东方卫视', date: '2026-03-25', itemCount: 4, gapCount: 1, scheduleSummary: [] },
+        layoutDraft: { available: true, referencedByCurrentTask: false, completeness: { status: 'complete' }, segments: [] },
+        referencePlaylists: {
+          source: 'history_schedule_reader', available: true,
+          schedules: [{ date: '2026-03-24', itemCount: 26, programTypes: { news: 6, news_magazine: 4, drama: 6, health: 2, commentary: 3 }, avgRating: 8.6, detailItemCount: 1, items: [{ id: 'history-dragon-20260324-112-004', programName: '品质剧场：纵有疾风起 第4集', startTime: '09:30:00', endTime: '10:15:00', duration: 2700, programType: 'drama' }] }],
+        },
+        review: null, pending: null, reactTask: { active: false }, allowedActions: ['refine_layout_draft'],
+      } as never,
+    })
+
+    expect(plan.actions[0]).toMatchObject({ type: 'refine_layout_draft' })
+    expect(systemPrompt).toContain('referencePlaylists')
+    expect(systemPrompt).toContain('detailItemCount')
+    expect(systemPrompt).toContain('只在 segments 中输出你决定需要调整的1-6个现有时段')
+    expect(systemPrompt).toContain('未提及的时段原样保留')
+    expect(systemPrompt).toContain('refine_layout_draft.userIntent')
+    expect(systemPrompt).toContain('detailItemCount=1')
+    const plannerInput = JSON.parse(userPrompt)
+    expect(plannerInput.foregroundContext.referencePlaylists.schedules[0]).toMatchObject({
+      date: '2026-03-24', itemCount: 26, avgRating: 8.6, detailItemCount: 1,
+    })
+  })
+
   it('agent-planner-v1-13: routes rotation duration compression by ambiguity and scope', async () => {
     const testCase = {
       id: 'post9-rotation-compression-routes-by-scope',
@@ -200,7 +251,7 @@ describe('AgentPlanner promptVersion 透传', () => {
 
     expect(testCase).toMatchObject({ expectedDecision: expect.any(String), mustNotHappen: expect.any(String), verification: expect.any(String) })
     expect(plan.actions[0]).toMatchObject({ type: 'clarify' })
-    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.14')
+    expect(AGENT_PLANNER_PROMPT_VERSION).toBe('v1.18')
     expect(systemPrompt).toContain('减少 2 小时')
     expect(systemPrompt).toContain('压缩到 2 小时')
     expect(systemPrompt).toContain('不能解释为 batch_move')

@@ -75,6 +75,23 @@ export const postNineStageAcceptanceCases: PostNineStageAcceptanceCase[] = [
     additionalEvidenceTestFiles: ['src/services/__tests__/schedulingAgentRuntime.realLlmEvaluation.test.ts'],
   },
   {
+    id: 'post9-reference-existing-playlist-builds-draft-from-trusted-history',
+    userInput: '参考3月24日东方卫视编单的节目类型配比和收视表现，沿用当前版面，先生成今天的整表草案给我看，不要写正式播单',
+    expectedDecision: '可信运行时注入当前频道可访问的3月24日历史编单摘要；LLM基于明确日期、内容配比维度和当前版面返回整表草案，草案阶段保持正式播单不变',
+    mustNotHappen: '本地从用户文本解析日期或选择历史编单；把仅有1条明细伪装成26条完整编单；直接复制历史节目；绕过草案审看进入正式写入',
+    verification: 'context package 暴露 canonical 历史摘要和真实明细数量；planner user prompt 收到可信证据；真实 LLM 返回 prepare/refine_layout_draft 且不返回正式 mutation',
+    playlistModel: 'tv', surface: 'planner_boundary', fault: 'none',
+    canonicalFixture: 'canonicalSchedulingData.historySchedules 中2026-03-24的26条摘要、类型配比、平均收视率和1条真实明细',
+    initialState: '2026-03-25东方卫视工作区已有当前版面草案，正式播单保持当前现场；用户明确只参考前一日内容配比和收视表现',
+    expectedFormalState: '只更新当前工作区草案；用户确认并启动正式ReAct前正式播单版本与条目保持不变',
+    evidenceTestFile: 'src/services/__tests__/foregroundAgentContextPackage.test.ts',
+    additionalEvidenceTestFiles: [
+      'src/services/__tests__/agentPlanner.promptVersion.test.ts',
+      'src/services/__tests__/schedulingAgentReferencePlaylistJourney.test.ts',
+      'src/services/__tests__/schedulingAgentRuntime.realLlmEvaluation.test.ts',
+    ],
+  },
+  {
     id: 'post9-rotation-compression-routes-by-scope',
     userInput: '把当前3小时轮播单压缩2小时',
     expectedDecision: '歧义表达先澄清目标时长与内容取舍；明确队尾完整范围时走 batch_delete；按热播整表压缩到2小时则先完善2小时草案再进入正式 ReAct',

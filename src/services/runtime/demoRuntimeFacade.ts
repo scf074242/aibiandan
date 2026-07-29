@@ -8393,7 +8393,9 @@ export class DemoRuntimeFacade {
       : input.scheduleState.playlistType === 'rotation'
         ? input.scheduleState.rotationDurationSeconds ?? input.currentLayoutDraft?.targetDurationSeconds
         : undefined
-    const userIntent = typeof suggested.userIntent === 'string' && suggested.userIntent.trim() ? suggested.userIntent.trim() : input.userInput
+    const userIntent = (structuredSegments?.length ?? 0) > 0 && typeof suggested.userIntent === 'string' && suggested.userIntent.trim()
+      ? suggested.userIntent.trim()
+      : input.userInput
     const ignoreExistingLayout = suggested.ignoreExistingLayout === true
     let draft: LayoutDraft
     let sourceLabel = '已根据你的要求生成版面草案。'
@@ -8404,7 +8406,7 @@ export class DemoRuntimeFacade {
       refinedExistingDraft = true
       const baseDraft = input.currentLayoutDraft ?? this.resolveExistingLayoutDraft(input, userIntent, false)?.draft
       if (!baseDraft) return { kind: 'message', feedback: createFeedback('当前还没有可微调的版面草案，请先生成一份草案再继续调整。', 'planning', '版面草案', { explanation: classification.reasoning }) }
-      const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, playlistType: input.scheduleState.playlistType, targetDurationSeconds: rotationDurationSeconds, currentDraft: baseDraft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments, replaceAll: ignoreExistingLayout }, input.deadline)
+      const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: userIntent, playlistType: input.scheduleState.playlistType, targetDurationSeconds: rotationDurationSeconds, currentDraft: baseDraft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments, replaceAll: ignoreExistingLayout }, input.deadline)
       const specValidation = this.layoutDraftValidator.validateSpec(spec)
       const specStructuralErrors = specValidation.errors.filter((issue) => issue.code !== 'segment_gap')
       if (specStructuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('版面草案调整失败，请补充更明确的时段或内容要求。', classification.reasoning, { errors: specStructuralErrors, warnings: specValidation.warnings })
@@ -8423,7 +8425,7 @@ export class DemoRuntimeFacade {
           : null
       if (existing && this.shouldApplyIntentOnExistingDraft(classification, existing.draft)) {
         refinedExistingDraft = true
-        const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, playlistType: input.scheduleState.playlistType, targetDurationSeconds: rotationDurationSeconds, currentDraft: existing.draft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments, replaceAll: ignoreExistingLayout }, input.deadline)
+        const spec = await this.layoutDraftService.refineSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: userIntent, playlistType: input.scheduleState.playlistType, targetDurationSeconds: rotationDurationSeconds, currentDraft: existing.draft, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments, replaceAll: ignoreExistingLayout }, input.deadline)
         const specValidation = this.layoutDraftValidator.validateSpec(spec)
         const specStructuralErrors = specValidation.errors.filter((issue) => issue.code !== 'segment_gap')
         if (specStructuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('基于当前版面参考生成调整方案失败，请补充更明确的时段或内容要求。', classification.reasoning, { errors: specStructuralErrors, warnings: specValidation.warnings })
@@ -8438,7 +8440,7 @@ export class DemoRuntimeFacade {
         warnings = existing.draft.warnings ?? []
         sourceLabel = existing.label
       } else {
-        const spec = await this.layoutDraftService.generateSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: input.userInput, playlistType: input.scheduleState.playlistType, targetDurationSeconds: rotationDurationSeconds, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments }, input.deadline)
+        const spec = await this.layoutDraftService.generateSpec({ channelId: input.scheduleState.channelId, channelName: input.scheduleState.channelName, date: input.scheduleState.date, userInput: userIntent, playlistType: input.scheduleState.playlistType, targetDurationSeconds: rotationDurationSeconds, coverage: suggested.targetTimeRange, semanticLabel: suggested.semanticLabel, programTypeHint: suggested.programTypeHint, segments: structuredSegments }, input.deadline)
         const specValidation = this.layoutDraftValidator.validateSpec(spec)
         const specStructuralErrors = specValidation.errors.filter((issue) => issue.code !== 'segment_gap')
         if (specStructuralErrors.length > 0) return this.buildLayoutDraftValidationDecision('版面草案生成失败，请补充更明确的时段或内容要求。', classification.reasoning, { errors: specStructuralErrors, warnings: specValidation.warnings })

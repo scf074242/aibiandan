@@ -27,6 +27,7 @@ import { buildScheduleWorkspaceSummary, resolveForegroundWorkspaceKey } from './
 import { FormalPlaylistWriteAdapter } from './formalPlaylistWriteAdapter'
 import { buildFormalWriteContext } from '@/services/agent/mutationPolicy'
 import { FormalOrchestrationGrantAuthority } from './formalOrchestrationGrant'
+import { buildTrustedForegroundAgentContext } from './trustedForegroundAgentContext'
 
 export {
   summarizeRuntimeCommand,
@@ -162,8 +163,12 @@ export class LocalAgentRuntimeClient implements AgentRuntimeClient {
       : {
           workspaceKey,
         }
-    const decision = await this.runtime.submitInstruction(input)
-    return this.issueLocalFormalRebuildGrant(decision, input)
+    const trustedInput = {
+      ...input,
+      foregroundContextPackage: await buildTrustedForegroundAgentContext(input),
+    }
+    const decision = await this.runtime.submitInstruction(trustedInput)
+    return this.issueLocalFormalRebuildGrant(decision, trustedInput)
   }
 
   private issueLocalFormalRebuildGrant(decision: RuntimeDecision, input: RuntimeSubmitInput): RuntimeDecision {

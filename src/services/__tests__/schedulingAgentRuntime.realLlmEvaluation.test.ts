@@ -17,6 +17,10 @@ import { AgentServerRuntime } from '@/services/runtime/agentServerRuntime'
 import { AgentServerSessionStore } from '@/services/runtime/agentServerSessionStore'
 import { decideReactWholeDraft } from '@/services/runtime/reactDraftDecision'
 import { AgentPlanner, type AgentPlannerAction } from '@/services/llm/agentPlanner'
+import { buildTrustedForegroundAgentContext } from '@/services/runtime/trustedForegroundAgentContext'
+import { LayoutDraftService } from '@/services/layoutDraftService'
+import { LayoutDraftValidator } from '@/services/layoutDraftValidator'
+import { LayoutDraftCompiler } from '@/services/layoutDraftCompiler'
 import { isPlaceholderApiKey } from '@/services/llm/localDemoLlm'
 import { buildAgentRealLlmEvaluationCases } from './fixtures/agentRealLlmEvaluationCases'
 import {
@@ -304,6 +308,95 @@ describe.skipIf(!shouldRunRealLlm || !hasUsableApiKey)('SchedulingAgentRuntime r
     const visibleText = `${plan.assistantReplyDraft ?? ''} ${plan.actions.map((action) => action.type === 'clarify' ? action.question : '').join(' ')}`
     expect(visibleText).toMatch(/日期|哪一天|工作区|哪张/)
     expect(visibleText).toMatch(/版面|结构|内容|节目|顺播|进度/)
+  }, REAL_LLM_SCENARIO_TIMEOUT_MS)
+
+  /**
+   * case post9-reference-existing-playlist-builds-draft-from-trusted-history
+   * - userInput: 参考3月24日历史编单的内容配比和收视表现，沿用当前版面先出草案
+   * - expectedDecision: 可信上下文提供canonical历史摘要，真实LLM只返回草案动作
+   * - mustNotHappen: 把26条摘要伪装成26条明细、直接复制历史节目或启动正式写入
+   * - verification: referencePlaylists.detailItemCount=1，action为prepare/refine_layout_draft
+   */
+  it('builds a draft plan from trusted historical summary evidence', async () => {
+    const layoutReference = canonicalSchedulingData.layouts['dragon_2026-03-25']
+    expect(layoutReference, 'data_fixture_missing: 缺少2026-03-25东方卫视canonical版面').toBeDefined()
+    const columns = layoutReference!.slots.map((slot) => {
+      const column = canonicalSchedulingData.columns.find(({ columnId }) => columnId === slot.columnId)
+      expect(column, `data_fixture_missing: 缺少canonical栏目 ${slot.columnId}`).toBeDefined()
+      return {
+        columnId: column!.columnId,
+        columnName: column!.columnName,
+        channelId: column!.channelId,
+        defaultProgramType: column!.defaultProgramType,
+        source: 'default' as const,
+        semanticLabel: column!.columnName,
+        draftConstraintKind: column!.draftConstraintKind,
+      }
+    })
+    const scheduleState = {
+      playlistId: 'reference-history-current', playlistType: 'tv' as const, channelId: 'dragon', channelName: '东方卫视',
+      date: '2026-03-25', isEmpty: false, itemCount: 0, gapCount: 19, hasSelectedTimeRange: false,
+    }
+    const currentLayoutDraft = {
+      id: 'reference-history-draft', channelId: 'dragon', date: '2026-03-25', source: 'channel_default' as const,
+      userIntent: '沿用当前频道版面', coverage: { start: '06:00:00', end: '23:59:59' },
+      layoutReference: layoutReference!, columns,
+    }
+    const userInput = '参考3月24日东方卫视编单的节目类型配比和收视表现，沿用当前版面，先生成今天的整表草案给我看，不要写正式播单'
+    const contextPackage = await buildTrustedForegroundAgentContext({
+      userInput, scheduleState, currentSchedule: [], currentLayoutDraft,
+    })
+    expect(contextPackage.referencePlaylists.schedules.find(({ date }) => date === '2026-03-24')).toMatchObject({
+      itemCount: 26, detailItemCount: 1, avgRating: 8.6,
+    })
+    const llmClient = new LLMClient({
+      apiKey: apiKey!, baseURL, model, temperature: 0, maxTokens: 1600, timeout: 90_000,
+    })
+    const planner = new AgentPlanner({ chat: llmClient.chat.bind(llmClient) })
+    const plannerInput = {
+      scheduleState, userInput, currentSchedule: [], currentLayoutDraft, contextPackage,
+    }
+    let activeDeadline = new AgentDeadline()
+    const firstPlan = await planner.plan(plannerInput, activeDeadline)
+    // 模拟用户看到可恢复超时后明确“再试一次”；使用新请求 deadline，不在后台自动续跑。
+    if (firstPlan.llmFailure?.canRetry) activeDeadline = new AgentDeadline()
+    const plan = firstPlan.llmFailure?.canRetry ? await planner.plan(plannerInput, activeDeadline) : firstPlan
+
+    expect(plan.actions[0]?.type === 'prepare_layout_draft' || plan.actions[0]?.type === 'refine_layout_draft', JSON.stringify(plan, null, 2)).toBe(true)
+    expect(plan.actions.some((action) => ['formal_orchestration', 'commit_layout_draft', 'atomic_command'].includes(action.type))).toBe(false)
+    expect(`${plan.assistantReplyDraft ?? ''} ${plan.reasoning ?? ''}`).toMatch(/草案/)
+    const draftAction = plan.actions[0]!
+    expect(draftAction.type).toBe('refine_layout_draft')
+    if (draftAction.type !== 'refine_layout_draft') throw new Error('expected refine_layout_draft')
+    expect(draftAction.segments?.length).toBeGreaterThan(0)
+    expect(draftAction.segments?.length).toBeLessThan(layoutReference!.slots.length)
+    expect(draftAction.userIntent).toContain('2026-03-24')
+    expect(draftAction.userIntent).toContain('8.6')
+    expect(draftAction.userIntent).toContain('detailItemCount=1')
+
+    const spec = await new LayoutDraftService(llmClient).refineSpec({
+      channelId: scheduleState.channelId,
+      channelName: scheduleState.channelName,
+      date: scheduleState.date,
+      playlistType: scheduleState.playlistType,
+      currentDraft: currentLayoutDraft,
+      userInput: draftAction.userIntent ?? userInput,
+      semanticLabel: draftAction.semanticLabel,
+      segments: draftAction.segments,
+    }, activeDeadline)
+    const validation = new LayoutDraftValidator().validateSpec(spec)
+    expect(validation.errors, JSON.stringify(validation, null, 2)).toEqual([])
+    expect(spec.segments).toHaveLength(layoutReference!.slots.length)
+    const reviewDraft = new LayoutDraftCompiler().compile(spec, {
+      channelId: scheduleState.channelId,
+      channelName: scheduleState.channelName,
+      date: scheduleState.date,
+      userIntent: draftAction.userIntent ?? userInput,
+      source: currentLayoutDraft.source,
+      version: 2,
+    })
+    expect(reviewDraft.layoutReference.slots).toHaveLength(19)
+    expect(reviewDraft.userIntent).toContain('detailItemCount=1')
   }, REAL_LLM_SCENARIO_TIMEOUT_MS)
 
   /**

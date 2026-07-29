@@ -20,10 +20,7 @@ import {
   rehydratePendingTargetSelectionFromAtomicContext,
   type RuntimePendingAtomicContext,
 } from './pendingAtomicContext'
-import {
-  buildForegroundAgentContextPackage,
-  type ForegroundAgentContextPackage,
-} from './foregroundAgentContextPackage'
+import type { ForegroundAgentContextPackage } from './foregroundAgentContextPackage'
 import type { ReactTaskRun } from './reactTaskTypes'
 import {
   AgentServerSessionStore,
@@ -57,6 +54,7 @@ import {
 import type { AgentPlannerAction } from '@/services/llm/agentPlanner'
 import { buildFormalWriteContext } from '@/services/agent/mutationPolicy'
 import { FormalOrchestrationGrantAuthority } from './formalOrchestrationGrant'
+import { buildTrustedForegroundAgentContext } from './trustedForegroundAgentContext'
 
 export interface AgentServerRuntimeOptions {
   runtime?: Pick<SchedulingAgentRuntimeFacade,
@@ -259,11 +257,8 @@ export class AgentServerRuntime {
       return {
         sessionId: session.id,
         decision,
-        contextPackage: buildForegroundAgentContextPackage({
-          latestUserInput: input.userInput,
-          scheduleState: input.scheduleState,
-          currentSchedule: input.currentSchedule,
-          currentLayoutDraft: input.currentLayoutDraft,
+        contextPackage: await buildTrustedForegroundAgentContext({
+          ...input,
           pendingAtomicContext: null,
           activeReactTaskRun: null,
         }),
@@ -272,6 +267,7 @@ export class AgentServerRuntime {
       }
     }
     const deadline = new AgentDeadline()
+    this.activeInstructions.set(session.id, { workspaceKey, deadline })
     const knownSnapshot = session.formalPlaylistWorkspaceKey === workspaceKey && session.formalPlaylistSnapshot
       ? session.formalPlaylistSnapshot
       : foregroundSnapshot
@@ -280,14 +276,19 @@ export class AgentServerRuntime {
       || session.formalPlaylistWorkspaceKey === workspaceKey
     const pendingAtomicContext = input.pendingAtomicContext
       ?? (sameWorkspaceForPending ? session.pendingAtomicContext ?? null : null)
-    const contextPackage = buildForegroundAgentContextPackage({
-      latestUserInput: input.userInput,
-      scheduleState: input.scheduleState,
-      currentSchedule: input.currentSchedule,
-      currentLayoutDraft: input.currentLayoutDraft,
-      pendingAtomicContext,
-      activeReactTaskRun,
-    })
+    let contextPackage: ForegroundAgentContextPackage
+    try {
+      contextPackage = await buildTrustedForegroundAgentContext({
+        ...input,
+        pendingAtomicContext,
+        activeReactTaskRun,
+      })
+    } catch (error) {
+      if (this.activeInstructions.get(session.id)?.deadline === deadline) {
+        this.activeInstructions.delete(session.id)
+      }
+      throw error
+    }
     this.sessions.updateSession(session.id, {
       lastContextPackage: contextPackage,
       pendingCommand: null,
@@ -329,7 +330,6 @@ export class AgentServerRuntime {
           },
         })
     }
-    this.activeInstructions.set(session.id, { workspaceKey, deadline })
     const waitingTimer = setTimeout(() => {
       appendProgress({
         id: `agent-waiting:${session.id}:${Date.now()}`,

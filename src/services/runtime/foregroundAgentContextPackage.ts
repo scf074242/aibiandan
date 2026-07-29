@@ -1,4 +1,4 @@
-import type { LayoutDraft, PlaylistType, ScheduleState } from '@/types/orchestration'
+import type { LayoutDraft, PlaylistType, ScheduleState, ScheduleSummary } from '@/types/orchestration'
 import type { RuntimePendingCommand, RuntimeScheduleItem } from './demoRuntimeFacade'
 import type { RuntimePendingAtomicContext } from './pendingAtomicContext'
 import type { ReactTaskRun } from './reactTaskTypes'
@@ -86,6 +86,27 @@ export interface ForegroundAgentContextPackage {
       constraintKind?: LayoutDraft['columns'][number]['draftConstraintKind']
     }>
   }
+  referencePlaylists: {
+    source: 'history_schedule_reader'
+    available: boolean
+    issue?: 'history_source_unavailable'
+    schedules: Array<{
+      date: string
+      itemCount: number
+      programTypes: Record<string, number>
+      avgRating?: number
+      detailItemCount: number
+      items: Array<{
+        id: string
+        programName?: string
+        startTime: string
+        endTime: string
+        duration?: number
+        programType?: string
+        sequence?: number
+      }>
+    }>
+  }
   review: PendingReviewSnapshot | null
   pending: PendingContextSnapshot | null
   reactTask: {
@@ -140,6 +161,8 @@ export interface BuildForegroundAgentContextPackageInput {
   pendingCommand?: RuntimePendingCommand | null
   pendingAtomicContext?: RuntimePendingAtomicContext | null
   activeReactTaskRun?: ReactTaskRun | null
+  historySchedules?: ScheduleSummary[]
+  historySourceAvailable?: boolean
 }
 
 export type PendingReviewLifecycleExpireReason = 'workspace_changed' | 'next_non_answer'
@@ -248,6 +271,27 @@ export const buildForegroundAgentContextPackage = (
       completeness: draftCompleteness,
       segments: layoutSegments,
     },
+    referencePlaylists: {
+      source: 'history_schedule_reader',
+      available: input.historySourceAvailable === true,
+      ...(input.historySourceAvailable === false ? { issue: 'history_source_unavailable' as const } : {}),
+      schedules: (input.historySchedules ?? []).slice(0, 8).map((schedule) => ({
+        date: schedule.date,
+        itemCount: schedule.itemCount,
+        programTypes: { ...schedule.programTypes },
+        avgRating: schedule.avgRating,
+        detailItemCount: schedule.items?.length ?? 0,
+        items: (schedule.items ?? []).slice(0, 8).map((item) => ({
+          id: item.id,
+          programName: item.programName,
+          startTime: item.startTime,
+          endTime: item.endTime,
+          duration: item.duration,
+          programType: item.programType,
+          sequence: item.sequence,
+        })),
+      })),
+    },
     review,
     pending,
     reactTask: activeReactTaskRun
@@ -338,6 +382,11 @@ const buildBusinessContextForPrompt = (contextPackage: ForegroundAgentContextPac
     segmentCount: contextPackage.layoutDraft.segmentCount,
     completeness: contextPackage.layoutDraft.completeness,
     segments: contextPackage.layoutDraft.segments,
+  },
+  referencePlaylists: contextPackage.referencePlaylists ?? {
+    source: 'history_schedule_reader',
+    available: false,
+    schedules: [],
   },
   pendingReview: contextPackage.review
     ? {
